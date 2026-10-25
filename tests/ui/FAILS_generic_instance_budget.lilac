@@ -2,11 +2,11 @@
 // new argument types, so level 17 alone would have 65,536 instances. The
 // check stops at the instance budget with E068.
 
-A[T]: object {
+A[T]: structure {
     value: T
 }
 
-B[T]: object {
+B[T]: structure {
     value: T
 }
 

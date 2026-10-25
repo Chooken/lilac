@@ -6,11 +6,11 @@ set: function (r: ref @bit32, v: @bit32) nothing {
     r = v
 }
 
-Inner: object {
+Inner: structure {
     v: @bit32
 }
 
-Outer: object {
+Outer: structure {
     inner: Inner
 
     poke: function (self) nothing {

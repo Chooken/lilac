@@ -42,7 +42,7 @@ next: function () r: @bit64 {
 }
 
 // Formatted text kept for parsing.
-Text: object {
+Text: structure {
     used: @bit_native
     bytes: @array(@bit8, 0x1000)
 

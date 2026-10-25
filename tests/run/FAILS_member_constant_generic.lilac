@@ -2,7 +2,7 @@
 // A constant of `Gen[T]` is one value for every instance, so it cannot
 // name `T`.
 
-Gen[T]: object {
+Gen[T]: structure {
     EMPTY: T => 0x0
     item: T
 }

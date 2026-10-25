@@ -11,56 +11,56 @@
 // expect-stdout: apply 12 13 14
 // expect-stdout: apply 5 8
 // expect-stdout: value 9 10 11 4 6
-// Objects by value through the C ABI, against C compiled by Clang
+// Structures by value through the C ABI, against C compiled by Clang
 // (`objects.c`): floats in vector registers, bytes packed in an integer,
 // an odd-sized struct, a mixed pair, large structs in memory with the
-// registers used up, an enum as its tagged union, a nested struct, and
+// registers used up, an either as its tagged union, a nested struct, and
 // C calling Lilac exports by name and through function pointers.
 
 using Standard
 using Standard.Io
 
-Vec2: object {
+Vec2: structure {
     x: Float32
     y: Float32
 }
 
-Vec3: object {
+Vec3: structure {
     x: Float32
     y: Float32
     z: Float32
 }
 
-Color: object {
+Color: structure {
     r: Uint8
     g: Uint8
     b: Uint8
     a: Uint8
 }
 
-Rgb: object {
+Rgb: structure {
     a: Uint8
     b: Uint8
     c: Uint8
 }
 
-Mixed: object {
+Mixed: structure {
     d: Float64
     i: Uint32
 }
 
-Big: object {
+Big: structure {
     a: Uint64
     b: Uint64
     c: Uint64
 }
 
-Num: enum {
+Num: either {
     Whole: Uint32
     Real: Float32
 }
 
-Sprite: object {
+Sprite: structure {
     position: Vec2
     tint: Color
 }

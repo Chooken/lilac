@@ -45,7 +45,7 @@ fn generics_and_calls_parse() {
 
 #[test]
 fn array_types_and_values_parse() {
-    let src = "Grid: object {
+    let src = "Grid: structure {
 rows: @array(@array(@bit16, 3), 0x2)
 }
 
@@ -56,7 +56,7 @@ copy: @array(@bit32, 4) = @array(@bit32, 4) {}
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected an object");
+        panic!("expected a structure");
     };
     let ItemKind::Field { ty } = &members[0].kind else {
         panic!("expected a field");
@@ -97,7 +97,7 @@ a: @array(@bit8) {}
 
 #[test]
 fn recovery_reports_each_broken_item() {
-    let src = "broken1: function ( nothing {}\nbroken2: object {\n";
+    let src = "broken1: function ( nothing {}\nbroken2: structure {\n";
     let (_, diags, _) = parse(src);
     assert!(diags.diagnostics().len() >= 2);
 }
@@ -146,7 +146,7 @@ fn item_error_recovery() {
 
 #[test]
 fn object_field_parses() {
-    let src = "Object: object {\n    member: @bit8\n}\n";
+    let src = "Object: structure {\n    member: @bit8\n}\n";
     let (program, diags, _) = parse(src);
     assert!(
         !diags.has_errors(),
@@ -155,7 +155,7 @@ fn object_field_parses() {
     );
     assert_eq!(program.items.len(), 1);
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected object, got {:?}", program.items[0].kind);
+        panic!("expected structure, got {:?}", program.items[0].kind);
     };
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].name, "member");
@@ -582,13 +582,13 @@ match m {
 fn enum_bodies_parse_nested_types() {
     // Parsed so the resolver can reject them (`E036`).
     let (program, diags, _) = parse(
-        "Status: enum {
+        "Status: either {
 Idle
 Busy: Job
-Job: object {
+Job: structure {
     id: @bit32
 }
-Kind: enum { A, B }
+Kind: either { A, B }
 }
 ",
     );
@@ -661,7 +661,7 @@ fn qualified_match_patterns() {
 #[test]
 fn enum_members_parse() {
     let (program, diags, _) = parse(
-        "Opt[T]: enum {\n    Some: T\n    None\n    Callback: ref function (x: @bit8) nothing\n    get: function (self) v: T {\n    }\n    @on_drop: function (self) nothing {}\n    map[U]: function (self) nothing {}\n    private {\n        helper: function () nothing => 0x0\n    }\n}\n",
+        "Opt[T]: either {\n    Some: T\n    None\n    Callback: ref function (x: @bit8) nothing\n    get: function (self) v: T {\n    }\n    @on_drop: function (self) nothing {}\n    map[U]: function (self) nothing {}\n    private {\n        helper: function () nothing => 0x0\n    }\n}\n",
     );
     assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
     let ItemKind::Enum {
@@ -794,13 +794,13 @@ fn func_type_position_parses() {
 /// field, a parameter and a global.
 #[test]
 fn ref_export_function_types_parse() {
-    let src = "Order: object {\n    compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32\n}\n\
+    let src = "Order: structure {\n    compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32\n}\n\
 sort: function (compare: ref export function (@bit32) @bit32) nothing {\n}\n\
 handler: ref export function () nothing\n";
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected an object");
+        panic!("expected a structure");
     };
     let ItemKind::Field { ty: field } = &members[0].kind else {
         panic!("expected a field");
@@ -873,15 +873,70 @@ fn empty_function_type_outs_is_e001() {
     );
 }
 
+/// `object` and `enum` are no longer keywords: a declaration spelled with
+/// one is an error whose fix is the new keyword, and still parses whole.
+#[test]
+fn old_type_keywords_suggest_the_new_ones() {
+    let src = "A: object {
+    x: @bit8
+}
+B: enum {
+    Some: A
+    Inner: object {}
+    None
+}
+";
+    let (program, diags, _) = parse(src);
+    let fixes: Vec<_> = diags
+        .diagnostics()
+        .iter()
+        .map(|d| {
+            assert_eq!(d.code, "E001", "{diags:?}");
+            let fix = d.suggestions().next().expect("a fix");
+            (fix.span.lo.0, fix.span.hi.0, fix.replacement.clone())
+        })
+        .collect();
+    assert_eq!(
+        fixes,
+        vec![
+            (3, 9, "structure".to_owned()),
+            (30, 34, "either".to_owned()),
+            (60, 66, "structure".to_owned()),
+        ],
+        "{diags:?}"
+    );
+    assert!(matches!(program.items[0].kind, ItemKind::Object { .. }));
+    let ItemKind::Enum {
+        variants, members, ..
+    } = &program.items[1].kind
+    else {
+        panic!("expected an either");
+    };
+    assert_eq!((variants.len(), members.len()), (2, 1));
+}
+
+/// `object` and `enum` are ordinary names now.
+#[test]
+fn old_type_keywords_are_names() {
+    let src = "main: function () nothing {
+    object: @bit8 = 0x1
+    enum: @bit8 = object
+}
+";
+    let (_, diags, _) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+}
+
 /// Declarations keep unparenthesized outs, in a type's body too.
 #[test]
 fn declarations_keep_bare_outs() {
-    let src = "Pair: enum {\n    One\n    split: function (self) a: @bit8, b: @bit8 {\n    }\n}\n\
+    let src =
+        "Pair: either {\n    One\n    split: function (self) a: @bit8, b: @bit8 {\n    }\n}\n\
 divide: function (n: @bit32) q: @bit32, r: @bit32 {\n}\n";
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Enum { members, .. } = &program.items[0].kind else {
-        panic!("expected an enum");
+        panic!("expected an either");
     };
     let ItemKind::Func(split) = &members[0].kind else {
         panic!("expected a method");
@@ -899,14 +954,14 @@ divide: function (n: @bit32) q: @bit32, r: @bit32 {\n}\n";
 #[test]
 fn declarations_may_parenthesize_outs() {
     let src =
-        "Pair: enum {\n    One\n    split: function (self) (a: @bit8, b: @bit8) {\n    }\n}\n\
+        "Pair: either {\n    One\n    split: function (self) (a: @bit8, b: @bit8) {\n    }\n}\n\
 divide: function (n: @bit32) (q: @bit32, r: @bit32) else (code: @bit32, why: @bit8) {\n}\n\
 pair: extern function () (a: @bit32, b: @bit32)\n\
 one: function () (a: @bit32) => 0x1\n";
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Enum { members, .. } = &program.items[0].kind else {
-        panic!("expected an enum");
+        panic!("expected an either");
     };
     let ItemKind::Func(split) = &members[0].kind else {
         panic!("expected a method");
@@ -942,7 +997,7 @@ fn ref_ref_function_is_e001() {
 
 #[test]
 fn enum_payloads_parse() {
-    let src = "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\n";
+    let src = "OptionalBit32: either {\n    Some: @bit32\n    None\n}\n";
     let (program, diags, _) = parse(src);
     assert!(
         !diags.has_errors(),
@@ -950,7 +1005,7 @@ fn enum_payloads_parse() {
         diags.diagnostics()
     );
     let ItemKind::Enum { variants, .. } = &program.items[0].kind else {
-        panic!("expected enum, got {:?}", program.items[0].kind);
+        panic!("expected either, got {:?}", program.items[0].kind);
     };
     assert_eq!(variants.len(), 2);
     assert!(variants[0].payload.is_some());
@@ -1035,7 +1090,7 @@ fn lowercase_struct_literal_in_let() {
     // Case never decides: any identifier opens a struct literal outside
     // head position (the checker rejects unknown type names later).
     let (stmt, diags) = first_stmt(
-        "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    v: Object = foo { member = 0x1 }\n}\n",
+        "Object: structure {\n    member: @bit8\n}\nmain: function () nothing {\n    v: Object = foo { member = 0x1 }\n}\n",
     );
     assert!(
         !diags.has_errors(),
@@ -1105,7 +1160,7 @@ fn private_block_parses_items() {
 
 #[test]
 fn private_block_inside_object_parses() {
-    let src = "Object: object {\n    private {\n        helper: function () nothing {}\n        secret: @bit8\n    }\n}\n";
+    let src = "Object: structure {\n    private {\n        helper: function () nothing {}\n        secret: @bit8\n    }\n}\n";
     let (program, diags, _) = parse(src);
     assert!(
         !diags.has_errors(),
@@ -1113,7 +1168,7 @@ fn private_block_inside_object_parses() {
         diags.diagnostics()
     );
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected object, got {:?}", program.items[0].kind);
+        panic!("expected structure, got {:?}", program.items[0].kind);
     };
     let ItemKind::Private { items } = &members[0].kind else {
         panic!("expected private block, got {:?}", members[0].kind);
@@ -1485,14 +1540,14 @@ fn poison_type_before_non_eq_is_single_diagnostic() {
 
 #[test]
 fn self_is_its_own_type_shape() {
-    let src = "Box: object {
+    let src = "Box: structure {
     same: function (ref self, other: ref self) nothing {}
 }
 ";
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected an object");
+        panic!("expected a structure");
     };
     let ItemKind::Func(func) = &members[0].kind else {
         panic!("expected a method");
@@ -1503,7 +1558,7 @@ fn self_is_its_own_type_shape() {
 
 #[test]
 fn self_takes_no_generic_arguments() {
-    let src = "Box: object {
+    let src = "Box: structure {
     same: function (ref self[@bit8]) nothing {}
 }
 ";
@@ -1766,7 +1821,7 @@ fn a_dot_ending_a_line_takes_no_name() {
 #[test]
 fn signatures_declare_failure_outs() {
     let (program, diags, _) = parse(
-        "a: function () value: @bit8 else nothing {\n}\nb: function () else why: @bit8, code: @bit32 {\n}\nc: function () value: @bit8 {\n}\nE: enum {\n    V\n    get: function (self) value: @bit8 else nothing {\n    }\n}\n",
+        "a: function () value: @bit8 else nothing {\n}\nb: function () else why: @bit8, code: @bit32 {\n}\nc: function () value: @bit8 {\n}\nE: either {\n    V\n    get: function (self) value: @bit8 else nothing {\n    }\n}\n",
     );
     assert!(!diags.has_errors(), "{:?}", diags.diagnostics());
     let failures = |index: usize| match &program.items[index].kind {
@@ -1893,15 +1948,15 @@ fn bad_aliases_are_e001_and_parsing_goes_on() {
 #[test]
 fn aliases_in_type_bodies_parse_for_the_resolver() {
     // Rejected by the resolver (`E036`), like nested types.
-    let src = "Thing: object {\n    Inner: alias @bit8\n}\nKind: enum {\n    One\n    Inner: alias @bit8\n}\n";
+    let src = "Thing: structure {\n    Inner: alias @bit8\n}\nKind: either {\n    One\n    Inner: alias @bit8\n}\n";
     let (program, diags, _) = parse(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("expected an object");
+        panic!("expected a structure");
     };
     assert!(matches!(members[0].kind, ItemKind::Alias { .. }));
     let ItemKind::Enum { members, .. } = &program.items[1].kind else {
-        panic!("expected an enum");
+        panic!("expected an either");
     };
     assert!(matches!(members[0].kind, ItemKind::Alias { .. }));
 }
@@ -1945,7 +2000,7 @@ fn doc_of(item: &Item) -> &str {
 fn doc_comments_document_declarations() {
     let src = "\
 /// A point.
-Point: object {
+Point: structure {
     /// Across.
     x: @bit8
     /// Its length.
@@ -1959,7 +2014,7 @@ Point: object {
     }
 }
 /// A shape.
-Shape: enum {
+Shape: either {
     /// A dot.
     Dot
     Line: @bit8
@@ -1991,7 +2046,7 @@ main: function () nothing {
         ]
     );
     let ItemKind::Object { members, .. } = &program.items[0].kind else {
-        panic!("object");
+        panic!("structure");
     };
     let ItemKind::Private { items } = &members[3].kind else {
         panic!("private block");
@@ -2002,7 +2057,7 @@ main: function () nothing {
     );
     assert_eq!(doc_of(&items[0]), "Hidden.");
     let ItemKind::Enum { variants, .. } = &program.items[1].kind else {
-        panic!("enum");
+        panic!("either");
     };
     let variant_docs: Vec<Option<&str>> = variants
         .iter()
@@ -2055,7 +2110,7 @@ fn a_failed_item_keeps_its_own_header() {
     );
     // A member that failed inside it is not the object's header.
     assert_eq!(
-        header("Holder: object {\n    main: function (\n"),
+        header("Holder: structure {\n    main: function (\n"),
         Some(("Holder".to_owned(), false))
     );
     // `}` where a name belongs: no header was read.

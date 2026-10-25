@@ -1,4 +1,4 @@
-foo: object {
+foo: structure {
     bar: function (cell: ref @bit8) nothing {
         @store_u8(cell, 0x0, 0x1)
     }

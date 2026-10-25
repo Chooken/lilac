@@ -23,7 +23,7 @@ bytes: function (memory: ref unknown) ref @bit8 => memory as ref @bit8
 
 address: function (memory: ref unknown) Int => @ptr_to_address(memory)
 
-Pair: object {
+Pair: structure {
     a: @bit64
     b: @bit32
 }

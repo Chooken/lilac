@@ -2,9 +2,9 @@
 // expect-stdout: |HHTabc
 // expect-stdout: |2Tabc
 // expect-stdout: |Ho
-// Drops recurse: an object's own hook runs before its fields, fields drop
-// in declaration order at every depth, an object with no hook still drops
-// its fields, generic holders nest, an enum drops only its live payload
+// Drops recurse: a structure's own hook runs before its fields, fields drop
+// in declaration order at every depth, a structure with no hook still drops
+// its fields, generic holders nest, an either drops only its live payload
 // (none for a variant without one), and `Optional` drops its payload.
 // Each hook ignores a zero value, so the output does not depend on zero
 // drops.
@@ -12,7 +12,7 @@
 using Standard
 using Standard.Io
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -24,12 +24,12 @@ Leaf: object {
 }
 
 // No hook: dropped by glue alone.
-Mid: object {
+Mid: structure {
     a: Leaf
     b: Leaf
 }
 
-Top: object {
+Top: structure {
     m: Mid
     c: Leaf
 
@@ -41,7 +41,7 @@ Top: object {
     }
 }
 
-Holder[T]: object {
+Holder[T]: structure {
     value: T
     live: Bool
 
@@ -52,7 +52,7 @@ Holder[T]: object {
     }
 }
 
-Choice: enum {
+Choice: either {
     One: Top
     Two: Leaf
     Empty

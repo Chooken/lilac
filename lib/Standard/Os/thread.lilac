@@ -10,7 +10,7 @@ using Standard.Os.Linux as Linux
 
 /// A running thread from `spawn`. `join` it exactly once; nothing frees it
 /// otherwise.
-Thread: object {
+Thread: structure {
     /// The Windows thread handle, or the `pthread_t`; native Linux keeps
     /// the thread id.
     value: @bit_native
@@ -112,7 +112,7 @@ yield_thread: function () nothing {
 
 private {
     /// The block `thread_start` reads: the function, then its argument.
-    StartBlock: object {
+    StartBlock: structure {
         entry: ref ThreadEntry
         argument: ref unknown
     }

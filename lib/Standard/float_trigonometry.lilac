@@ -15,7 +15,7 @@
 private {
     /// An argument reduced to an angle: the quadrant `n` (0 to 3) and the
     /// angle `t` in `[-pi/4, pi/4]` with `a = n pi/2 + t` modulo `2 pi`.
-    Reduced: object {
+    Reduced: structure {
         quadrant: Int32
         angle: Dd
     }

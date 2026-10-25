@@ -9,7 +9,7 @@
 using Standard
 using Standard.Io
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -17,7 +17,7 @@ Leaf: object {
     }
 }
 
-Pair: object {
+Pair: structure {
     left: Leaf
     right: Leaf
 }

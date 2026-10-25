@@ -1,11 +1,11 @@
 // expect-exit: 0
 // `ref` of an `export` is a C function: Lilac calls it through a local with
-// the C ABI (a wrapper object passes and returns its field), and converts it
+// the C ABI (a wrapper structure passes and returns its field), and converts it
 // to `ref unknown` and back.
 
 using Standard.Process
 
-Wrapped: object {
+Wrapped: structure {
     value: @bit32
 }
 

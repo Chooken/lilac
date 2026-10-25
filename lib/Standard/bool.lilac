@@ -1,4 +1,4 @@
-Bool: object {
+Bool: structure {
 
     private {
         data: @bit8

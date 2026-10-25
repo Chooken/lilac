@@ -1,5 +1,5 @@
 // setters need to define all members
-Object: object {
+Object: structure {
     member: @bit8
 }
 

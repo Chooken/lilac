@@ -167,7 +167,7 @@ impl Checker<'_> {
                     format!("`{name}` is already a reference; it cannot take `ref`"),
                 )
                 .label(ty.span, true, format!("write `{name}`"))
-                .help("double references are invalid unless wrapped inside an object"),
+                .help("double references are invalid unless wrapped inside a structure"),
             );
             return TypeRef::ERROR;
         }

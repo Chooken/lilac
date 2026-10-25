@@ -1,7 +1,7 @@
 using Standard.Collections
 using Standard.Heap as Heap
 
-String: object {
+String: structure {
 
     private {
         layout: StringLayout
@@ -66,12 +66,12 @@ String: object {
     }
 }
 
-StringLayout: enum {
+StringLayout: either {
     Inline: StringInline
     Heap: StringBuffer
 }
 
-StringInline: object {
+StringInline: structure {
 
     buffer: @array(Uint8, 15)
     count: Uint8
@@ -121,7 +121,7 @@ StringInline: object {
     }
 }
 
-StringBuffer: object {
+StringBuffer: structure {
 
     private {
         list: List[Uint8]

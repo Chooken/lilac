@@ -36,11 +36,11 @@ Order: 1 → 2 → 3 → 4. Phase 1 is small and independent; 2 must precede 3
 
 ---
 
-## Phase 0: Constant `==` on enums (done, `70e6f5e`)
+## Phase 0: Constant `==` on eithers (done, `70e6f5e`)
 
 - `HirExprKind::Eq` in the constant evaluator
-  (`crates/lilac-lower/src/constant.rs`) compares whole values, so enum and
-  object equality is constant.
+  (`crates/lilac-lower/src/constant.rs`) compares whole values, so either and
+  structure equality is constant.
 - A tag operand (`.Windows`, `.Some(x)`) takes its type from the other
   side (`needs_context` in `crates/lilac-typeck/src/expr.rs`).
 - Tests: `tests/run/const_cond_enum_eq.lilac`, and the `==` form in
@@ -193,7 +193,7 @@ with a name but no body also recovers (with its `E001`).
   tag and no body. Test: the rest of the function still checks (today a
   bare `.` in a `match` loses the function, reported as
   `expected declaration name`).
-- **4.2 Tag sites.** Typeck records every tag position with the enum it
+- **4.2 Tag sites.** Typeck records every tag position with the either it
   expects: `HirProgram::tags: Vec<TagSite { span, ty: Option<TypeId> }>`.
   Patterns get the scrutinee's type (`body.rs` `check_pattern`, and
   `check_match_value`); expression tags get their expected type
@@ -210,15 +210,15 @@ with a name but no body also recovers (with its `E001`).
   parked request is answered from it; a later edit keeps it parked until
   the next compile. Cancellation (`$/cancelRequest`) drops it.
 - **4.5 Answer.** After a bare `.`: the tag site containing the cursor; if
-  its type is a known enum, that enum's variants (in a `match` pattern,
+  its type is a known either, that either's variants (in a `match` pattern,
   minus the variants other arms already name); otherwise no items.
   Remove `Scope::variants`.
 - **4.6 Docs.** `AGENTS.md` "Editing" (completion now waits for a compile
   for tags).
 - **4.7 Tests.** In `crates/lilac-lsp/tests/editing.rs`:
   - `match c { .Red => … ⟨.⟩ }` lists only `Color`'s remaining variants.
-  - `x: Color = .`, `f(.)`, and `os == .` list that enum's variants.
-  - A `.` with no expected enum lists nothing.
+  - `x: Color = .`, `f(.)`, and `os == .` list that either's variants.
+  - A `.` with no expected either lists nothing.
   - Top-level `match @builtin.Target.os { . }` lists the `Os` variants.
   - An edit arriving while the request is parked: the answer comes from
     the newer compile.

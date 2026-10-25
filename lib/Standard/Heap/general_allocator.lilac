@@ -23,7 +23,7 @@ using Standard.Os as Os
 /// free and resize checks that: memory this allocator did not give, a
 /// wrong size or alignment, a double free, and a write to freed memory
 /// that is then reallocated all panic.
-GeneralAllocator: object {
+GeneralAllocator: structure {
 
     private {
         // Every size class's freed slots and slabs; mapped by `new`.
@@ -471,12 +471,12 @@ private {
 
     /// Every size class's state. The table is mapped by `new`, which
     /// writes each state, so no state depends on zeroed memory.
-    ClassTable: object {
+    ClassTable: structure {
         classes: @array(SizeClass, 36)
     }
 
     /// One size class: its freed slots and its slabs.
-    SizeClass: object {
+    SizeClass: structure {
         // The most recently freed slot.
         free: Optional[ref FreeSlot]
         // The newest slab, the one slots are carved from.
@@ -484,14 +484,14 @@ private {
     }
 
     /// A freed slot: the slot freed before it.
-    FreeSlot: object {
+    FreeSlot: structure {
         next: Optional[ref FreeSlot]
     }
 
     /// A slab's header, at its end so the slots start at its first page
     /// (aligned as the slot size is, up to a page). In a Debug build it is
     /// followed by a live flag byte per slot.
-    Slab: object {
+    Slab: structure {
         base: ref unknown
         // Bytes mapped.
         size: Int
@@ -504,7 +504,7 @@ private {
     }
 
     /// A large allocation's header, just before it.
-    LargeHeader: object {
+    LargeHeader: structure {
         mapping: ref unknown
         mapping_size: Int
         // Bytes the allocation takes, as requested.

@@ -9,15 +9,15 @@
 // expect-stdout: u|uU
 // A reference capture (`-> v: ref P` on a `P` payload) is the payload's
 // slot inside the matched value: writes through it change the value in
-// place, on a local, a global, a field, through a `ref`, and in an enum
+// place, on a local, a global, a field, through a `ref`, and in an either
 // with its own `@on_drop`. `v = value` drops the old payload once;
-// `v = ref other` rebinds `v` and leaves the enum alone. On an
+// `v = ref other` rebinds `v` and leaves the either alone. On an
 // `Optional[ref X]`, `get_ref` is the stored reference.
 
 using Standard
 using Standard.Io
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -25,13 +25,13 @@ Leaf: object {
     }
 }
 
-Holder: object {
+Holder: structure {
     slot: Optional[@bit32]
 }
 
-// An enum with its own `@on_drop`: its payload cannot move out, but a
+// An either with its own `@on_drop`: its payload cannot move out, but a
 // reference capture moves nothing.
-Guarded: enum {
+Guarded: either {
     Held: @bit32
     Gone
 
@@ -145,7 +145,7 @@ main: function () nothing {
     }
     show(plain)
 
-    // An enum with its own `@on_drop`, changed in place; it drops once.
+    // An either with its own `@on_drop`, changed in place; it drops once.
     {
         guarded: Guarded = .Held('t')
         match guarded {

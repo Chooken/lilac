@@ -54,14 +54,14 @@ getcwd: function (buf: ref unknown, size: @bit_native) @bit_native => @linux_sys
 chdir: function (path: ref @bit8) @bit_native => @linux_syscall(call_number(80, 49), @ptr_to_address(path as ref unknown), 0x0, 0x0, 0x0, 0x0, 0x0)
 
 /// `struct statx_timestamp`.
-StatxTimestamp: object {
+StatxTimestamp: structure {
     tv_sec: @bit64
     tv_nsec: @bit32
     reserved: @bit32
 }
 
 /// `struct statx`: the same on every architecture (256 bytes).
-Statx: object {
+Statx: structure {
     stx_mask: @bit32
     stx_blksize: @bit32
     stx_attributes: @bit64

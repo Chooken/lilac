@@ -94,7 +94,7 @@ pub enum TypeKind {
     },
     /// `unknown` opaque type (only behind `ref`).
     Unknown,
-    /// User-declared `object`.
+    /// User-declared `structure`.
     Object(DefId),
     /// A declaration's generic parameter placeholder (`T` is index 0).
     /// Appears only in templates, never in concrete output.
@@ -315,7 +315,7 @@ impl Types {
         Builtin::named(name).map(Builtin::id)
     }
 
-    /// Interns (or finds) the type for a user `object`.
+    /// Interns (or finds) the type for a user `structure`.
     pub fn intern_object(&mut self, def: DefId) -> TypeId {
         if let Some(&id) = self.objects.get(&def) {
             return id;
@@ -455,7 +455,7 @@ impl Types {
         self.object_names
             .get(&def)
             .cloned()
-            .unwrap_or_else(|| format!("object#{}", def.0))
+            .unwrap_or_else(|| format!("structure#{}", def.0))
     }
 
     /// Interns (or finds) a `function (params) returns` type.

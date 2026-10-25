@@ -50,9 +50,9 @@ pub enum DefKind {
     Func(Arc<FuncDecl>),
     /// `@name: function ...` (operator, conversion, or RAII hook).
     Hook(Arc<FuncDecl>),
-    /// `name: object { ... }`.
+    /// `name: structure { ... }`.
     Object,
-    /// `name: enum { ... }`.
+    /// `name: either { ... }`.
     Enum,
     /// `name: alias Type`: another name for a type.
     Alias(AstType),
@@ -667,8 +667,8 @@ impl Collector<'_> {
     /// `E036`: types are declared only at the top level of a file.
     fn nested_type(&mut self, owner: DefId, item: &Item) {
         let kind = match item.kind {
-            ItemKind::Object { .. } => "an object",
-            ItemKind::Enum { .. } => "an enum",
+            ItemKind::Object { .. } => "a structure",
+            ItemKind::Enum { .. } => "an either",
             _ => "an alias",
         };
         let owner = self.resolved.def(owner);
@@ -972,7 +972,7 @@ mod tests {
     #[test]
     fn hooks_are_unit_global_and_unscoped() {
         let (resolved, file, diags) = resolve_one(
-            "@add: function (a: @bit8, b: @bit8) r: @bit8 => a\n@add: function (a: @bit32, b: @bit32) r: @bit32 => a\nNum: object {\n    d: @bit8\n    @negate: function (v: Num) r: Num => v\n}\n",
+            "@add: function (a: @bit8, b: @bit8) r: @bit8 => a\n@add: function (a: @bit32, b: @bit32) r: @bit32 => a\nNum: structure {\n    d: @bit8\n    @negate: function (v: Num) r: Num => v\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         assert_eq!(resolved.hooks.len(), 3);
@@ -987,7 +987,7 @@ mod tests {
     #[test]
     fn members_fields_and_private() {
         let (resolved, file, diags) = resolve_one(
-            "Object: object {\n    a: @bit8\n    private {\n        b: @bit8\n        hidden: function () nothing {}\n    }\n    get: function (self) nothing {}\n}\n",
+            "Object: structure {\n    a: @bit8\n    private {\n        b: @bit8\n        hidden: function () nothing {}\n    }\n    get: function (self) nothing {}\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let object = one(&resolved, file, "Object");
@@ -1008,7 +1008,7 @@ mod tests {
     #[test]
     fn enum_variants_and_members() {
         let (resolved, file, diags) = resolve_one(
-            "Opt[T]: enum {\n    Some: T\n    None\n    get: function (self) v: T {}\n}\n",
+            "Opt[T]: either {\n    Some: T\n    None\n    get: function (self) v: T {}\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let opt = one(&resolved, file, "Opt");
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn variant_and_method_clash_is_e020() {
-        let (_, _, diags) = resolve_one("E: enum {\n    A\n    A: function () nothing {}\n}\n");
+        let (_, _, diags) = resolve_one("E: either {\n    A\n    A: function () nothing {}\n}\n");
         assert_eq!(e020(&diags), 1, "{diags:?}");
     }
 
@@ -1343,14 +1343,14 @@ shown: function () nothing {}
 
     #[test]
     fn alias_names_clash_like_any_item() {
-        let (_, _, diags) = resolve_one("Thing: alias @bit8\nThing: object {}\n");
+        let (_, _, diags) = resolve_one("Thing: alias @bit8\nThing: structure {}\n");
         assert_eq!(e020(&diags), 1);
     }
 
     #[test]
     fn aliases_inside_types_are_e036() {
         let (resolved, file, diags) = resolve_one(
-            "Thing: object {\n    Inner: alias @bit8\n}\nKind: enum {\n    One\n    Inner: alias @bit8\n}\n",
+            "Thing: structure {\n    Inner: alias @bit8\n}\nKind: either {\n    One\n    Inner: alias @bit8\n}\n",
         );
         let codes: Vec<_> = diags.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(codes, ["E036", "E036"]);
@@ -1361,8 +1361,8 @@ shown: function () nothing {}
     #[test]
     fn definitions_carry_their_doc_comments() {
         let (resolved, file, diags) = resolve_one(
-            "/// A point.\nPoint: object {\n    /// Across.\n    x: @bit8\n}\n\
-             Shape: enum {\n    /// A dot.\n    Dot\n    Line: @bit8\n}\n",
+            "/// A point.\nPoint: structure {\n    /// Across.\n    x: @bit8\n}\n\
+             Shape: either {\n    /// A dot.\n    Dot\n    Line: @bit8\n}\n",
         );
         assert!(!diags.has_errors(), "{diags:?}");
         let doc = |id: DefId| resolved.def(id).doc.as_ref().map(|doc| doc.text.clone());

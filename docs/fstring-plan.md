@@ -23,7 +23,7 @@
 >   would break every program that mounts it.
 > - **Type aliases**, so `Standard` can name the type: `Format: alias
 >   @format_args(Formatter)`. `alias` becomes a keyword (nothing in `lib`
->   or `tests` uses it as a name). Alternative: a wrapper object, as `Int`
+>   or `tests` uses it as a name). Alternative: a wrapper structure, as `Int`
 >   wraps `@bit_native`. It would hold a borrowed view, so the rules in
 >   "Where a format can live" would have to follow formats into user
 >   types, and the slot rules in "Typing" would not reach it.
@@ -116,7 +116,7 @@ A type is formattable into `W` when it has a `@format` hook for `W`.
 With `Standard`, user code reads:
 
 ```lilac
-Point: object {
+Point: structure {
     x: Int
     y: Int
 
@@ -147,13 +147,13 @@ Point: object {
 ### The formatter belongs to the library
 
 The compiler fixes nothing about `W`: no builtin sink, no fields, no
-functions. `Standard` defines one, an ordinary object. This is library
+functions. `Standard` defines one, an ordinary structure. This is library
 code, and the library is the only place the builtins appear:
 
 ```lilac
 // Where formatted text goes. A consumer makes one over its own storage;
 // a type's `@format` writes into the one it is given.
-Formatter: object {
+Formatter: structure {
     private {
         target: ref unknown
         sink: function (ref unknown, @byte_buffer) nothing
@@ -312,8 +312,8 @@ Format: alias @format_args(Formatter)
 - **Transparent**: an alias *is* its type (one `TypeId`). There is no
   conversion, and it has the same hooks, layout and symbols. It may be
   used wherever a type can: parameters, locals, generic arguments, `as`,
-  and struct literals and static paths when it names an object.
-- **An item like an object**: top level only (`E036` inside a type),
+  and struct literals and static paths when it names a structure.
+- **An item like a structure**: top level only (`E036` inside a type),
   namespaced and visible like any item (`private { }`, `using`), and a
   name clash is `E020`.
 - **Not generic** (`Name[T]: alias …` is `E001`), but it may name an
@@ -340,7 +340,7 @@ call that made it, and these rules keep it there with no borrow checker:
 
 - **Only locals and parameters hold one.** `@format_args(W)` may be the
   type of a local, a parameter (by value or `ref`) or a `ref` local,
-  never of a field, enum payload, array element, out or global (`E072`).
+  never of a field, either payload, array element, out or global (`E072`).
   A generic instance that would put one there (`Optional[Format]`) fails
   with `E072`, folded into `E042` at the use. So no format leaves its
   frame through a type; to keep the text, format it into a `String`. (C#
@@ -455,7 +455,7 @@ Each test defines its own small formatter type and hooks, so it passes
 at Phase 4 without waiting for `Standard`.
 
 - **0.1 Owned holes.** A `// pending:` run test written for the new
-  model: an object with `@on_drop` and a `@format`, used in a hole and
+  model: a structure with `@on_drop` and a `@format`, used in a hole and
   then again. Target: it compiles, prints once, and drops once. (Written
   today with a `@conversion` to `@byte_buffer`, the same program is
   `E063` on the second use.)
@@ -477,8 +477,8 @@ at Phase 4 without waiting for `Standard`.
 - **1.3 Typeck**: an alias resolves to its type on first use and is
   memoized; a cycle is `E074` at the alias that closes it; arguments on an
   alias, and an alias of a generic without its arguments, are `E044`.
-  Static paths and struct literals through an alias of an object resolve
-  to the object. Display goes through a table of the types exactly one
+  Static paths and struct literals through an alias of a structure resolve
+  to the structure. Display goes through a table of the types exactly one
   alias names (`Types::display`, `display_bounded`); mangling and layouts
   ignore it.
 - **1.4 Language server**: hover (`Format: alias @format_args(Formatter)`),
@@ -486,7 +486,7 @@ at Phase 4 without waiting for `Standard`.
   type.
 - **1.5 Tests and docs**: parser, resolver and typeck unit tests;
   `FAILS_` tests for `E074`, `E036`, `E044` and `E020`; a run test with
-  aliases of a builtin, an object, a generic instance and a function
+  aliases of a builtin, a structure, a generic instance and a function
   type; LSP tests for hover and rename. `SPEC.md` §6 (a "Type aliases"
   subsection), `STDLIB.md` §0.1 (type aliases exist; re-exports still do
   not), `docs/errors/E074.md`, and the TextMate grammar's keywords.

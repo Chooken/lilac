@@ -3,7 +3,7 @@
 // A type with its own `@on_drop` and no `@on_copy` moves when read, so
 // the place it was read from is empty after.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

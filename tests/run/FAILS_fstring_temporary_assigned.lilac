@@ -1,7 +1,7 @@
 // expect-error: E072
 // A hole that borrows a temporary ends with the statement, so its format
 // cannot be assigned to a local that outlives it.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

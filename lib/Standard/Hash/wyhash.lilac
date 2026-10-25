@@ -1,6 +1,6 @@
 
 
-Wyhash: object {
+Wyhash: structure {
     
     private {
         SECRET_0: @bit64 => 0xa0761d6478bd642f

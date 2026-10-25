@@ -1,4 +1,4 @@
-GenBox[T]: object {
+GenBox[T]: structure {
     value: T
 
     @on_drop: function (from: ref GenBox[T]) nothing {

@@ -1,4 +1,4 @@
-Object: object {
+Object: structure {
     value: @bit32
 
     get: function (self) result: Object {

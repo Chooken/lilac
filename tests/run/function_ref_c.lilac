@@ -1,20 +1,20 @@
 // libc
 // expect-stdout: -5 0 7 30
-// A `ref export function` stored in an object: `qsort` gets the
+// A `ref export function` stored in a structure: `qsort` gets the
 // comparator from a field, and Lilac calls the same field itself with
 // the C ABI.
 
 using Standard
 using Standard.Io
 
-Numbers: object {
+Numbers: structure {
     a: @bit32
     b: @bit32
     c: @bit32
     d: @bit32
 }
 
-Order: object {
+Order: structure {
     compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32
 }
 

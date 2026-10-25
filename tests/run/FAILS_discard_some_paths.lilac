@@ -3,7 +3,7 @@
 // Where the paths join, the `@on_drop` would run on one and not the
 // other.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

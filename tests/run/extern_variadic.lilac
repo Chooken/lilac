@@ -6,7 +6,7 @@
 
 using Standard.Process
 
-Buffer: object {
+Buffer: structure {
     a: @bit64
     b: @bit64
     c: @bit64

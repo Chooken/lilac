@@ -8,7 +8,7 @@
 using Standard
 using Standard.Io
 
-Page: object {
+Page: structure {
     bytes: @array(Uint8, 0x1000)
 }
 

@@ -1,5 +1,5 @@
 // C has no empty struct: `E028`.
-Nothing: object {
+Nothing: structure {
 }
 
 get: extern function () result: Nothing

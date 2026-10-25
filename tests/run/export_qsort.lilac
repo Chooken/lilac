@@ -5,7 +5,7 @@
 
 using Standard.Process
 
-Numbers: object {
+Numbers: structure {
     a: @bit32
     b: @bit32
     c: @bit32

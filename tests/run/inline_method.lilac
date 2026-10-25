@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Num: object {
+Num: structure {
     data: @bit32
 
     get: function (self) v: @bit32 => self.data

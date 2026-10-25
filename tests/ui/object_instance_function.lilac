@@ -1,4 +1,4 @@
-Object: object {
+Object: structure {
     member: @bit32
 
     get: function (instance: ref Object) result: @bit32 {

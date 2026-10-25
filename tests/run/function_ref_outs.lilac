@@ -8,7 +8,7 @@
 
 using Standard.Io
 
-Divider: object {
+Divider: structure {
     divide: ref function (n: @bit32, d: @bit32) (quotient: @bit32, remainder: @bit32)
 }
 

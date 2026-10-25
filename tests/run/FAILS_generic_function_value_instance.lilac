@@ -9,7 +9,7 @@ double[T]: function (value: T) out: T {
     out = value + value
 }
 
-Empty: object {}
+Empty: structure {}
 
 main: function () nothing {
     f: ref function (value: Empty) Empty = ref double[Empty]

@@ -1,4 +1,4 @@
-Object: object {
+Object: structure {
     private {
         secret: function () result: @bit8 {
             result = 0x1

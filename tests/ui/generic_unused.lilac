@@ -1,9 +1,9 @@
-GenPut[T]: object {
+GenPut[T]: structure {
     put: function (value: T) nothing {
     }
 }
 
-GenDrop[T]: object {
+GenDrop[T]: structure {
     @on_drop: function (from: ref GenDrop[T]) nothing {
     }
 }

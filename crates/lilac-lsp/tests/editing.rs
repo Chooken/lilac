@@ -11,14 +11,14 @@ use lsp_types::{
 };
 
 const PROGRAM: &str = "\
-Point: object {
+Point: structure {
     x: @bit8
     y: @bit8
     sum: function (self) total: @bit8 {
         total = @i_add_8(self.x, self.y)
     }
 }
-Shape: enum {
+Shape: either {
     Dot
     Line: @bit8
 }
@@ -635,7 +635,7 @@ fn aliases_navigate_complete_and_rename() {
     std::fs::create_dir_all(&app).expect("mkdir");
     std::fs::write(
         lib.join("lib.lilac"),
-        "helper: function () nothing {\n}\nThing: object {\n    v: @bit8\n}\n",
+        "helper: function () nothing {\n}\nThing: structure {\n    v: @bit8\n}\n",
     )
     .expect("write");
     let main = app.join("main.lilac");
@@ -862,7 +862,7 @@ fn static_functions_complete_in_a_declaration() {
     initialize(&client, serde_json::json!({ "capabilities": {} }));
     let uri = Url::parse("file:///c:/shorthand.lilac").expect("uri");
     let program = "\
-Pair: object {
+Pair: structure {
     a: @bit8
     create: function (a: @bit8) pair: Pair {
         pair = Pair { a = a }
@@ -874,7 +874,7 @@ Pair: object {
         a = self.a
     }
 }
-Box[T]: object {
+Box[T]: structure {
     value: T
     create: function (value: T) box: Box[T] {
         box = Box[T] { value = value }
@@ -932,7 +932,7 @@ fn member_constants_complete_on_the_type() {
     initialize(&client, serde_json::json!({ "capabilities": {} }));
     let uri = Url::parse("file:///c:/constants.lilac").expect("uri");
     let program = "\
-Limits: object {
+Limits: structure {
     LOW: @bit8 => 0x1
     HIGH: @bit8 => 0x9
     value: @bit8
@@ -943,12 +943,12 @@ Limits: object {
         value = self.value
     }
 }
-Level: enum {
+Level: either {
     Off
     On
     COUNT: @bit8 => 0x2
 }
-Gen[T]: object {
+Gen[T]: structure {
     SIZE: @bit8 => 0x4
     item: T
 }
@@ -1004,7 +1004,7 @@ fn own_names_complete_inside_the_type() {
     initialize(&client, serde_json::json!({ "capabilities": {} }));
     let uri = Url::parse("file:///c:/own.lilac").expect("uri");
     let program = "\
-Limits: object {
+Limits: structure {
     LOW: @bit8 => 0x1
     value: @bit8
     make: function () limits: Limits {
@@ -1073,7 +1073,7 @@ Combine: alias function (left: @bit8, right: @bit8) total: @bit8
 add: function (a: @bit8, b: @bit8) total: @bit8 {
     total = @i_add_8(a, b)
 }
-Machine: object {
+Machine: structure {
     /// Runs one step.
     step: ref function (input: @bit8, scale: @bit8) output: @bit8
     combine: ref Combine

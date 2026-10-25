@@ -4,18 +4,18 @@
 // expect-stdout: step 6
 // Static vtables: globals whose initializers hold function addresses and
 // other globals' addresses. `COUNTER_TABLE` is a table of functions, and
-// `counter_sink` an interface object pointing at it and at its context,
+// `counter_sink` an interface structure pointing at it and at its context,
 // the global `counter`. Nothing calls the implementations directly: the
 // tables alone keep them alive.
 
 using Standard.Io
 
-Table: object {
+Table: structure {
     add: ref function (context: ref unknown, amount: @bit32) nothing
     total: ref function (context: ref unknown) total: @bit32
 }
 
-Sink: object {
+Sink: structure {
     context: ref unknown
     table: ref Table
 
@@ -28,7 +28,7 @@ Sink: object {
     }
 }
 
-Counter: object {
+Counter: structure {
     count: @bit32
 }
 
@@ -70,7 +70,7 @@ doubler_sink: Sink = Sink {
     table = ref DOUBLER_TABLE
 }
 
-Step: enum {
+Step: either {
     Nothing
     Next: ref function (x: @bit32) @bit32
 }

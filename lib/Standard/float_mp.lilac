@@ -27,7 +27,7 @@ private {
 
     /// `(-1)^negative 0.l0 l1 .. l5 * 2^exponent`, the limbs most significant
     /// first: limb 0's top bit is set unless the value is zero.
-    Mp: object {
+    Mp: structure {
         negative: Bool
         exponent: Int
         limbs: Limbs

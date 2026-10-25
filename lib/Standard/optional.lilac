@@ -1,6 +1,6 @@
 /// A value that may be missing: `Some` with it, or `None`. A zeroed
 /// `Optional` is `None`.
-Optional[T]: enum {
+Optional[T]: either {
     /// There is no value.
     None
     /// The value is here.

@@ -4,7 +4,7 @@
 > gained literals of hooked types (`global_constant`), which phase 7
 > needed for `Optional[T] = .None`.
 >
-> Goal: code can take a reference to a value that lives inside an enum,
+> Goal: code can take a reference to a value that lives inside an either,
 > such as the `Some` of an `Optional`, without moving it out. The
 > motivating case is a stateful global that starts empty and is filled
 > in at entry:
@@ -27,8 +27,8 @@
 > - **`-> v: ref P` captures by reference** (agreed). It gives a
 >   reference to what the payload refers to.
 >   - When the payload is a value `P`, `v` is the address of the payload's
->     slot inside the enum. Nothing moves, and the matched value stays
->     full. It works on an enum with its own `@on_drop`, and through a
+>     slot inside the either. Nothing moves, and the matched value stays
+>     full. It works on an either with its own `@on_drop`, and through a
 >     `ref`.
 >   - When the payload is already a reference `ref P`, `v` is that
 >     reference, copied out. This is what happens today.
@@ -46,7 +46,7 @@
 >   One consequence: `v` cannot reseat the reference an
 >   `Optional[ref X]` stores, because that would need a `ref ref X`.
 >   Write `opt = .Some(other)` instead. SPEC states this.
-> - **A by-reference capture of a value payload needs the enum in
+> - **A by-reference capture of a value payload needs the either in
 >   memory** (agreed). The scrutinee must be one of:
 >   - a place: a local, a parameter, a global, or a field of one;
 >   - anything behind a `ref`, including `self` in a method;
@@ -77,7 +77,7 @@
 > - **No lifetime checking.** As with any `ref` in Lilac, `v` dangles if
 >   the matched value is overwritten or dropped while `v` is still in use
 >   (`opt = .None` inside the arm, or a `ref` saved past it). A slot's
->   memory stays valid as long as its enum does, so this is no worse than
+>   memory stays valid as long as its either does, so this is no worse than
 >   `ref local` today. SPEC says so; no new check.
 
 ## Phase 1: typeck
@@ -92,7 +92,7 @@ arm-pattern check (the "capture holds" site, about line 893):
    mismatch error. When `declared` is `ref Q` and `Q` is not the
    payload's type, add help: "a reference capture of this payload is
    `ref {payload}`".
-2. A by-reference capture needs the enum in memory. The scrutinee must
+2. A by-reference capture needs the either in memory. The scrutinee must
    be `is_place()`, or have `ty.is_ref`. Otherwise emit `E010` through
    `emit_involving(payload, …)` (`Requirement::Ownership`, or the
    closest existing requirement). That way a template holds it as
@@ -116,7 +116,7 @@ The editor needs nothing: the capture is an ordinary `ref` local.
 `crates/lilac-typeck/src/places.rs`, `Pass::capture` (about line 972):
 
 - A by-reference capture moves nothing. Return `false` before any of
-  the move logic, so there is no `E064` for `@on_drop` enums or for
+  the move logic, so there is no `E064` for `@on_drop` eithers or for
   matching through a `ref`, and the scrutinee's path stays full. The
   capture's type, `ref P`, is copyable, so today's `is_copyable` early
   return already does this. Make it explicit (`if arm.by_ref`) anyway,
@@ -125,7 +125,7 @@ The editor needs nothing: the capture is an ordinary `ref` local.
 - Unit tests in the places tests:
   - a by-reference capture on a local, then the local is still used
     and dropped once;
-  - the same on an enum with its own `@on_drop`;
+  - the same on an either with its own `@on_drop`;
   - through a `ref` parameter.
 
 ## Phase 3: lowering
@@ -158,7 +158,7 @@ The editor needs nothing: the capture is an ordinary `ref` local.
   `RefOf`.
 - No new LIR. The verifier and backend see an `addr` (or a register
   copy) and stores of a pointer.
-- Writing through `v` keeps the enum invariant ("every enum write is a
+- Writing through `v` keeps the either invariant ("every either write is a
   whole value", AGENTS, Layouts). The tag is unchanged. The write is a
   whole `P`, a `memcpy` of its layout into a slot of exactly that
   layout, and the bytes past `P` in the payload area were zeroed when
@@ -197,7 +197,7 @@ The editor needs nothing: the capture is an ordinary `ref` local.
     `v = other_ref`, and that an `Optional[ref X]`'s stored reference is
     reseated by assigning the optional;
   - add a short example of the global-filled-at-entry pattern;
-  - say that `v` dangles if the enum is overwritten.
+  - say that `v` dangles if the either is overwritten.
 
   Update the Optional section (or the Standard summary) for `get_ref`.
 - `AGENTS.md`: one bullet under Pipeline/ownership naming `HirArm::by_ref`,
@@ -214,18 +214,18 @@ Run tests (`tests/run/`), each printing what it checks:
 - `ref_capture.lilac`, by-reference captures of a value payload on:
   - a local, changed in place and read back after the `match`;
   - a global, filled at run time from `.None`;
-  - a field of a local object;
+  - a field of a local structure;
   - through a `ref` parameter;
-  - `self` in a method of the enum;
-  - an enum with its own `@on_drop`: the payload is changed through `v`,
+  - `self` in a method of the either;
+  - an either with its own `@on_drop`: the payload is changed through `v`,
     and the drop runs once, at the end, with the new value.
 
   It also covers:
   - `v = value` dropping the old payload exactly once (a counted
     payload);
-  - `v = other_ref` rebinding without touching the enum.
+  - `v = other_ref` rebinding without touching the either.
 - `ref_capture_generic.lilac`:
-  - `Optional[T].get_ref` for a value `T` (a counted object, an
+  - `Optional[T].get_ref` for a value `T` (a counted structure, an
     `@bit32`) and for `Optional[ref X]`, which returns the stored
     reference, so a write through it reaches `X`;
   - a generic function of the user's own that matches `-> v: ref T` on
@@ -341,7 +341,7 @@ cargo test --workspace
 - **Failure captures** (`if x.get_ref() -> v: ref T`, `loop if`) are
   outs, not payloads. They already hold whatever `get_ref` returns, and
   nothing changes there.
-- **Nested enums**: `-> inner: ref Optional[P]`, then `match inner {
+- **Nested eithers**: `-> inner: ref Optional[P]`, then `match inner {
   .Some -> v: ref P … }`, is a capture through a `ref` and is allowed.
 - **A method call on a temporary** (`make().get_ref()`) is the
   existing `ref self` on a temporary, which dangles after the

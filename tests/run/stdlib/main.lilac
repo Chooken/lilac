@@ -135,7 +135,7 @@ c_library: function () nothing {
 
 
 // Formatted text collected in a buffer, to compare with what it should be.
-Capture: object {
+Capture: structure {
     used: @bit_native
     bytes: @array(@bit8, 0x100)
 }

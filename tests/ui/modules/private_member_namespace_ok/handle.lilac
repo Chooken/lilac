@@ -1,7 +1,7 @@
 // A member `private` reaches the type's whole namespace: `Handle` and
 // `Watcher` (another file of the same folder) build and read each other's
 // private fields, and so does the namespace inside it.
-Handle: object {
+Handle: structure {
     private {
         count: @bit8
     }

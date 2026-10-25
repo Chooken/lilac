@@ -181,8 +181,8 @@ fn branching_generic_recursion_fails_fast() {
     write(
         &dir,
         "main.lilac",
-        "W[T]: object {\n    value: T\n}\n\n\
-         V[T]: object {\n    value: T\n}\n\n\
+        "W[T]: structure {\n    value: T\n}\n\n\
+         V[T]: structure {\n    value: T\n}\n\n\
          grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\n\
          main: function () nothing {\n    grow[@bit32]()\n}\n",
     );
@@ -209,15 +209,15 @@ fn wider_generic_recursion_fails_fast() {
     write(
         &dir,
         "three.lilac",
-        "W[T]: object {\n    value: T\n}\n\n\
-         V[T]: object {\n    value: T\n}\n\n\
-         U[T]: object {\n    value: T\n}\n\n\
+        "W[T]: structure {\n    value: T\n}\n\n\
+         V[T]: structure {\n    value: T\n}\n\n\
+         U[T]: structure {\n    value: T\n}\n\n\
          grow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n    grow[U[T]]()\n}\n\n\
          main: function () nothing {\n    grow[@bit32]()\n}\n",
     );
     let quad = |fields: &str| {
         format!(
-            "P[A, B, C, D]: object {{\n{fields}}}\n\n\
+            "P[A, B, C, D]: structure {{\n{fields}}}\n\n\
              grow[T]: function () nothing {{\n    grow[P[T, T, T, T]]()\n}}\n\n\
              main: function () nothing {{\n    grow[@bit32]()\n}}\n"
         )
@@ -248,9 +248,9 @@ fn deep_type_nesting_is_bounded() {
     let nested = |depth: usize| {
         let mut text = String::new();
         for index in 1..depth {
-            let _ = writeln!(text, "O{index}: object {{\n    a: O{}\n}}", index + 1);
+            let _ = writeln!(text, "O{index}: structure {{\n    a: O{}\n}}", index + 1);
         }
-        let _ = writeln!(text, "O{depth}: object {{\n    a: @bit32\n}}\n");
+        let _ = writeln!(text, "O{depth}: structure {{\n    a: @bit32\n}}\n");
         text + "g: O1\n\nmain: function () nothing {\n    x: O1 = g\n}\n"
     };
     write(&dir, "deepest.lilac", nested(1024));
@@ -294,7 +294,7 @@ fn self_containing_enum_reports_once() {
     write(
         &dir,
         "main.lilac",
-        "E: enum {\n    A: E\n    B\n}\n\nmain: function () nothing {\n    e: E = .B\n}\n",
+        "E: either {\n    A: E\n    B\n}\n\nmain: function () nothing {\n    e: E = .B\n}\n",
     );
     let out = check(&dir, "main.lilac", Duration::from_secs(30));
     assert_eq!(error_codes(&out.stderr), ["E053"], "{}", out.stderr);
@@ -425,8 +425,8 @@ fn vendored_library_checks_clean() {
 /// so with stack traces on, every call site and the panic name the types.
 fn wide_generics(n: usize) -> String {
     let mut text = String::from(
-        "Empty: object {\n}\n\n\
-         P[A, B, C, D]: object {\n    a: A\n    b: B\n    c: C\n    d: D\n}\n\n",
+        "Empty: structure {\n}\n\n\
+         P[A, B, C, D]: structure {\n    a: A\n    b: B\n    c: C\n    d: D\n}\n\n",
     );
     for index in 1..n {
         let _ = writeln!(

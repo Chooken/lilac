@@ -1,4 +1,4 @@
-OptionalBit32: enum {
+OptionalBit32: either {
     Some: @bit32
     None
 }

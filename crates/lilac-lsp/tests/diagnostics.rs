@@ -189,7 +189,7 @@ fn use_after_move_links_the_move() {
     let (client, handle) = start_server();
     initialize(&client, None);
     let uri = main_uri();
-    let text = "Handle: object {\n    id: @bit8\n\n    @on_drop: function (self) nothing {\n    }\n}\n\nmain: function () nothing {\n    a: Handle = Handle { id = 0x1 }\n    b: Handle = a\n    c: Handle = a\n}\n";
+    let text = "Handle: structure {\n    id: @bit8\n\n    @on_drop: function (self) nothing {\n    }\n}\n\nmain: function () nothing {\n    a: Handle = Handle { id = 0x1 }\n    b: Handle = a\n    c: Handle = a\n}\n";
     did_open(&client, &uri, text);
     let params = publish_for(&client, &uri);
     let error = params
@@ -653,8 +653,9 @@ fn an_edit_after_a_bad_fstring_gets_fresh_diagnostics() {
 /// 32,767 instances (below typeck's instance budget), each body copying its
 /// argument 40 times.
 fn slow_program() -> String {
-    let mut src =
-        String::from("A[T]: object {\n    value: T\n}\n\nB[T]: object {\n    value: T\n}\n\n");
+    let mut src = String::from(
+        "A[T]: structure {\n    value: T\n}\n\nB[T]: structure {\n    value: T\n}\n\n",
+    );
     for level in 1..15 {
         let _ = writeln!(src, "f{level}[T]: function (x0: T) nothing {{");
         for copy in 1..=40 {

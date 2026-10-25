@@ -2,7 +2,7 @@
 
 using Standard.Io
 
-Noisy: object {
+Noisy: structure {
     tag: @bit32
 
     @on_drop: function (self) nothing {

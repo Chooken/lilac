@@ -3,12 +3,12 @@
 // address is an `addr` slot of the initializer; in LLVM a `ptr` in the
 // global's packed constant. Nothing calls `add` or `total` directly.
 
-Table: object {
+Table: structure {
     add: ref function (context: ref unknown, amount: @bit32) nothing
     total: ref function (context: ref unknown) total: @bit32
 }
 
-Sink: object {
+Sink: structure {
     context: ref unknown
     table: ref Table
 }

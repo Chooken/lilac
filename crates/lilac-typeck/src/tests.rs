@@ -110,17 +110,17 @@ fn literal_type(src: &str) -> String {
 /// Numeric objects mirroring `lib/Standard`: one exact-width
 /// `@conversion(from: <bit|fbit>)` per type, no widening pairs.
 fn numeric_objects() -> &'static str {
-    "Int8: object { private { data: @bit8 } @conversion: function (from: @bit8) to: Int8 { to = Int8 { data = from } } @negate: function (value: Int8) to: Int8 { to = value } }\n\
-     Int16: object { private { data: @bit16 } @conversion: function (from: @bit16) to: Int16 { to = Int16 { data = from } } @negate: function (value: Int16) to: Int16 { to = value } }\n\
-     Int32: object { private { data: @bit32 } @conversion: function (from: @bit32) to: Int32 { to = Int32 { data = from } } @negate: function (value: Int32) to: Int32 { to = value } }\n\
-     Int64: object { private { data: @bit64 } @conversion: function (from: @bit64) to: Int64 { to = Int64 { data = from } } @negate: function (value: Int64) to: Int64 { to = value } }\n\
-     Int: object { private { data: @bit_native } @conversion: function (from: @bit_native) to: Int { to = Int { data = from } } @negate: function (value: Int) to: Int { to = value } }\n\
-     Float32: object { private { data: @fbit32 } @conversion: function (from: @fbit32) to: Float32 { to = Float32 { data = from } } }\n\
-     Float64: object { private { data: @fbit64 } @conversion: function (from: @fbit64) to: Float64 { to = Float64 { data = from } } }\n"
+    "Int8: structure { private { data: @bit8 } @conversion: function (from: @bit8) to: Int8 { to = Int8 { data = from } } @negate: function (value: Int8) to: Int8 { to = value } }\n\
+     Int16: structure { private { data: @bit16 } @conversion: function (from: @bit16) to: Int16 { to = Int16 { data = from } } @negate: function (value: Int16) to: Int16 { to = value } }\n\
+     Int32: structure { private { data: @bit32 } @conversion: function (from: @bit32) to: Int32 { to = Int32 { data = from } } @negate: function (value: Int32) to: Int32 { to = value } }\n\
+     Int64: structure { private { data: @bit64 } @conversion: function (from: @bit64) to: Int64 { to = Int64 { data = from } } @negate: function (value: Int64) to: Int64 { to = value } }\n\
+     Int: structure { private { data: @bit_native } @conversion: function (from: @bit_native) to: Int { to = Int { data = from } } @negate: function (value: Int) to: Int { to = value } }\n\
+     Float32: structure { private { data: @fbit32 } @conversion: function (from: @fbit32) to: Float32 { to = Float32 { data = from } } }\n\
+     Float64: structure { private { data: @fbit64 } @conversion: function (from: @fbit64) to: Float64 { to = Float64 { data = from } } }\n"
 }
 
 fn method_src() -> &'static str {
-    "Object: object {\n    member: @bit32\n    get: function (instance: ref Object) result: @bit32 {\n        result = instance.member\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.get()\n}\n"
+    "Object: structure {\n    member: @bit32\n    get: function (instance: ref Object) result: @bit32 {\n        result = instance.member\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.get()\n}\n"
 }
 
 fn conversion_hook() -> &'static str {
@@ -275,8 +275,8 @@ fn negative_literal_overflow_is_e060() {
 fn negative_float_literal_folds_at_the_slot_type() {
     // Two float objects with `@negate`s: `-1.5` in an `@fbit32` slot must
     // not pick one of them; it is the negated literal.
-    let src = "F16: object {\n    data: @fbit16\n    @negate: function (value: F16) F16 => F16 { data = @f_negate_16(value.data) }\n    @conversion: function (from: @fbit16) F16 => F16 { data = from }\n}\n\
-               F32: object {\n    data: @fbit32\n    @negate: function (value: F32) F32 => F32 { data = @f_negate_32(value.data) }\n    @conversion: function (from: @fbit32) F32 => F32 { data = from }\n}\n\
+    let src = "F16: structure {\n    data: @fbit16\n    @negate: function (value: F16) F16 => F16 { data = @f_negate_16(value.data) }\n    @conversion: function (from: @fbit16) F16 => F16 { data = from }\n}\n\
+               F32: structure {\n    data: @fbit32\n    @negate: function (value: F32) F32 => F32 { data = @f_negate_32(value.data) }\n    @conversion: function (from: @fbit32) F32 => F32 { data = from }\n}\n\
                main: function () nothing {\n    a: @bit8 = @f_less_than_32(@bits_to_fbit_32(0x0), -1.5)\n    b: F16 = -2.0\n}\n";
     let diags = check_src(src);
     assert!(!diags.has_errors(), "{diags:?}");
@@ -284,7 +284,7 @@ fn negative_float_literal_folds_at_the_slot_type() {
 
 #[test]
 fn negative_literal_needs_negate_on_a_numeric_object() {
-    let src = "U: object {\n    data: @bit8\n    @conversion: function (from: @bit8) U => U { data = from }\n}\n\
+    let src = "U: structure {\n    data: @bit8\n    @conversion: function (from: @bit8) U => U { data = from }\n}\n\
                main: function () nothing {\n    a: U = -1\n}\n";
     let diags = check_src(src);
     assert!(has_code(&diags, "E043"), "{diags:?}");
@@ -778,7 +778,7 @@ fn ref_mismatch_labels_both_sides() {
 #[test]
 fn enum_tag_validates() {
     let diags = check_src(
-        "Maybe: enum {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
+        "Maybe: either {\n    Some: @bit8\n    None\n}\nmain: function () nothing {\n    x: Maybe = .None\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -833,7 +833,7 @@ fn method_call_checks() {
 #[test]
 fn unknown_member_is_e021_not_e040() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable_2: @bit8 = variable.data\n}\n",
+        "Object: structure {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable_2: @bit8 = variable.data\n}\n",
     );
     assert!(has_code(&diags, "E021"), "{diags:?}");
     assert!(!has_code(&diags, "E040"), "{diags:?}");
@@ -842,7 +842,7 @@ fn unknown_member_is_e021_not_e040() {
 #[test]
 fn calling_a_field_is_e022() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable.member()\n}\n",
+        "Object: structure {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    variable.member()\n}\n",
     );
     assert!(has_code(&diags, "E022"), "{diags:?}");
 }
@@ -895,7 +895,7 @@ fn more_bindings_than_outs_is_e022() {
 
 #[test]
 fn values_with_no_effect_are_recorded_not_errors() {
-    let src = "E: enum {\n    A\n}\nmain: function () nothing {\n    x: @bit32 = 0x1\n    0x5 + 0x5\n    x\n    @size_of(@bit32)\n    E.A\n    @trap()\n}\n";
+    let src = "E: either {\n    A\n}\nmain: function () nothing {\n    x: @bit32 = 0x1\n    0x5 + 0x5\n    x\n    @size_of(@bit32)\n    E.A\n    @trap()\n}\n";
     let (diags, hir, _) = check(src);
     assert!(!diags.has_errors(), "{diags:?}");
     let texts: Vec<&str> = hir
@@ -921,7 +921,7 @@ fn value_from_nothing_is_e022() {
 #[test]
 fn structlit_missing_field_is_e022() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n    }\n}\n",
+        "Object: structure {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n    }\n}\n",
     );
     assert!(has_code(&diags, "E022"), "{diags:?}");
     let msgs = messages(&diags);
@@ -931,7 +931,7 @@ fn structlit_missing_field_is_e022() {
 #[test]
 fn structlit_unknown_field_is_e021() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        data = 0x1\n    }\n}\n",
+        "Object: structure {\n    member: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object {\n        data = 0x1\n    }\n}\n",
     );
     assert!(has_code(&diags, "E021"), "{diags:?}");
 }
@@ -944,7 +944,7 @@ fn func_value_call_checks() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
-const GENERIC_ITEMS: &str = "id[T]: function (value: T) out: T {\n    out = value\n}\nBox[T]: object {\n    value: T\n    make: function (value: T) out: Box[T] {\n        out = Box[T] { value = value }\n    }\n    convert[U]: function (self, extra: U) out: U {\n        out = extra\n    }\n}\nPlain: object {\n    count: @bit8\n    pick[T]: function (first: T, second: T) out: T {\n        out = second\n    }\n    picker: function () out: ref function (first: @bit8, second: @bit8) @bit8 {\n        out = ref pick[@bit8]\n    }\n}\nG: @bit8 = 0x1\n";
+const GENERIC_ITEMS: &str = "id[T]: function (value: T) out: T {\n    out = value\n}\nBox[T]: structure {\n    value: T\n    make: function (value: T) out: Box[T] {\n        out = Box[T] { value = value }\n    }\n    convert[U]: function (self, extra: U) out: U {\n        out = extra\n    }\n}\nPlain: structure {\n    count: @bit8\n    pick[T]: function (first: T, second: T) out: T {\n        out = second\n    }\n    picker: function () out: ref function (first: @bit8, second: @bit8) @bit8 {\n        out = ref pick[@bit8]\n    }\n}\nG: @bit8 = 0x1\n";
 
 #[test]
 fn generic_instances_are_function_values() {
@@ -991,7 +991,7 @@ fn recursive_inline_is_allowed() {
 #[test]
 fn static_call_checks() {
     let diags = check_src(
-        "Object: object {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @i_add_32(num, 0x1)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
+        "Object: structure {\n    member: @bit32\n    add: function (num: @bit32) result: @bit32 {\n        result = @i_add_32(num, 0x1)\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = Object.add(0x2)\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -999,7 +999,7 @@ fn static_call_checks() {
 #[test]
 fn method_without_self_is_e022() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n    add: function (num: @bit32) result: @bit32 {\n        result = num\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.add(0x2)\n}\n",
+        "Object: structure {\n    member: @bit8\n    add: function (num: @bit32) result: @bit32 {\n        result = num\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n    member: @bit32 = variable.add(0x2)\n}\n",
     );
     assert!(has_code(&diags, "E022"), "{diags:?}");
 }
@@ -1009,7 +1009,7 @@ fn declaration_shorthand_calls_a_static_function() {
     // `variable: Object.create(0x1)` is `variable: Object = Object.create(0x1)`,
     // and its arguments convert like any call's.
     let diags = check_src(
-        "Object: object {\n    value: @bit32\n    create: function (value: @bit32) result: Object {\n        result = Object { value = value }\n    }\n}\n@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\nmain: function () nothing {\n    b: @bit8 = 0x2\n    variable: Object.create(b)\n}\n",
+        "Object: structure {\n    value: @bit32\n    create: function (value: @bit32) result: Object {\n        result = Object { value = value }\n    }\n}\n@conversion: function (from: @bit8) to: @bit32 { to = @extend_zero(from) }\nmain: function () nothing {\n    b: @bit8 = 0x2\n    variable: Object.create(b)\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1017,7 +1017,7 @@ fn declaration_shorthand_calls_a_static_function() {
 #[test]
 fn declaration_shorthand_method_is_e056() {
     let diags = check_src(
-        "Object: object {\n    value: @bit8\n    copy: function (self) result: Object {\n        result = Object { value = self.value }\n    }\n}\nmain: function () nothing {\n    a: Object { value = 0x1 }\n    b: Object.copy(ref a)\n}\n",
+        "Object: structure {\n    value: @bit8\n    copy: function (self) result: Object {\n        result = Object { value = self.value }\n    }\n}\nmain: function () nothing {\n    a: Object { value = 0x1 }\n    b: Object.copy(ref a)\n}\n",
     );
     assert!(has_code(&diags, "E056"), "{diags:?}");
 }
@@ -1025,7 +1025,7 @@ fn declaration_shorthand_method_is_e056() {
 #[test]
 fn declaration_shorthand_variant_is_e056() {
     let diags = check_src(
-        "Shape: enum {\n    Dot\n}\nmain: function () nothing {\n    s: Shape.Dot()\n}\n",
+        "Shape: either {\n    Dot\n}\nmain: function () nothing {\n    s: Shape.Dot()\n}\n",
     );
     assert!(has_code(&diags, "E056"), "{diags:?}");
 }
@@ -1033,7 +1033,7 @@ fn declaration_shorthand_variant_is_e056() {
 #[test]
 fn calling_a_type_is_e056() {
     let diags = check_src(
-        "Object: object {\n    value: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
+        "Object: structure {\n    value: @bit8\n}\nmain: function () nothing {\n    variable: Object = Object(0x1)\n}\n",
     );
     assert!(has_code(&diags, "E056"), "{diags:?}");
 }
@@ -1041,7 +1041,7 @@ fn calling_a_type_is_e056() {
 #[test]
 fn init_hook_is_e056() {
     let diags = check_src(
-        "Object: object {\n    value: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object { value = value }\n    }\n}\nmain: function () nothing {\n}\n",
+        "Object: structure {\n    value: @bit8\n    @init: function (value: @bit8) result: Object {\n        result = Object { value = value }\n    }\n}\nmain: function () nothing {\n}\n",
     );
     assert!(has_code(&diags, "E056"), "{diags:?}");
 }
@@ -1049,7 +1049,7 @@ fn init_hook_is_e056() {
 #[test]
 fn on_drop_bad_shape_is_e022() {
     let diags = check_src(
-        "Object: object {\n    member: @bit8\n    @on_drop: function (member: @bit8) nothing {\n    }\n}\nmain: function () nothing {\n}\n",
+        "Object: structure {\n    member: @bit8\n    @on_drop: function (member: @bit8) nothing {\n    }\n}\nmain: function () nothing {\n}\n",
     );
     assert!(has_code(&diags, "E022"), "{diags:?}");
 }
@@ -1107,7 +1107,7 @@ fn if_condition_must_be_bit8() {
 #[test]
 fn if_condition_takes_one_conversion() {
     let diags = check_src(
-        "Flag: object {\n    v: @bit8\n    @conversion: function (from: Flag) to: @bit8 {\n        to = from.v\n    }\n}\nmain: function () nothing {\n    f: Flag = Flag { v = 0x1 }\n    if f {\n    }\n}\n",
+        "Flag: structure {\n    v: @bit8\n    @conversion: function (from: Flag) to: @bit8 {\n        to = from.v\n    }\n}\nmain: function () nothing {\n    f: Flag = Flag { v = 0x1 }\n    if f {\n    }\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1229,7 +1229,7 @@ fn if_value_branch_mismatch_is_e043() {
 #[test]
 fn match_tag_capture_payload() {
     let diags = check_src(
-        "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None => return\n    }\n}\n",
+        "OptionalBit32: either {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None => return\n    }\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1237,7 +1237,7 @@ fn match_tag_capture_payload() {
 #[test]
 fn match_capture_mismatch_is_e010() {
     let diags = check_src(
-        "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit16 {\n        }\n        .None => return\n    }\n}\n",
+        "OptionalBit32: either {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .Some(0x1)\n    match number {\n        .Some -> some: @bit16 {\n        }\n        .None => return\n    }\n}\n",
     );
     assert!(has_code(&diags, "E010"), "{diags:?}");
 }
@@ -1245,7 +1245,7 @@ fn match_capture_mismatch_is_e010() {
 #[test]
 fn capture_on_bare_tag_is_e022() {
     let diags = check_src(
-        "OptionalBit32: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .None\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None -> x: @bit8 {\n        }\n    }\n}\n",
+        "OptionalBit32: either {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n    number: OptionalBit32 = .None\n    match number {\n        .Some -> some: @bit32 {\n        }\n        .None -> x: @bit8 {\n        }\n    }\n}\n",
     );
     assert!(has_code(&diags, "E022"), "{diags:?}");
 }
@@ -1289,7 +1289,7 @@ fn loop_break_checks() {
 }
 
 /// A writer type with a `@format` for `@bit32`, before each f-string test.
-const FORMAT_PRELUDE: &str = "Out: object {}\n\n@format: function (value: ref @bit32, out: ref Out) nothing {}\n\nnumber: function () value: @bit32 {\n    value = 0x1\n}\n\n";
+const FORMAT_PRELUDE: &str = "Out: structure {}\n\n@format: function (value: ref @bit32, out: ref Out) nothing {}\n\nnumber: function () value: @bit32 {\n    value = 0x1\n}\n\n";
 
 fn check_format(body: &str) -> Diags {
     check_src(&format!("{FORMAT_PRELUDE}{body}"))
@@ -1318,7 +1318,7 @@ fn fstring_into_a_type_with_no_format_conversion_is_e043() {
 #[test]
 fn fstring_converts_through_the_one_format_conversion() {
     let diags = check_format(
-        "Text: object {\n    @conversion: function (from: @format_args(Out)) to: Text {\n        to = Text {}\n    }\n}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    x: Text = $\"{n}\"\n}\n",
+        "Text: structure {\n    @conversion: function (from: @format_args(Out)) to: Text {\n        to = Text {}\n    }\n}\n\nmain: function () nothing {\n    n: @bit32 = 0x1\n    x: Text = $\"{n}\"\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1376,8 +1376,8 @@ fn bad_format_hook_shape_is_e022() {
 #[test]
 fn a_format_where_it_cannot_live_is_e072() {
     for (what, src) in [
-        ("field", "Holder: object {\n    text: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
-        ("payload", "Choice: enum {\n    Full: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
+        ("field", "Holder: structure {\n    text: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
+        ("payload", "Choice: either {\n    Full: @format_args(Out)\n}\n\nmain: function () nothing {}\n"),
         ("array", "main: function () nothing {\n    x: @array(@format_args(Out), 2) = @array(@format_args(Out), 2) {}\n}\n"),
         ("out", "make: function () text: @format_args(Out) {\n    text = \"\"\n}\n\nmain: function () nothing {}\n"),
         ("global", "text: @format_args(Out)\n\nmain: function () nothing {}\n"),
@@ -1461,7 +1461,7 @@ fn nested_private_object_field_resolves() {
     // Regression: a field wrapped in nested `private` blocks must flatten
     // into the object's member fields, not be routed as a top-level item
     // (which silently dropped it and produced a spurious `E021`).
-    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n\n    get: function (instance: ref Object) result: @bit8 {\n        result = instance.f\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.get()\n}\n";
+    let src = "Object: structure {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n\n    get: function (instance: ref Object) result: @bit8 {\n        result = instance.f\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.get()\n}\n";
     let diags = check_src(src);
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1471,7 +1471,7 @@ fn nested_private_object_field_reaches_its_namespace() {
     // A member `private` reaches the type's whole namespace, so `main`
     // beside `Object` reads the field (`E026` from another namespace is
     // `m6.rs`'s `nested_private_field_denied_is_e026`).
-    let src = "Object: object {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.f\n}\n";
+    let src = "Object: structure {\n    private {\n        private {\n            f: @bit8\n        }\n    }\n\n    create: function () result: Object {\n        result = Object {\n            f = 0x1\n        }\n    }\n}\n\nmain: function () nothing {\n    variable: Object = Object.create()\n    value: @bit8 = variable.f\n}\n";
     let diags = check_src(src);
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1571,7 +1571,7 @@ fn generic_param_form_in_required_signature() {
 fn concrete_return_stays_concrete_in_required_signature() {
     // A return type that is not one of the instantiation arguments (a user
     // object) must render concretely, never as a generic parameter.
-    let src = "Widget: object {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
+    let src = "Widget: structure {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.other(5)\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
@@ -1604,7 +1604,7 @@ fn field_miss_shows_required_field_note() {
 fn concrete_field_type_stays_concrete() {
     // The field note's type comes from the use-site expected type; a user
     // object stays concrete rather than becoming a generic parameter.
-    let src = "Widget: object {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.data\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
+    let src = "Widget: structure {\n    value: @bit32\n}\n\ngen[T]: function (value: T) out: Widget {\n    out = value.data\n}\n\nmain: function () nothing {\n    x: Widget = gen[@bit32](0x1)\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
@@ -1619,7 +1619,7 @@ fn concrete_field_type_stays_concrete() {
 fn concrete_field_miss_has_no_inferred_note() {
     // An ordinary field miss outside a generic instantiation keeps the
     // plain `E021` shape with no inferred-requirement note.
-    let src = "Object: object {\n    value: @bit32\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit32 = o.data\n}\n";
+    let src = "Object: structure {\n    value: @bit32\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit32 = o.data\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert!(
@@ -1645,7 +1645,7 @@ fn failing_object_method_reported_at_use_site() {
     // A missing member inside a generic object method points the `E042`
     // primary at the failing use in the method body; the instantiation note
     // carries the pretty method instance rather than a mangled symbol.
-    let src = "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    r: @bit32 = variable.get()\n}\n";
+    let src = "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    r: @bit32 = variable.get()\n}\n";
     let (diags, _, _, sm) = run(src);
     let e042: Vec<_> = diags
         .diagnostics()
@@ -1673,7 +1673,7 @@ fn failing_object_method_reported_at_use_site() {
 fn field_miss_has_clean_tone() {
     // A field lookup miss inside a generic body must not leak the internal
     // milestone label; it reads as a requirement phrase.
-    let src = "Object: object {\n    value: @bit32\n}\n\ngen[T]: function (v: T) out: @bit8 {\n    out = v.data\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit8 = gen[Object](o)\n}\n";
+    let src = "Object: structure {\n    value: @bit32\n}\n\ngen[T]: function (v: T) out: @bit8 {\n    out = v.data\n}\n\nmain: function () nothing {\n    o: Object = Object {\n        value = 0x1\n    }\n    x: @bit8 = gen[Object](o)\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
@@ -1690,7 +1690,7 @@ fn generic_instance_miss_has_did_you_mean() {
     // The lookup owner is an instance's display form
     // (`GenObject[@bit32]`); did-you-mean must still find the base's
     // members.
-    let src = "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.geet()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n";
+    let src = "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.geet()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert!(
@@ -1702,7 +1702,7 @@ fn generic_instance_miss_has_did_you_mean() {
 #[test]
 fn cyclic_growing_args_is_e051() {
     let (diags, _, _) = check(
-        "Box[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[Box[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
+        "Box[T]: structure {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[Box[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
     );
     let count = diags
         .diagnostics()
@@ -1732,7 +1732,7 @@ fn cyclic_growing_args_is_e051() {
 #[test]
 fn cyclic_growing_object_layout_is_e051() {
     let (diags, _, _) = check(
-        "GenObj[T]: object {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
+        "GenObj[T]: structure {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
     );
     let count = diags
         .diagnostics()
@@ -1774,7 +1774,7 @@ fn e051_notes(src: &str) -> Vec<String> {
 #[test]
 fn e051_shows_how_the_arguments_grow() {
     let notes = e051_notes(
-        "Box[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[Box[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
+        "Box[T]: structure {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[Box[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
     );
     assert!(
         notes.contains(
@@ -1787,7 +1787,7 @@ fn e051_shows_how_the_arguments_grow() {
         "the chain reaches the 65th `grow`: {notes:?}"
     );
     let notes = e051_notes(
-        "GenObj[T]: object {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
+        "GenObj[T]: structure {\n    next: GenObj[GenObj[T]]\n}\n\nconsume[T]: function () nothing {\n}\n\nmain: function () nothing {\n    consume[GenObj[@bit32]]()\n}\n",
     );
     assert!(
         notes.contains(
@@ -1803,7 +1803,7 @@ fn e051_counts_recursion_per_definition() {
     // Mutual recursion: `a` and `b` alternate, and `a` is the first to
     // appear a 65th time; the chain holds both.
     let notes = e051_notes(
-        "Box[T]: object {\n    value: T\n}\n\na[T]: function () nothing {\n    b[Box[T]]()\n}\n\nb[T]: function () nothing {\n    a[T]()\n}\n\nmain: function () nothing {\n    a[@bit32]()\n}\n",
+        "Box[T]: structure {\n    value: T\n}\n\na[T]: function () nothing {\n    b[Box[T]]()\n}\n\nb[T]: function () nothing {\n    a[T]()\n}\n\nmain: function () nothing {\n    a[@bit32]()\n}\n",
     );
     assert!(notes[0].ends_with("(129 frames)"), "{notes:?}");
     assert!(
@@ -1816,7 +1816,7 @@ fn e051_counts_recursion_per_definition() {
     // get no growth note: `swap` exchanges its two (wrapping one, so they
     // never repeat).
     let notes = e051_notes(
-        "Box[T]: object {\n    value: T\n}\n\nswap[A, B]: function () nothing {\n    swap[B, Box[A]]()\n}\n\nmain: function () nothing {\n    swap[@bit32, @bit8]()\n}\n",
+        "Box[T]: structure {\n    value: T\n}\n\nswap[A, B]: function () nothing {\n    swap[B, Box[A]]()\n}\n\nmain: function () nothing {\n    swap[@bit32, @bit8]()\n}\n",
     );
     assert!(
         !notes.iter().any(|note| note.contains("grow each time")),
@@ -1829,7 +1829,7 @@ fn branching_recursion_reports_once() {
     // Each level requests two new instances: followed depth first, the
     // first branch meets `E051`, and every other branch stops at `grow`.
     let notes = e051_notes(
-        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
+        "W[T]: structure {\n    value: T\n}\n\nV[T]: structure {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n    grow[@bit32]()\n}\n",
     );
     assert!(
         notes.contains(
@@ -1839,7 +1839,7 @@ fn branching_recursion_reports_once() {
     );
     // The same for a type laid out inside itself twice per level.
     e051_notes(
-        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\nG[T]: object {\n    a: ref G[W[T]]\n    b: ref G[V[T]]\n}\n\nmain: function () nothing {\n    x: @bit64 = @size_of(G[@bit32])\n}\n",
+        "W[T]: structure {\n    value: T\n}\n\nV[T]: structure {\n    value: T\n}\n\nG[T]: structure {\n    a: ref G[W[T]]\n    b: ref G[V[T]]\n}\n\nmain: function () nothing {\n    x: @bit64 = @size_of(G[@bit32])\n}\n",
     );
 }
 
@@ -1848,7 +1848,7 @@ fn unused_branching_recursion_checks_quickly() {
     // Unused, `grow` is checked as a template: its recursion stops at the
     // limit too (silently, as template errors about its parameters do).
     let (diags, _, _) = check(
-        "W[T]: object {\n    value: T\n}\n\nV[T]: object {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n}\n",
+        "W[T]: structure {\n    value: T\n}\n\nV[T]: structure {\n    value: T\n}\n\ngrow[T]: function () nothing {\n    grow[W[T]]()\n    grow[V[T]]()\n}\n\nmain: function () nothing {\n}\n",
     );
     assert_eq!(diags.error_count(), 0, "{diags:?}");
 }
@@ -1859,9 +1859,9 @@ fn distinct_types_nest_past_the_old_limit() {
     // old limit counted every level, and stopped at sixteen).
     let mut src = String::new();
     for index in 1..20 {
-        let _ = write!(src, "O{index}: object {{\n    a: O{}\n}}\n\n", index + 1);
+        let _ = write!(src, "O{index}: structure {{\n    a: O{}\n}}\n\n", index + 1);
     }
-    src += "O20: object {\n    a: @bit32\n}\n\nmain: function () nothing {\n}\n";
+    src += "O20: structure {\n    a: @bit32\n}\n\nmain: function () nothing {\n}\n";
     let (diags, _, _) = check(&src);
     assert_eq!(diags.error_count(), 0, "{diags:?}");
 }
@@ -1869,7 +1869,7 @@ fn distinct_types_nest_past_the_old_limit() {
 #[test]
 fn bare_generic_object_static_is_e044() {
     let (diags, _, _) = check(
-        "GenObj[T]: object {\n    value: T\n    ping: function () nothing {\n    }\n}\n\nmain: function () nothing {\n    GenObj.ping()\n}\n",
+        "GenObj[T]: structure {\n    value: T\n    ping: function () nothing {\n    }\n}\n\nmain: function () nothing {\n    GenObj.ping()\n}\n",
     );
     assert!(
         diags.diagnostics().iter().any(|d| d.code == "E044"),
@@ -1913,7 +1913,7 @@ fn recursive_generic_inline_is_allowed() {
 #[test]
 fn value_based_duck_typing_ok() {
     let (diags, _, _) = check(
-        "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.get()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n",
+        "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\n\ngen[T]: function (value: T) out: @bit32 {\n    out = value.get()\n}\n\nmain: function () nothing {\n    v: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    x: @bit32 = gen[GenObject[@bit32]](v)\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -1921,7 +1921,7 @@ fn value_based_duck_typing_ok() {
 #[test]
 fn static_method_on_object_ok() {
     let (diags, _, _) = check(
-        "Object: object {\n    get: function () result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get()\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[Object]()\n}\n",
+        "Object: structure {\n    get: function () result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get()\n}\n\nmain: function () nothing {\n    x: @bit32 = gen[Object]()\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -2055,7 +2055,7 @@ fn direct_hook_call_picks_exact_overload() {
 fn every_hook_overload_body_is_checked() {
     // The second conversion references an unknown name: it must be reported.
     let diags = check_src(
-        "Int64: object {\n    data: @bit64\n\
+        "Int64: structure {\n    data: @bit64\n\
          @conversion: function (from: @bit64) Int64 => Int64 { data = from }\n\
          @conversion: function (from: @byte_buffer) Int64 => Int64 { data = @nope(from) }\n}\n",
     );
@@ -2068,7 +2068,7 @@ fn every_hook_overload_body_is_checked() {
 #[test]
 fn member_operator_resolves() {
     let diags = check_src(
-        "Int64: object {\n    data: @bit64\n\
+        "Int64: structure {\n    data: @bit64\n\
          @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add_64(lhs.data, rhs.data) }\n}\n\
          main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n}\n",
     );
@@ -2080,7 +2080,7 @@ fn cross_scope_identical_conversion_pair_is_e020() {
     // The member hook is collected first, then the identical top-level hook
     // is checked against the shared hook set (dedup by signature).
     let diags = check_src(
-        "Int64: object {\n    data: @bit64\n\
+        "Int64: structure {\n    data: @bit64\n\
          @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n}\n\
          @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n",
     );
@@ -2090,7 +2090,7 @@ fn cross_scope_identical_conversion_pair_is_e020() {
 #[test]
 fn private_member_conversion_resolves() {
     let diags = check_src(
-        "Int64: object {\n    data: @bit64\n\
+        "Int64: structure {\n    data: @bit64\n\
          private {\n\
          @conversion: function (from: @bit32) to: @bit8 { to = @truncate(from) }\n\
          }\n}\n\
@@ -2102,7 +2102,7 @@ fn private_member_conversion_resolves() {
 #[test]
 fn method_and_hook_with_same_base_name_coexist() {
     let diags = check_src(
-        "Int64: object {\n    data: @bit64\n\
+        "Int64: structure {\n    data: @bit64\n\
          add: function (self, x: @bit64) result: @bit64 { result = @i_add_64(x, self.data) }\n\
          @add: function (lhs: Int64, rhs: Int64) Int64 => Int64 { data = @i_add_64(lhs.data, rhs.data) }\n}\n\
          main: function () nothing {\n    a: Int64 = Int64 { data = 0x1 }\n    b: Int64 = a + a\n    c: @bit64 = a.add(0x2)\n}\n",
@@ -2113,7 +2113,7 @@ fn method_and_hook_with_same_base_name_coexist() {
 #[test]
 fn generic_object_hook_not_e052() {
     let diags = check_src(
-        "GenObj[T]: object {\n    value: T\n    @on_drop: function (from: ref GenObj[T]) nothing {\n    }\n}\nmain: function () nothing {\n    g: GenObj[@bit8] = GenObj[@bit8] { value = 0x1 }\n}\n",
+        "GenObj[T]: structure {\n    value: T\n    @on_drop: function (from: ref GenObj[T]) nothing {\n    }\n}\nmain: function () nothing {\n    g: GenObj[@bit8] = GenObj[@bit8] { value = 0x1 }\n}\n",
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
@@ -2133,7 +2133,7 @@ fn unknown_param_type_is_e023() {
 #[test]
 fn generic_type_arity_is_e044() {
     let diags = check_src(
-        "Box[T]: object {\n    value: T\n}\nmain: function () nothing {\n    b: Box[@bit8, @bit8] = Box[@bit8] { value = 0x1 }\n}\n",
+        "Box[T]: structure {\n    value: T\n}\nmain: function () nothing {\n    b: Box[@bit8, @bit8] = Box[@bit8] { value = 0x1 }\n}\n",
     );
     assert!(has_code(&diags, "E044"), "{diags:?}");
 }
@@ -2141,12 +2141,12 @@ fn generic_type_arity_is_e044() {
 #[test]
 fn self_containing_type_is_e053() {
     let diags = check_src(
-        "Node: object {\n    next: Node\n}\nmain: function () nothing {\n    n: Node\n}\n",
+        "Node: structure {\n    next: Node\n}\nmain: function () nothing {\n    n: Node\n}\n",
     );
     assert!(has_code(&diags, "E053"), "{diags:?}");
     // Through a reference is fine.
     let diags =
-        check_src("Node: object {\n    next: ref Node\n}\nmain: function () nothing {\n}\n");
+        check_src("Node: structure {\n    next: ref Node\n}\nmain: function () nothing {\n}\n");
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
@@ -2157,15 +2157,15 @@ fn self_containing_type_is_e053() {
 /// own error is still reported.
 #[test]
 fn ref_referents_are_laid_out_after_their_holder() {
-    let opt = "Opt[T]: enum {\n    Some: T\n    None\n}\n";
+    let opt = "Opt[T]: either {\n    Some: T\n    None\n}\n";
     let src = format!(
-        "{opt}Holder: object {{\n    free: Opt[ref Node]\n}}\nNode: object {{\n    next: Opt[ref Node]\n}}\nmain: function () nothing {{\n}}\n"
+        "{opt}Holder: structure {{\n    free: Opt[ref Node]\n}}\nNode: structure {{\n    next: Opt[ref Node]\n}}\nmain: function () nothing {{\n}}\n"
     );
     assert!(!check_src(&src).has_errors(), "{src}");
     let growing =
-        "W[T]: object {\n    w: ref W[W[T]]\n    v: T\n}\nf: function (x: W[@bit8]) nothing {\n}\n";
+        "W[T]: structure {\n    w: ref W[W[T]]\n    v: T\n}\nf: function (x: W[@bit8]) nothing {\n}\n";
     assert_eq!(codes_of(&check_src(growing)), ["E051"]);
-    let broken = "G[T]: object {\n    a: G[T]\n}\nH: object {\n    r: ref G[@bit8]\n}\nf: function (h: H) nothing {\n}\n";
+    let broken = "G[T]: structure {\n    a: G[T]\n}\nH: structure {\n    r: ref G[@bit8]\n}\nf: function (h: H) nothing {\n}\n";
     assert_eq!(codes_of(&check_src(broken)), ["E053"]);
 }
 
@@ -2205,12 +2205,12 @@ fn atomics_check_orderings_and_widths() {
 #[test]
 fn arrays_check_elements_lengths_and_operands() {
     let ok = check_src(
-        "Box: object {\n    items: @array(@bit32, 0x4)\n}\n\nmain: function () nothing {\n    b: Box { items = @array(@bit32, 4) {} }\n    slot: ref @bit32 = @array_at(ref b.items, 0x1)\n    n: @bit_native = @array_len(b.items)\n}\n",
+        "Box: structure {\n    items: @array(@bit32, 0x4)\n}\n\nmain: function () nothing {\n    b: Box { items = @array(@bit32, 4) {} }\n    slot: ref @bit32 = @array_at(ref b.items, 0x1)\n    n: @bit_native = @array_len(b.items)\n}\n",
     );
     assert!(ok.diagnostics().is_empty(), "{ok:?}");
     let errors = [
         // An element with an RAII hook, itself or in a field.
-        "Noisy: object {\n    v: @bit8\n\n    @on_drop: function (self) nothing {}\n}\n\nOuter: object {\n    n: Noisy\n}\n\nmain: function () nothing {\n    a: @array(Outer, 2) {}\n}\n",
+        "Noisy: structure {\n    v: @bit8\n\n    @on_drop: function (self) nothing {}\n}\n\nOuter: structure {\n    n: Noisy\n}\n\nmain: function () nothing {\n    a: @array(Outer, 2) {}\n}\n",
         // A `ref` element, a zero length and a length past `u32`.
         "main: function () nothing {\n    a: @array(ref @bit8, 2) {}\n}\n",
         "main: function () nothing {\n    a: @array(@bit8, 0) {}\n}\n",
@@ -2230,24 +2230,24 @@ fn arrays_check_elements_lengths_and_operands() {
 #[test]
 fn nested_types_are_e036() {
     let sources = [
-        "Outer: object {
-    Inner: object {
+        "Outer: structure {
+    Inner: structure {
         x: @bit8
     }
 }
 
 main: function () nothing {}
 ",
-        "Status: enum {
+        "Status: either {
     Idle
-    Kind: enum { A, B }
+    Kind: either { A, B }
 }
 
 main: function () nothing {}
 ",
-        "Outer: object {
+        "Outer: structure {
     private {
-        Secret: enum { A }
+        Secret: either { A }
     }
 }
 
@@ -2269,8 +2269,8 @@ main: function () nothing {}
 #[test]
 fn nested_type_name_is_unknown() {
     // The rejected declaration defines nothing, so its uses do not resolve.
-    let src = "Outer: object {
-    Inner: object {
+    let src = "Outer: structure {
+    Inner: structure {
         x: @bit8
     }
     inner: Inner
@@ -2290,7 +2290,7 @@ fn unused_generic_drops_errors_about_its_parameter() {
     // Nothing instantiates these, so `T` is abstract: each failure is about
     // a type containing `T` and could hold for some argument.
     let diags = check_src(
-        "Box[T]: object {\n    value: T\n}\n\
+        "Box[T]: structure {\n    value: T\n}\n\
          p1[T]: function () out: T {\n    out = T.default()\n}\n\
          p2[T]: function (x: T) out: @bit32 {\n    out = x.foo()\n}\n\
          p3[T]: function (x: T) out: @bit32 {\n    out = x\n}\n\
@@ -2306,7 +2306,7 @@ fn unused_generic_drops_errors_about_its_parameter() {
 #[test]
 fn unused_generic_reports_errors_independent_of_its_parameter() {
     let diags = check_src(
-        "Box[T]: object {\n    value: T\n}\n\
+        "Box[T]: structure {\n    value: T\n}\n\
          q1[T]: function (x: T) out: @bit32 {\n    out = nonexistent()\n}\n\
          q2[T]: function (x: T) out: @bit32 {\n    small: @bit8 = 0x1\n    out = small\n}\n\
          q3[T]: function (x: T) out: Box[T] {\n    out = Box[T] { valeu = x }\n}\n\
@@ -2404,7 +2404,7 @@ fn unused_generic_index_under_a_possibly_constant_condition_is_skipped() {
 
 /// A type whose own `@on_drop` makes it move.
 const HANDLE: &str =
-    "Handle: object {\n    id: @bit32\n\n    @on_drop: function (self) nothing {\n    }\n}\n\
+    "Handle: structure {\n    id: @bit32\n\n    @on_drop: function (self) nothing {\n    }\n}\n\
                       take: function (handle: Handle) nothing {\n}\n";
 
 /// The function with a local named `local`.
@@ -2543,8 +2543,8 @@ fn a_generic_that_moves_its_argument_twice_fails_as_e042() {
 #[test]
 fn borrowed_values_move_only_by_move() {
     let prefix = format!(
-        "{HANDLE}Pair: object {{\n    h: Handle\n}}\n\
-         Slot: enum {{\n    Empty\n    Full: Handle\n}}\n\
+        "{HANDLE}Pair: structure {{\n    h: Handle\n}}\n\
+         Slot: either {{\n    Empty\n    Full: Handle\n}}\n\
          peek: function (handle: ref Handle) nothing {{\n}}\n"
     );
     let a = "    a: Handle = Handle { id = 0x1 }\n";
@@ -2622,7 +2622,7 @@ fn borrowed_move_points_at_the_ref_and_offers_move() {
 fn use_after_implicit_move_says_why_it_moved() {
     let explain = |body: &str| {
         let diags = check_src(&format!(
-            "{HANDLE}Pair: object {{\n    handle: Handle\n    n: @bit32\n}}\n\
+            "{HANDLE}Pair: structure {{\n    handle: Handle\n    n: @bit32\n}}\n\
              keep: function (pair: Pair) nothing {{\n}}\n\
              main: function () nothing {{\n{body}}}\n"
         ));
@@ -2686,7 +2686,7 @@ fn a_cancelled_check_stops() {
 /// 2^31 - 1 bytes.
 #[test]
 fn oversized_object_is_e067_at_the_crossing_field() {
-    let src = "Big: object {\n    a: @bit64\n    b: @array(@bit8, 0x7FFFFFF9)\n}\n";
+    let src = "Big: structure {\n    a: @bit64\n    b: @array(@bit8, 0x7FFFFFF9)\n}\n";
     let (diags, ..) = run_native(src, 32);
     let e067: Vec<_> = diags
         .diagnostics()
@@ -2716,10 +2716,10 @@ fn oversized_object_is_e067_at_the_crossing_field() {
 #[test]
 fn enum_sizes_are_tagged_unions() {
     let fits =
-        "Two: enum {\n    A: @array(@bit8, 0x40000000)\n    B: @array(@bit8, 0x40000000)\n}\n";
+        "Two: either {\n    A: @array(@bit8, 0x40000000)\n    B: @array(@bit8, 0x40000000)\n}\n";
     let (diags, ..) = run_native(fits, 32);
     assert!(!diags.has_errors(), "{diags:?}");
-    let src = "Big: enum {\n    A: @bit8\n    B: @array(@bit8, 0x7FFFFFFF)\n    C\n}\n";
+    let src = "Big: either {\n    A: @bit8\n    B: @array(@bit8, 0x7FFFFFFF)\n    C\n}\n";
     let (diags, _, _, sm, _) = run_native(src, 32);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E067]").count(), 1, "{rendered}");
@@ -2734,7 +2734,7 @@ fn enum_sizes_are_tagged_unions() {
 /// length, never wrapped (problem 2).
 #[test]
 fn oversized_array_is_e067_at_its_length() {
-    let src = "Big: object {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n";
+    let src = "Big: structure {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E067]").count(), 1, "{rendered}");
@@ -2749,7 +2749,7 @@ fn oversized_array_is_e067_at_its_length() {
 /// its template alone reports nothing.
 #[test]
 fn oversized_generic_instance_folds_into_e042() {
-    let src = "Row: object {\n    a: @array(@bit64, 0xFFFFFFFF)\n}\n\nmake[T]: function () nothing {\n    rows: @array(T, 0xFFFFFFFF) = @array(T, 0xFFFFFFFF) {}\n}\n\nmain: function () nothing {\n    make[Row]()\n}\n";
+    let src = "Row: structure {\n    a: @array(@bit64, 0xFFFFFFFF)\n}\n\nmake[T]: function () nothing {\n    rows: @array(T, 0xFFFFFFFF) = @array(T, 0xFFFFFFFF) {}\n}\n\nmain: function () nothing {\n    make[Row]()\n}\n";
     let (diags, _, _, sm) = run(src);
     let rendered = render_all(&diags, &sm);
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
@@ -2768,7 +2768,7 @@ fn codes_of(diags: &Diags) -> Vec<&'static str> {
     diags.diagnostics().iter().map(|d| d.code).collect()
 }
 
-const SELF_CONTAINING: &str = "E: enum {\n    A: E\n    B\n}\n\n";
+const SELF_CONTAINING: &str = "E: either {\n    A: E\n    B\n}\n\n";
 
 /// A type that failed (`E053`) is an error type for every later use: a tag
 /// or literal checked against it asks for no type (no `E024`), a value of
@@ -2785,7 +2785,7 @@ fn failed_type_is_an_error_type_for_later_uses() {
         // An `if` value whose `then` has the failed type.
         "make: function () out: E {\n    out = .B\n}\nmain: function () nothing {\n    x: E = make()\n    y: E = if x == .B then x else .B\n}\n",
         // A struct literal inferred from it, and one of a type holding it.
-        "Box[T]: object {\n    v: T\n}\nHolder: object {\n    e: E\n}\nmain: function () nothing {\n    b: Box[E] = Box { v = .B }\n    h: Holder = Holder { e = .B }\n}\n",
+        "Box[T]: structure {\n    v: T\n}\nHolder: structure {\n    e: E\n}\nmain: function () nothing {\n    b: Box[E] = Box { v = .B }\n    h: Holder = Holder { e = .B }\n}\n",
         // Calling a local whose function type names it.
         "take: function (e: E) nothing {\n}\nmain: function () nothing {\n    f: ref function (e: E) nothing = ref take\n    f(.B)\n}\n",
     ];
@@ -2812,28 +2812,28 @@ fn failed_type_hides_no_other_error() {
 #[test]
 fn failed_layout_stops_at_its_first_slot() {
     let growing =
-        "W[T]: object {\n    v: T\n    w: W[W[T]]\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
+        "W[T]: structure {\n    v: T\n    w: W[W[T]]\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
     assert_eq!(codes_of(&check_src(growing)), ["E053"]);
     let deeper =
-        "W[T]: object {\n    w: W[W[T]]\n    v: T\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
+        "W[T]: structure {\n    w: W[W[T]]\n    v: T\n}\nmain: function () nothing {\n    x: W[@bit8] = .B\n}\n";
     assert_eq!(codes_of(&check_src(deeper)), ["E051"]);
-    let named = "O: object {\n    a: O\n    b: Nope\n}\n";
+    let named = "O: structure {\n    a: O\n    b: Nope\n}\n";
     assert_eq!(codes_of(&check_src(named)), ["E053", "E023"]);
     let two_cycles =
-        "A: object {\n    b: B\n    c: C\n}\nB: object {\n    a: A\n}\nC: object {\n    a: A\n}\n";
+        "A: structure {\n    b: B\n    c: C\n}\nB: structure {\n    a: A\n}\nC: structure {\n    a: A\n}\n";
     assert_eq!(codes_of(&check_src(two_cycles)), ["E053"]);
 }
 
 /// An object too large for the target (`E067`) is an error type too.
 #[test]
 fn oversized_type_is_an_error_type_for_later_uses() {
-    let src = "Big: object {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n\nmain: function () nothing {\n    b: Big = .B\n    c: Big = Big { a = .X }\n}\n";
+    let src = "Big: structure {\n    a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)\n}\n\nmain: function () nothing {\n    b: Big = .B\n    c: Big = Big { a = .X }\n}\n";
     assert_eq!(codes_of(&check_src(src)), ["E067"]);
 }
 
 // ---- type aliases -------------------------------------------------------
 
-const BOX: &str = "Box[T]: object {\n    value: T\n    make: function (value: T) b: Box[T] {\n        b = Box[T] { value = value }\n    }\n}\n";
+const BOX: &str = "Box[T]: structure {\n    value: T\n    make: function (value: T) b: Box[T] {\n        b = Box[T] { value = value }\n    }\n}\n";
 
 /// An alias is its type: values move between the two spellings with no
 /// conversion, through statics, struct literals and generic instances.
@@ -2941,7 +2941,7 @@ fn an_alias_is_not_a_value() {
 /// `Pair[T]` whose `@add` checks only for a `T` with an `@add` of its own.
 const PAIR: &str = "@add: function (lhs: @bit32, rhs: @bit32) out: @bit32 {\n    \
     out = @i_add_32(lhs, rhs)\n}\n\
-    Pair[T]: object {\n    value: T\n    \
+    Pair[T]: structure {\n    value: T\n    \
     @add: function (lhs: Pair[T], rhs: Pair[T]) out: Pair[T] {\n        \
     out = Pair[T] { value = lhs.value + rhs.value }\n    }\n}\n";
 
@@ -2986,7 +2986,7 @@ fn an_unused_generic_hook_still_reports_what_no_argument_fixes() {
     // `Pair[@bit8]` parks its `@add`; the template check still finds the
     // unresolved name, once.
     let diags = check_src(
-        "Pair[T]: object {\n    value: T\n    \
+        "Pair[T]: structure {\n    value: T\n    \
          @add: function (lhs: Pair[T], rhs: Pair[T]) out: Pair[T] {\n        \
          missing()\n        out = lhs\n    }\n}\n\
          main: function () nothing {\n    c: Pair[@bit8] = Pair { value = 0x1 }\n}\n",
@@ -2994,7 +2994,7 @@ fn an_unused_generic_hook_still_reports_what_no_argument_fixes() {
     assert_eq!(messages(&diags), ["unresolved name `missing`"]);
 }
 
-const COUNTER: &str = "Counter: object {\n    n: @bit32\n\n    count: function (self) nothing {\n        self.n += 0x1\n    }\n}\n\
+const COUNTER: &str = "Counter: structure {\n    n: @bit32\n\n    count: function (self) nothing {\n        self.n += 0x1\n    }\n}\n\
                        @add: function (a: @bit32, b: @bit32) sum: @bit32 {\n    sum = @i_add_32(a, b)\n}\n";
 
 #[test]
@@ -3114,8 +3114,8 @@ fn compound_assignment_in_a_generic_folds_into_e042() {
     assert!(!has_code(&diags, "E043"), "{diags:?}");
 }
 
-const CELL: &str = "Point: object {\n    x: @bit32\n    y: @bit32\n}\n\
-                    Cell: object {\n    p: Point\n\n    \
+const CELL: &str = "Point: structure {\n    x: @bit32\n    y: @bit32\n}\n\
+                    Cell: structure {\n    p: Point\n\n    \
                     get: function (self) value: ref Point {\n        value = ref self.p\n    }\n\n    \
                     copy: function (self) value: Point => self.p\n\n    \
                     raw: function (self) value: ref unknown => (ref self.p) as ref unknown\n}\n";
@@ -3224,7 +3224,7 @@ fn function_references_rebind_and_compare() {
     );
     assert!(!check_src(&src).has_errors(), "{src}");
     let src = format!(
-        "{ADD_ONE}Holder: object {{\n    f: ref function (@bit32) @bit32\n}}\nmain: function () nothing {{\n    holder: Holder = Holder {{ f = ref add_one }}\n    through: ref Holder = ref holder\n    through.f = ref add_one\n    x: @bit32 = through.f(0x1)\n    if holder.f == through.f {{\n    }}\n}}\n"
+        "{ADD_ONE}Holder: structure {{\n    f: ref function (@bit32) @bit32\n}}\nmain: function () nothing {{\n    holder: Holder = Holder {{ f = ref add_one }}\n    through: ref Holder = ref holder\n    through.f = ref add_one\n    x: @bit32 = through.f(0x1)\n    if holder.f == through.f {{\n    }}\n}}\n"
     );
     assert!(!check_src(&src).has_errors(), "{src}");
 }
@@ -3247,9 +3247,9 @@ fn bare_function_type_reports_once() {
 /// is still `E021`.
 #[test]
 fn template_tags_of_enums_over_parameters() {
-    let opt = "Opt[T]: enum {\n    None\n    Some: T\n}\n";
+    let opt = "Opt[T]: either {\n    None\n    Some: T\n}\n";
     let src = format!(
-        "{opt}Holder[T]: object {{\n    data: Opt[ref T]\n    make: function () h: Holder[T] {{\n        h = Holder[T] {{ data = .None }}\n    }}\n}}\nf[T]: function () nothing {{\n    a: Opt[T] = .None\n    b: Opt[ref T] = .None\n    match b {{\n        .None => {{}}\n    }} else {{}}\n}}\nmain: function () nothing {{}}\n"
+        "{opt}Holder[T]: structure {{\n    data: Opt[ref T]\n    make: function () h: Holder[T] {{\n        h = Holder[T] {{ data = .None }}\n    }}\n}}\nf[T]: function () nothing {{\n    a: Opt[T] = .None\n    b: Opt[ref T] = .None\n    match b {{\n        .None => {{}}\n    }} else {{}}\n}}\nmain: function () nothing {{}}\n"
     );
     assert!(!check_src(&src).has_errors(), "{src}");
     let src = format!("{opt}f[T]: function () nothing {{\n    a: Opt[ref T] = .Nnoe\n}}\nmain: function () nothing {{}}\n");
@@ -3261,7 +3261,7 @@ fn template_tags_of_enums_over_parameters() {
 #[test]
 fn template_calls_a_method_or_a_field() {
     let src = format!(
-        "{ADD_ONE}WithMethod: object {{\n    f: function (self, value: @bit32) result: @bit32 {{\n        result = value\n    }}\n}}\nWithField: object {{\n    f: ref function (@bit32) @bit32\n}}\nrun[T]: function (value: ref T) result: @bit32 {{\n    result = value.f(0x1)\n}}\nmain: function () nothing {{\n    a: WithMethod = WithMethod {{}}\n    b: WithField = WithField {{ f = ref add_one }}\n    x: @bit32 = run[WithMethod](ref a)\n    y: @bit32 = run[WithField](ref b)\n}}\n"
+        "{ADD_ONE}WithMethod: structure {{\n    f: function (self, value: @bit32) result: @bit32 {{\n        result = value\n    }}\n}}\nWithField: structure {{\n    f: ref function (@bit32) @bit32\n}}\nrun[T]: function (value: ref T) result: @bit32 {{\n    result = value.f(0x1)\n}}\nmain: function () nothing {{\n    a: WithMethod = WithMethod {{}}\n    b: WithField = WithField {{ f = ref add_one }}\n    x: @bit32 = run[WithMethod](ref a)\n    y: @bit32 = run[WithField](ref b)\n}}\n"
     );
     assert!(!check_src(&src).has_errors(), "{src}");
 }
@@ -3272,11 +3272,11 @@ fn template_calls_a_method_or_a_field() {
 #[test]
 fn function_addresses_by_path_and_member() {
     let src = format!(
-        "{ADD_ONE}Box: object {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n    take: function (self: Box) value: @bit32 {{\n        value = self.value\n    }}\n    make: function () out: Box {{\n        out = Box {{ value = 0x1 }}\n    }}\n}}\nmain: function () nothing {{\n    get: ref function (ref Box) @bit32 = ref Box.get\n    take: ref function (Box) @bit32 = ref Box.take\n    make: ref function () Box = ref Box.make\n    b: Box = make()\n    x: @bit32 = get(ref b)\n}}\n"
+        "{ADD_ONE}Box: structure {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n    take: function (self: Box) value: @bit32 {{\n        value = self.value\n    }}\n    make: function () out: Box {{\n        out = Box {{ value = 0x1 }}\n    }}\n}}\nmain: function () nothing {{\n    get: ref function (ref Box) @bit32 = ref Box.get\n    take: ref function (Box) @bit32 = ref Box.take\n    make: ref function () Box = ref Box.make\n    b: Box = make()\n    x: @bit32 = get(ref b)\n}}\n"
     );
     assert!(!check_src(&src).has_errors(), "{src}");
     let src = format!(
-        "{ADD_ONE}Box: object {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n}}\nmain: function () nothing {{\n    b: Box = Box {{ value = 0x1 }}\n    get: ref function (ref Box) @bit32 = ref b.get\n}}\n"
+        "{ADD_ONE}Box: structure {{\n    value: @bit32\n    get: function (self) value: @bit32 {{\n        value = self.value\n    }}\n}}\nmain: function () nothing {{\n    b: Box = Box {{ value = 0x1 }}\n    get: ref function (ref Box) @bit32 = ref b.get\n}}\n"
     );
     let diags = check_src(&src);
     assert_eq!(codes_of(&diags), ["E010"], "{src}");

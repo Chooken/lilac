@@ -1,4 +1,4 @@
-FILE: object {
+FILE: structure {
     opaque_ptr: ref unknown
 }
 

@@ -15,12 +15,12 @@ using Standard.Os.MacOs as MacOs
 
 /// An open file, pipe or console: a Windows `HANDLE`, else a file
 /// descriptor.
-Handle: object {
+Handle: structure {
     value: @bit_native
 }
 
 /// How `open` opens a file.
-OpenMode: enum {
+OpenMode: either {
     /// Read an existing file.
     Read
     /// Write a file, created if missing and emptied if not.
@@ -32,7 +32,7 @@ OpenMode: enum {
 }
 
 /// Where a `seek` offset counts from.
-SeekFrom: enum {
+SeekFrom: either {
     Start
     Current
     End

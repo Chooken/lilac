@@ -1112,7 +1112,7 @@ mod tests {
             .collect()
     }
 
-    const SHAPES: &str = "Shape: enum {\n    Dot\n    Line\n}\nPaint: enum {\n    Red\n    Blue\n}\nmain: function () nothing {\n    s: Shape = .\n}\n";
+    const SHAPES: &str = "Shape: either {\n    Dot\n    Line\n}\nPaint: either {\n    Red\n    Blue\n}\nmain: function () nothing {\n    s: Shape = .\n}\n";
 
     /// A `.` completion waits for a compile of the text it was asked
     /// about; an edit while it waits makes it wait for the next compile,

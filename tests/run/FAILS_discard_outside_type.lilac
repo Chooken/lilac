@@ -3,7 +3,7 @@
 // Only a function declared in the type may end one of its values without
 // its `@on_drop`.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

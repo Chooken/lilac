@@ -13,12 +13,12 @@ using Standard
 using Standard.Io
 using Standard.Collections
 
-Point: object {
+Point: structure {
     x: Int
     y: Int
 }
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {

@@ -17,7 +17,7 @@ pub struct DefInfo {
     pub name: String,
     /// Namespace- (and owner-) qualified name.
     pub qualified: String,
-    /// `function`/`hook`/`object`/`enum`/`const`/`field`.
+    /// `function`/`hook`/`structure`/`either`/`const`/`field`.
     pub kind: &'static str,
     /// Whole-declaration span.
     pub span: Span,
@@ -114,8 +114,8 @@ fn build_index(analysis: &Analysis) -> AnalysisIndex {
         let kind = match &def.kind {
             DefKind::Func(_) => "function",
             DefKind::Hook(_) => "hook",
-            DefKind::Object => "object",
-            DefKind::Enum => "enum",
+            DefKind::Object => "structure",
+            DefKind::Enum => "either",
             DefKind::Alias(_) => "alias",
             DefKind::Const { .. } => "const",
             DefKind::Global { .. } => "global",
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn index_qualifies_member_hooks_by_owner() {
         let retained = retained(
-            "Int64: object {\n    data: @bit64\n\
+            "Int64: structure {\n    data: @bit64\n\
              @add: function (lhs: Int64, rhs: Int64) Int64 => lhs\n}\n\
              main: function () nothing {\n}\n",
         );

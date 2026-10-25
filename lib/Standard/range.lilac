@@ -1,7 +1,7 @@
 /// The integers from the smaller of `from` and `to` up to, not including,
 /// the larger: `Range.of(2, 5)` and `Range.of(5, 2)` both cover 2, 3 and
 /// 4, and `Range.of(3, 3)` covers nothing.
-Range: object {
+Range: structure {
 
     from: Int
     to: Int

@@ -1,4 +1,4 @@
-Constant[T]: object {
+Constant[T]: structure {
 
     private {
         value: T

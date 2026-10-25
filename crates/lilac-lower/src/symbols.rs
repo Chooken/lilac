@@ -148,13 +148,13 @@ fn c_slot_problem(
     if matches!(lir, LirTy::Array(..)) {
         return Some((
             "an array",
-            "C passes no array by value; pass a `ref` to it, or wrap it in an object".to_owned(),
+            "C passes no array by value; pass a `ref` to it, or wrap it in a structure".to_owned(),
         ));
     }
     if !lilac_ir::is_c_abi_type(&lir) {
         return Some((
             "not a C ABI type",
-            "C slots must be a bit integer, a float, `ref T` or an object".to_owned(),
+            "C slots must be a bit integer, a float, `ref T` or a structure".to_owned(),
         ));
     }
     if lir.is_scalar() {

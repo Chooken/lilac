@@ -367,7 +367,7 @@ impl Checker<'_> {
     ) -> Result<(), ErrorGuaranteed> {
         let what = match layout {
             Layout::Object { .. } => "a field",
-            Layout::Enum { .. } => "an enum payload",
+            Layout::Enum { .. } => "an either payload",
         };
         let mut result = Ok(());
         for (index, (_, ty)) in layout.slots().into_iter().enumerate() {

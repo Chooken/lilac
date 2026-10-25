@@ -108,7 +108,7 @@ with the phase that fixes it, and un-ignored there:
   line just before a declaration, documents it. A blank line or a plain
   comment between them ends the run. Only a declaration takes one: an
   item (`Item::doc`), a member or
-  field (both are `Item`s), or an enum variant (`EnumVariant::doc`).
+  field (both are `Item`s), or an either variant (`EnumVariant::doc`).
   The text is each line after `///` and at most one space, joined with
   `\n` (`lilac_ast::Doc`, which keeps the span too). Anything else
   leaves the run as a plain comment.
@@ -159,7 +159,7 @@ Rendered { text: String, params: Vec<(u32, u32)> }  // UTF-16 ranges
   Error`), `extern`/`export`, and `=>` bodies left out.
 - Fields `x: Int` (in `Point`), variants `Some: T` (in `Optional[T]`),
   constants `limit: Int => 0x40`, globals, aliases `Format: alias
-  @format_args(Formatter)`, objects and enums (`Point: object` and its
+  @format_args(Formatter)`, structures and eithers (`Point: structure` and its
   fields, up to a limit, from the definition table, never source text).
 - Intrinsics from Phase 2's table, builtin types with `Builtin::doc()`,
   `@array`/`@format_args` from the slot descriptions.

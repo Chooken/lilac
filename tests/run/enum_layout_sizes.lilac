@@ -1,5 +1,5 @@
 // expect-exit: 0
-// Enums are tagged unions (robustness plan phase 4): the C
+// Eithers are tagged unions (robustness plan phase 4): the C
 // `struct { uintN_t tag; union { P0 p0; P1 p1; … } payload; }`, the tag the
 // smallest container holding the variant count and the payloads sharing one
 // area at the tag's size rounded up to the strictest payload alignment. No
@@ -10,34 +10,34 @@
 using Standard
 using Standard.Process
 
-Point: object {
+Point: structure {
     x: @bit32
     y: @bit32
 }
 
-Plain: enum {
+Plain: either {
     A
     B
     C
 }
 
-Single: enum {
+Single: either {
     Only: @bit16
 }
 
-Mixed: enum {
+Mixed: either {
     Nothing
     Byte: @bit8
     Word: @bit64
     Half: @bit16
 }
 
-Nested: enum {
+Nested: either {
     Inner: Mixed
     Flag: @bit8
 }
 
-Spread: object {
+Spread: structure {
     a: @bit8
     items: @array(Mixed, 0x3)
 }

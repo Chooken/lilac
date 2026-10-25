@@ -1,4 +1,4 @@
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @byte_buffer, out: ref Out) nothing {}
 

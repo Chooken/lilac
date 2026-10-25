@@ -1,4 +1,4 @@
-GenBox[T]: object {
+GenBox[T]: structure {
     a_value: T
 }
 

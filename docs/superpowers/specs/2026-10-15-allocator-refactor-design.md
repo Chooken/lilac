@@ -15,7 +15,7 @@ zero-size handling, and out-of-memory policy move into each concrete
 allocator so every allocator is directly usable without the handle.
 `GeneralAllocator` must stop depending on zero-initialized state being
 valid (no `EMPTY`-as-valid-zero, no lazy `None`-means-unmapped fields that
-only work because a zeroed `Optional` reads as `Some`); objects are
+only work because a zeroed `Optional` reads as `Some`); structures are
 assigned via `init()` functions. Null pointers must never appear in
 user-facing code as "out of memory": every allocator guarantees live
 memory by panicking internally. Out-of-memory recovery is out of scope;

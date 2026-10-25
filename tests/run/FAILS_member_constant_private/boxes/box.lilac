@@ -1,4 +1,4 @@
-Box: object {
+Box: structure {
     private {
         SECRET: @bit32 => 0x2A
     }

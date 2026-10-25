@@ -2,7 +2,7 @@
 /// The C library's heap: `calloc`, `realloc` and `free`. It needs a C
 /// library (`--libc`), and shares its heap with C code. Aligns to at most
 /// two pointers, C's `max_align_t`.
-CAllocator: object {
+CAllocator: structure {
 
     ALLOCATOR_TABLE: ref AllocatorTable[CAllocator] => ref c_table
 

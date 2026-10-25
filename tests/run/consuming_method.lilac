@@ -5,7 +5,7 @@
 
 using Standard.Io
 
-Token: object {
+Token: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {

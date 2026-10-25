@@ -1,17 +1,17 @@
 // expect-exit: 0
 // Top-level `name: Type = constant` and `name: Type` are mutable globals:
-// constant initial values (scalars, objects, variants), zeroed ones, and
+// constant initial values (scalars, structures, variants), zeroed ones, and
 // reads, writes and references through functions.
 
 using Standard
 using Standard.Process
 
-Point: object {
+Point: structure {
     x: @bit32
     y: @bit32
 }
 
-Shape: enum {
+Shape: either {
     Empty
     Square: @bit32
 }

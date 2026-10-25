@@ -1,6 +1,6 @@
 // expect-error: E010
 // expect-stderr: error[E010]: cannot take a reference into a temporary `Standard.Optional[@bit32]`
-// A reference capture of a value payload needs the enum in memory; a
+// A reference capture of a value payload needs the either in memory; a
 // temporary is gone after its arm.
 
 using Standard

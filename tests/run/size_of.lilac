@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Mixed: object {
+Mixed: structure {
     a: @bit8
     b: @bit32
     c: @bit16

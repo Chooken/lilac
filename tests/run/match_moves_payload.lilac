@@ -7,7 +7,7 @@
 
 using Standard.Io
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -15,23 +15,23 @@ Leaf: object {
     }
 }
 
-Either: enum {
+Either: either {
     One: Leaf
     Other: Leaf
 }
 
-make: function (one: @bit8, c: @bit32) either: Either {
+make: function (one: @bit8, c: @bit32) value: Either {
     if one {
-        either = .One(Leaf { c = c })
+        value = .One(Leaf { c = c })
     } else {
-        either = .Other(Leaf { c = c })
+        value = .Other(Leaf { c = c })
     }
 }
 
 main: function () nothing {
     {
-        either: Either = .One(Leaf { c = 'a' })
-        match either {
+        value: Either = .One(Leaf { c = 'a' })
+        match value {
             .One -> leaf: Leaf {
                 print_char('<')
             }

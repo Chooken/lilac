@@ -15,7 +15,7 @@ Format: alias @format_args(Formatter)
 FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
 
 /// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
-Formatter: object {
+Formatter: structure {
     private {
         target: ref unknown
         sink: ref FormatSink
@@ -83,7 +83,7 @@ Formatter: object {
 
 /// An integer's bits in hexadecimal (lowercase, no prefix): `{n.hex()}`.
 /// A negative integer shows its two's complement at its own width.
-Hex: object {
+Hex: structure {
     value: @bit64
 
     @format: function (self, out: ref Formatter) nothing {
@@ -92,7 +92,7 @@ Hex: object {
 }
 
 /// An integer's bits in binary (no prefix): `{n.binary()}`.
-Binary: object {
+Binary: structure {
     value: @bit64
 
     @format: function (self, out: ref Formatter) nothing {
@@ -102,7 +102,7 @@ Binary: object {
 
 /// A format padded with spaces to at least `width` characters (code
 /// points), from `pad_left`, `pad_right` or `pad_center`.
-Padded: object {
+Padded: structure {
     text: ref Format
     width: @bit_native
     /// How much of the padding goes before the text: 0x0 none, 0x1 half

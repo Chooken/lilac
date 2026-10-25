@@ -1,7 +1,7 @@
 // Clocks and sleeping (`clock_gettime(2)`, ...).
 
 /// `struct timespec` (64-bit `time_t`).
-Timespec: object {
+Timespec: structure {
     tv_sec: @bit64
     tv_nsec: @bit64
 }

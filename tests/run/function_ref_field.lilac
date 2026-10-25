@@ -8,7 +8,7 @@
 
 using Standard.Io
 
-Machine: object {
+Machine: structure {
     step: ref function (@bit32) @bit32
     count: @bit32
 }

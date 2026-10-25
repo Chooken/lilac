@@ -1,7 +1,7 @@
 using Standard.Sync as Sync
 using Standard.Heap as Heap
 
-SharedMemory[T]: object {
+SharedMemory[T]: structure {
 
     private {
         ptr: ref SharedHeader[T]
@@ -79,7 +79,7 @@ SharedMemory[T]: object {
     }
 }
 
-WeakMemory[T]: object {
+WeakMemory[T]: structure {
 
     private {
         ptr: ref SharedHeader[T]
@@ -114,7 +114,7 @@ WeakMemory[T]: object {
 
 private {
 
-    SharedHeader[T]: object {
+    SharedHeader[T]: structure {
         strong_references: Sync.AtomicInt
         weak_references: Sync.AtomicInt
         allocator: Heap.Allocator

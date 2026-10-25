@@ -76,8 +76,29 @@ impl Parser {
         name: String,
         name_span: Span,
         generic_params: Vec<String>,
-        kind_token: Token,
+        mut kind_token: Token,
     ) -> Result<Item, ErrorGuaranteed> {
+        if let Some(kind) = self.old_type_keyword(&kind_token) {
+            let keyword = if kind == TokenKind::KwStructure {
+                "structure"
+            } else {
+                "either"
+            };
+            diags.emit(
+                Diagnostic::error(
+                    codes::E001,
+                    format!(
+                        "`{}` is not a keyword; a type is declared with `{keyword}`",
+                        kind_token.text
+                    ),
+                )
+                .label(kind_token.span, true, String::new())
+                .suggest(kind_token.span, keyword),
+            );
+            self.recover();
+            // The body still parses, so the rest of the file does too.
+            kind_token.kind = kind;
+        }
         let kind = match kind_token.kind {
             TokenKind::KwFunction => {
                 ItemKind::Func(self.parse_func_rest(diags, false, generic_params)?)
@@ -112,7 +133,7 @@ impl Parser {
             TokenKind::KwAlias => {
                 self.parse_alias_rest(diags, &name, name_span, &generic_params)?
             }
-            TokenKind::KwObject => {
+            TokenKind::KwStructure => {
                 let members = self.parse_object_members(diags)?;
                 return Ok(Item {
                     doc: None,
@@ -141,6 +162,19 @@ impl Parser {
             name,
             kind,
         })
+    }
+
+    /// The keyword `token` meant if it is `object` or `enum` (the keywords
+    /// before `structure` and `either`) opening a body.
+    fn old_type_keyword(&self, token: &Token) -> Option<TokenKind> {
+        if token.kind != TokenKind::Ident || self.peek().kind != TokenKind::LBrace {
+            return None;
+        }
+        match token.text.as_str() {
+            "object" => Some(TokenKind::KwStructure),
+            "enum" => Some(TokenKind::KwEither),
+            _ => None,
+        }
     }
 
     /// The type after `name: alias`. An alias is not generic, is not a
@@ -188,7 +222,7 @@ impl Parser {
         kind_token: Token,
         in_object: bool,
     ) -> Result<Item, ErrorGuaranteed> {
-        if kind_token.kind == TokenKind::KwEnum {
+        if kind_token.kind == TokenKind::KwEither {
             let (variants, members) = self.parse_enum_body(diags)?;
             Ok(Item {
                 doc: None,
@@ -231,7 +265,7 @@ impl Parser {
                     return Err(Self::err(
                         diags,
                         name_span,
-                        "only `object`, `function`, and `enum` declarations take generic parameters",
+                        "only `structure`, `function`, and `either` declarations take generic parameters",
                     ));
                 }
                 return Ok(Item {
@@ -270,7 +304,7 @@ impl Parser {
             return Err(Self::err(
                 diags,
                 name_span,
-                "only `object`, `function`, and `enum` declarations take generic parameters",
+                "only `structure`, `function`, and `either` declarations take generic parameters",
             ));
         }
         let span = join_spans(name_span, value.span());
@@ -554,11 +588,11 @@ impl Parser {
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<Vec<Item>, ErrorGuaranteed> {
-        let open = self.expect(diags, TokenKind::LBrace, "`{` to open object body")?;
+        let open = self.expect(diags, TokenKind::LBrace, "`{` to open structure body")?;
         let mut members = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
-                return Err(Self::unclosed(diags, &open, "object body", self.peek()));
+                return Err(Self::unclosed(diags, &open, "structure body", self.peek()));
             }
             let before = self.pos;
             if let Ok(item) = self.parse_item(diags, true) {
@@ -578,7 +612,7 @@ impl Parser {
 
     /// Parses an enum body: variants (`One`, `Some: T`) interleaved with
     /// members. A member is a hook (`@name: ...`), a `private { ... }` block,
-    /// a generic declaration (`name[T]: ...`), a nested `object`/`enum`
+    /// a generic declaration (`name[T]: ...`), a nested `structure`/`either`
     /// (rejected by the resolver, `E036`), a `function` with a body, or a
     /// constant (`name: Type => value`); any other `name: Type` is a
     /// payload variant.
@@ -586,12 +620,12 @@ impl Parser {
         &mut self,
         diags: &mut lilac_error::Diags,
     ) -> Result<(Vec<EnumVariant>, Vec<Item>), ErrorGuaranteed> {
-        let open = self.expect(diags, TokenKind::LBrace, "`{` to open enum body")?;
+        let open = self.expect(diags, TokenKind::LBrace, "`{` to open either body")?;
         let mut variants = Vec::new();
         let mut members = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
-                return Err(Self::unclosed(diags, &open, "enum body", self.peek()));
+                return Err(Self::unclosed(diags, &open, "either body", self.peek()));
             }
             let is_member = matches!(self.peek().kind, TokenKind::At | TokenKind::KwPrivate)
                 || (self.peek().kind == TokenKind::Ident
@@ -600,8 +634,12 @@ impl Parser {
                     && self.peek_at(1).kind == TokenKind::Colon
                     && matches!(
                         self.peek_at(2).kind,
-                        TokenKind::KwObject | TokenKind::KwEnum | TokenKind::KwAlias
-                    ));
+                        TokenKind::KwStructure | TokenKind::KwEither | TokenKind::KwAlias
+                    ))
+                || (self.peek().kind == TokenKind::Ident
+                    && self.peek_at(1).kind == TokenKind::Colon
+                    && matches!(self.peek_at(2).text.as_str(), "object" | "enum")
+                    && self.peek_at(3).kind == TokenKind::LBrace);
             if is_member {
                 let before = self.pos;
                 if let Ok(item) = self.parse_item(diags, true) {
@@ -617,7 +655,7 @@ impl Parser {
                 continue;
             }
             let doc = self.peek().doc.as_deref().cloned();
-            let ident = self.expect(diags, TokenKind::Ident, "enum variant name")?;
+            let ident = self.expect(diags, TokenKind::Ident, "variant name")?;
             let name_span = ident.span;
             // `name: function (…) … { … }` is a method, never a payload: a
             // function payload is a `ref function`.

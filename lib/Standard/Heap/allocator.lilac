@@ -35,7 +35,7 @@ get_default_allocator: function () allocator: Allocator {
 /// An allocator type's functions, each taking the allocator first. `size`
 /// and `alignment` are in bytes; each allocator checks them, so a size
 /// is always positive and an alignment a power of two.
-AllocatorTable[T]: object {
+AllocatorTable[T]: structure {
     /// `size` zeroed bytes aligned to `alignment`; panics when out of
     /// memory.
     allocate: ref function (target: ref T, size: Int, alignment: Int) allocation: ref unknown
@@ -51,7 +51,7 @@ AllocatorTable[T]: object {
 /// allocator, so it is used only while the allocator stays in place.
 /// Allocations are zeroed; running out of memory panics. A size of zero
 /// takes no memory: it gives an aligned address that is never read.
-Allocator: object {
+Allocator: structure {
 
     private {
         target: ref unknown
@@ -157,7 +157,7 @@ private {
 
     /// `AllocatorTable` with the allocator's type erased, as `Allocator`
     /// holds it: every table has this layout.
-    AllocatorFunctions: object {
+    AllocatorFunctions: structure {
         allocate: ref function (target: ref unknown, size: Int, alignment: Int) allocation: ref unknown
         reallocate: ref function (target: ref unknown, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) allocation: ref unknown
         free: ref function (target: ref unknown, memory: ref unknown, size: Int, alignment: Int) nothing

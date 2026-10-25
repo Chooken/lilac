@@ -8,13 +8,13 @@
 // expect-stderr:   at Standard.Int32.@div (Standard/int32.lilac:26:69)
 // expect-stderr:   at main (compound_assign.lilac:66:5)
 // `x op= e` is `x = x op e` through the operator's hook: on a local, a
-// field, a field through a `ref`, a global and an object with its own
+// field, a field through a `ref`, a global and a structure with its own
 // `@add`. A divisor known only at run time still panics.
 
 using Standard
 using Standard.Io
 
-Point: object {
+Point: structure {
     x: Int32
     y: Int32
 
@@ -24,7 +24,7 @@ Point: object {
     }
 }
 
-Pair: object {
+Pair: structure {
     a: Int32
     b: Int32
 

@@ -1,6 +1,6 @@
 //! The one layout authority: the C layout of every Lilac type on a target.
 //!
-//! An `object` is laid out exactly as the C struct with the same fields in
+//! A `structure` is laid out exactly as the C struct with the same fields in
 //! the same order, so `sizeof`, `_Alignof` and every `offsetof` agree with
 //! the target's C compiler: each field at the next multiple of its
 //! alignment, the size padded to a multiple of the largest alignment.

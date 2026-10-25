@@ -152,7 +152,7 @@ constants and inline calls, and typeck's template `E037` guard.
     by `if d != 0x0` in a `=>` hook is not reported as `E060` when `d`
     is known.
 - Tests: evaluator unit tests for `not` of 0, 1 and 2, `!=` over
-  integers, objects and enum variants, and `not` of a non-constant
+  integers, structures and either variants, and `not` of a non-constant
   (`None`).
 
 ## Editor (`lilac-lsp`, `editors/vscode`)
@@ -183,11 +183,11 @@ constants and inline calls, and typeck's template `E037` guard.
 
 ## Run tests (`tests/run/`)
 
-- `not_equal.lilac`: `!=` on integers, an object, enum variants with and
+- `not_equal.lilac`: `!=` on integers, a structure, either variants with and
   without payloads; `not` on comparisons and on a `@bit8` that is 2.
 - `compound_assign.lilac`: each of the five on `@bit32`, a field
   (`p.x += 1`), a field through a `ref` parameter, a global, a
-  user-defined `@add` on an object, and `/=` by a zero known only at run
+  user-defined `@add` on a structure, and `/=` by a zero known only at run
   time, which panics with "division by zero" through `Standard`'s hooks.
   A literal `x /= 0x0` should instead be `E060` (`inline_call_panic`
   already sees the `=>` hook's constant argument); a typeck or lowering

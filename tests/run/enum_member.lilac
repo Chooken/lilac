@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Choice: enum {
+Choice: either {
     One
     Two
 

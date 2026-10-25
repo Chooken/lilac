@@ -1,46 +1,46 @@
 // expect-exit: 0
-// Objects are C structs and arrays C arrays (robustness plan phase 2): each
+// Structures are C structs and arrays C arrays (robustness plan phase 2): each
 // field at the next multiple of its alignment, the size padded to the
-// largest alignment, no reordering, and an empty object is size 0, align 1.
+// largest alignment, no reordering, and an empty structure is size 0, align 1.
 // Pinned for the 64-bit hosts the run tests build on.
 
 using Standard.Process
 
-Empty: object {
+Empty: structure {
 }
 
-Padded: object {
+Padded: structure {
     a: @bit64
     b: @bit8
 }
 
-Nested: object {
+Nested: structure {
     a: @bit8
     inner: Padded
     c: @bit16
 }
 
-Quad: object {
+Quad: structure {
     a: @bit8
     q: @fbit128
 }
 
-Holder: object {
+Holder: structure {
     a: @bit8
     items: @array(Padded, 0x3)
     gap: Empty
     b: @bit8
 }
 
-Row: object {
+Row: structure {
     cells: @array(Padded, 0x3)
 }
 
-Grid: object {
+Grid: structure {
     rows: @array(@array(@bit16, 0x3), 0x5)
 }
 
-Pointers: object {
+Pointers: structure {
     a: @bit16
     p: ref Padded
     n: @bit_native

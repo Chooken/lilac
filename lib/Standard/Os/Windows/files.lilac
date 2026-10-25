@@ -49,12 +49,12 @@ SetConsoleOutputCP: extern function (wCodePageID: @bit32) ok: @bit32
 MultiByteToWideChar: extern function (CodePage: @bit32, dwFlags: @bit32, lpMultiByteStr: ref @bit8, cbMultiByte: @bit32, lpWideCharStr: ref @bit16, cchWideChar: @bit32) length: @bit32
 WideCharToMultiByte: extern function (CodePage: @bit32, dwFlags: @bit32, lpWideCharStr: ref @bit16, cchWideChar: @bit32, lpMultiByteStr: ref @bit8, cbMultiByte: @bit32, lpDefaultChar: ref unknown, lpUsedDefaultChar: ref unknown) length: @bit32
 
-FILETIME: object {
+FILETIME: structure {
     dwLowDateTime: @bit32
     dwHighDateTime: @bit32
 }
 
-WIN32_FIND_DATAW: object {
+WIN32_FIND_DATAW: structure {
     dwFileAttributes: @bit32
     ftCreationTime: FILETIME
     ftLastAccessTime: FILETIME
@@ -67,7 +67,7 @@ WIN32_FIND_DATAW: object {
     cAlternateFileName: @array(@bit16, 14)
 }
 
-SECURITY_ATTRIBUTES: object {
+SECURITY_ATTRIBUTES: structure {
     nLength: @bit32
     lpSecurityDescriptor: ref unknown
     bInheritHandle: @bit32

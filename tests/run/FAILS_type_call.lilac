@@ -2,7 +2,7 @@
 // expect-stderr: error[E056]: type `Pair` is not callable
 // A type is not a function: `Type(args)` is gone; call a static function.
 
-Pair: object {
+Pair: structure {
     a: @bit32
 }
 

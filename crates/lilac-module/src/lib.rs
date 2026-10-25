@@ -1296,13 +1296,13 @@ mod tests {
         fs.add(
             &lib,
             "int.lilac",
-            "Int: object { data: @bit32 }
+            "Int: structure { data: @bit32 }
 ",
         );
         fs.add(
             &lib,
             "C/c_int.lilac",
-            "CInt: object { data: Int }
+            "CInt: structure { data: Int }
 ",
         );
 

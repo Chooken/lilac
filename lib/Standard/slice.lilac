@@ -2,7 +2,7 @@
 /// `Heap.Allocator.allocate[T]`. It owns nothing: copying one copies the
 /// view, and dropping one drops neither the elements nor the memory.
 /// Every index is checked, and one out of range panics.
-Slice[T]: object {
+Slice[T]: structure {
 
     private {
         ptr: ref T

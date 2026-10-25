@@ -6,7 +6,7 @@
 // A formatter that panics while a panic message is written: the second
 // panic writes a fixed message and exits, rather than recursing.
 
-Boom: object {}
+Boom: structure {}
 
 @format: function (value: ref Boom, out: ref FormatRuntime.Err) nothing {
     @panic("boom")

@@ -1,6 +1,6 @@
 // expect-error: E072
 // A format cannot be an array element.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

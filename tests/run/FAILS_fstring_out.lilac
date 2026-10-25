@@ -1,6 +1,6 @@
 // expect-error: E072
 // A format cannot be an out: its holes would outlive the call.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

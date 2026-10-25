@@ -1,10 +1,10 @@
 // expect-exit: 0
-// `==` on 2 MiB objects compares every byte (a `memcmp`, not one LLVM
+// `==` on 2 MiB structures compares every byte (a `memcmp`, not one LLVM
 // integer, which caps at 2^23 bits).
 
 using Standard.Process
 
-Page: object {
+Page: structure {
     bytes: @array(@bit8, 0x200000)
 }
 

@@ -1,4 +1,4 @@
-Watcher: object {
+Watcher: structure {
     private {
         seen: @bit8
     }

@@ -9,7 +9,7 @@
 using Standard
 using Standard.Io
 
-Buffer: object {
+Buffer: structure {
     used: @bit_native
     bytes: @array(@bit8, 128)
 }

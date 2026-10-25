@@ -12,7 +12,7 @@ using Standard.Io
 using Standard.Heap
 using Standard.Collections
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {

@@ -233,7 +233,7 @@ fn hover_survives_deep_nesting() {
 
 const DOCUMENTED: &str = "\
 /// Two of a kind.
-Pair[T]: object {
+Pair[T]: structure {
     first: T
     /// The other one.
     second: T
@@ -288,7 +288,7 @@ fn hovers_render_declarations_with_their_docs() {
     let pair = hover_markdown(&client, &uri, "Pair[@bit8] {", 0);
     assert_eq!(
         pair,
-        "```lilac\nPair[T]: object {\n    first: T\n    second: T\n}\n```\n\n---\n\nTwo of a kind."
+        "```lilac\nPair[T]: structure {\n    first: T\n    second: T\n}\n```\n\n---\n\nTwo of a kind."
     );
     let second = hover_markdown(&client, &uri, "second\n", 0);
     assert_eq!(
@@ -318,7 +318,7 @@ fn hover_on_a_member_constant_names_its_type() {
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
     let text = "\
-Gen[T]: object {
+Gen[T]: structure {
     /// How many there are.
     SIZE: @bit8 => 0x4
     item: T

@@ -3,7 +3,7 @@
 // A constant of a generic type is one value for every instance, so it
 // cannot call the type's static functions, which belong to each instance.
 
-List[T]: object {
+List[T]: structure {
     FIRST: @bit32 => start()
     item: T
 

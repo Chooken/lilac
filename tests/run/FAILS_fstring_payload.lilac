@@ -1,6 +1,6 @@
 // expect-error: E072
-// A format cannot be an enum payload.
-Out: object {}
+// A format cannot be an either payload.
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 
@@ -9,7 +9,7 @@ number: function () value: @bit32 {
 }
 
 
-Maybe: enum {
+Maybe: either {
     Text: @format_args(Out)
     Nothing
 }

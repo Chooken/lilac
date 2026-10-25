@@ -116,7 +116,7 @@ private {
     }
 }
 
-Counter: object {
+Counter: structure {
     count: @bit32
     @on_drop: function (self) nothing {
     }

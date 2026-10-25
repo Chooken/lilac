@@ -89,7 +89,7 @@ sub int_file {
     $text .= "///\n/// " . ($signed ? "`+`, `-`, `*` and negation" : "`+`, `-` and `*`")
         . " panic on overflow in Debug builds and wrap in\n/// Release; the `wrapping_*` methods wrap in every mode. `/` and `%`\n/// panic on a zero divisor"
         . ($signed ? " and on `MIN / -1`" : "") . ".\n";
-    $text .= "$name: object {\n\n    private {\n        data: $c\n    }\n\n";
+    $text .= "$name: structure {\n\n    private {\n        data: $c\n    }\n\n";
 
     # Constants.
     if ($bits eq 'native') {
@@ -801,7 +801,7 @@ sub float_file {
     $text .= "/// `fmod`. `==` compares raw bits (`0.0 == -0.0` is `false` and equal\n";
     $text .= "/// NaNs are `true`); use `equals` for IEEE equality, `approximately_equals`\n";
     $text .= "/// for a tolerance and `total_compare` for sorting.\n";
-    $text .= "$name: object {\n\n    private {\n        data: $c\n    }\n\n";
+    $text .= "$name: structure {\n\n    private {\n        data: $c\n    }\n\n";
 
     # Constants.
     my @math_consts = (

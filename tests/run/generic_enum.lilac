@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Maybe[T]: enum {
+Maybe[T]: either {
     Some: T
     None
 }

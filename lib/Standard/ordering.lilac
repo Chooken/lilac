@@ -1,5 +1,5 @@
 /// The result of comparing two values.
-Ordering: enum {
+Ordering: either {
     /// The left value is less than the right.
     Less
     /// The two values are equal.

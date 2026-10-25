@@ -123,7 +123,7 @@ private {
 
     /// The log table: for `m` near `j / 64`, the entries `c`, `-ln c` high and `-ln c` low
     /// of entry `j - 45`, with `c` a multiple of 2^-7 near `64 / j`.
-    LogTable: object {
+    LogTable: structure {
         c0: Float64
         h0: Float64
         l0: Float64
@@ -337,7 +337,7 @@ private {
     EXP_FAST_L2: Float64 => -1.0082281460997769e-13
 
     /// `2^(j / 128)` for `j` = 0 to 127: the high double's 26-bit head and the rest of it, and the low double.
-    ExpTable: object {
+    ExpTable: structure {
         a0: Float64
         b0: Float64
         l0: Float64
@@ -880,7 +880,7 @@ private {
     LN_2_LOW42: Float64 => 5.497923018708371e-14
 
     /// For `m` in `[1 + j/128, 1 + (j+1)/128)`: `R` (26 bits) near `1 / m` (from `j` = 53, near `1 / (2 m)`), and `-ln R` (from 53, `-ln (2 R)`) as a pair.
-    LnTable: object {
+    LnTable: structure {
         r0: Float64
         h0: Float64
         l0: Float64
@@ -1454,7 +1454,7 @@ private {
     }
 
     /// The first 1536 bits of `2 / pi` after the binary point, 64 to a field.
-    TwoOverPi: object {
+    TwoOverPi: structure {
         w0: @bit64
         w1: @bit64
         w2: @bit64
@@ -1515,7 +1515,7 @@ private {
     }
 
     /// The limbs of the `Mp` constants, 6 to a constant, most significant first.
-    MpWords: object {
+    MpWords: structure {
         w0: @bit64
         w1: @bit64
         w2: @bit64
@@ -1601,7 +1601,7 @@ private {
     }
 
     /// `atan(j / 64)` for `j` in 0..=64, as (high, low) pairs.
-    AtanTable: object {
+    AtanTable: structure {
         h0: Float64
         l0: Float64
         h1: Float64

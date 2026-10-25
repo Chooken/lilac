@@ -13,7 +13,7 @@
 using Standard
 using Standard.Io
 
-Noisy: object {
+Noisy: structure {
     n: Int
 
     @on_drop: function (self) nothing {

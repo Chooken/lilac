@@ -2,7 +2,7 @@ using Standard.Heap as Heap
 
 /// One value on the heap, owned: a `Box` moves (it cannot be copied) and
 /// dropping it drops the value and frees its memory.
-Box[T]: object {
+Box[T]: structure {
 
     private {
         value: ref T

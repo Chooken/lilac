@@ -1,4 +1,4 @@
-Int64: object {
+Int64: structure {
     private {
         data: @bit64
     }

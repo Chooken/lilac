@@ -226,7 +226,7 @@ for j in range(LOG_FIRST, LOG_LAST + 1):
     rows.append((float(c), th, tl))
 emit("    /// The log table: for `m` near `j / 64`, the entries `c`, `-ln c` high and `-ln c` low")
 emit("    /// of entry `j - 45`, with `c` a multiple of 2^-7 near `64 / j`.")
-emit("    LogTable: object {")
+emit("    LogTable: structure {")
 for i, (c, th, tl) in enumerate(rows):
     emit(f"        c{i}: Float64")
     emit(f"        h{i}: Float64")
@@ -255,9 +255,9 @@ emit()
 
 
 def table(type_name, global_name, doc, rows, fields):
-    """Emits a table of `Float64` rows as an object global, row-major."""
+    """Emits a table of `Float64` rows as a structure global, row-major."""
     emit(f"    /// {doc}")
-    emit(f"    {type_name}: object {{")
+    emit(f"    {type_name}: structure {{")
     for i in range(len(rows)):
         for f in fields:
             emit(f"        {f}{i}: Float64")
@@ -384,7 +384,7 @@ with localcontext() as c:
 big = int(two_pi * (1 << (64 * WORDS)))
 words = [(big >> (64 * (WORDS - 1 - i))) & ((1 << 64) - 1) for i in range(WORDS)]
 emit("    /// The first 1536 bits of `2 / pi` after the binary point, 64 to a field.")
-emit("    TwoOverPi: object {")
+emit("    TwoOverPi: structure {")
 for i in range(WORDS):
     emit(f"        w{i}: @bit64")
 emit("    }")
@@ -421,7 +421,7 @@ for name, v, doc in mp_consts:
     mp_exps.append(e)
 n = len(mp_words)
 emit(f"    /// The limbs of the `Mp` constants, {MP_LIMBS} to a constant, most significant first.")
-emit("    MpWords: object {")
+emit("    MpWords: structure {")
 for i in range(n):
     emit(f"        w{i}: @bit64")
 emit("    }")
@@ -453,7 +453,7 @@ for j in range(0, 65):
     v = Fraction(R.atan_(Fraction(j, 64))) if j else Fraction(0)
     rows.append(split(v, 2))
 emit("    /// `atan(j / 64)` for `j` in 0..=64, as (high, low) pairs.")
-emit("    AtanTable: object {")
+emit("    AtanTable: structure {")
 for i in range(len(rows)):
     emit(f"        h{i}: Float64")
     emit(f"        l{i}: Float64")

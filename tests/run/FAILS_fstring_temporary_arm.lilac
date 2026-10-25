@@ -1,6 +1,6 @@
 // expect-error: E072
 // An arm of a value `if` cannot keep a temporary hole alive.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

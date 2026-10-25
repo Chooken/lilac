@@ -7,7 +7,7 @@ using Standard.Os as Os
 /// aligned) for a block gets a custom block of its own. Only `reset` (or
 /// dropping the arena) gives memory back. Every byte past a block's `used`
 /// is zero, so allocations start zeroed. Not thread-safe.
-ArenaAllocator: object {
+ArenaAllocator: structure {
 
     private {
         // Every block after `current_block` is empty; `reset` keeps them
@@ -326,7 +326,7 @@ private {
 
     /// One mapping of pages: this header, then the allocations from
     /// `@size_of(ArenaBlock)` up to `used`; the rest up to `size` is zero.
-    ArenaBlock: object {
+    ArenaBlock: structure {
         size: Int
         used: Int
         next: Optional[ref ArenaBlock]

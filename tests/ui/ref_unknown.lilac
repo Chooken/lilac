@@ -1,7 +1,7 @@
 malloc: extern function (size: @bit_native) result: ref unknown
 free: extern function (p: ref unknown) nothing
 
-Store: object {
+Store: structure {
     Data: ref unknown
 }
 

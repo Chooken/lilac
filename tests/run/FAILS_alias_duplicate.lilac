@@ -3,7 +3,7 @@
 
 Thing: alias @bit8
 
-Thing: object {
+Thing: structure {
     x: @bit8
 }
 

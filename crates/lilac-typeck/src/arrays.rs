@@ -36,7 +36,7 @@ impl Checker<'_> {
             self.diags.emit(
                 Diagnostic::error(codes::E010, "an array element cannot be a `ref`")
                     .label(element.span, true, "a reference element")
-                    .help("wrap the reference in an object"),
+                    .help("wrap the reference in a structure"),
             );
             return TypeRef::ERROR;
         }

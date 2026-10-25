@@ -1,8 +1,8 @@
-Object1: object {
+Object1: structure {
     value: @bit8
 }
 
-Object2: object {
+Object2: structure {
     value: @bit8
 }
 

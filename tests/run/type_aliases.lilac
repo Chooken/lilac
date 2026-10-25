@@ -1,6 +1,6 @@
 // expect-stdout: ok
 // An alias is another name for a type, the same type: of a builtin, a
-// function type, an array, an object (its statics and struct literals
+// function type, an array, a structure (its statics and struct literals
 // too), a generic instance, and another alias. Values pass between the
 // spellings with no conversion.
 
@@ -11,7 +11,7 @@ Byte: alias @bit8
 Callback: alias function (@bit32) @bit32
 Bytes: alias @array(@bit8, 4)
 
-Point: object {
+Point: structure {
     x: @bit32
     y: @bit32
 
@@ -23,7 +23,7 @@ Point: object {
 Spot: alias Point
 Place: alias Spot
 
-Holder[T]: object {
+Holder[T]: structure {
     value: T
 
     make: function (value: T) holder: Holder[T] {

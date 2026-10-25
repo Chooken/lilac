@@ -6,18 +6,18 @@
 using Standard
 using Standard.Process
 
-Hooked: object {
+Hooked: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {
     }
 }
 
-Holder: object {
+Holder: structure {
     inner: Hooked
 }
 
-Plain: object {
+Plain: structure {
     id: @bit32
     next: ref Plain
 }

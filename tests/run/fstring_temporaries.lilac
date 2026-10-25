@@ -7,7 +7,7 @@
 using Standard.Os as Os
 
 // Writes formatted text straight to standard output.
-Out: object {
+Out: structure {
     write: function (self, text: @format_args(Out)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0
@@ -43,7 +43,7 @@ write_bytes: function (bytes: @byte_buffer) nothing {
 }
 
 
-Noisy: object {
+Noisy: structure {
     value: @bit32
 
     @format: function (self, out: ref Out) nothing {

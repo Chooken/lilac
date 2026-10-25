@@ -13,7 +13,7 @@ check: function (ok: Bool, code: @bit32) nothing {
 
 drops: Int = 0
 
-Counted: object {
+Counted: structure {
     value: @bit64
 
     @on_drop: function (self) nothing {
@@ -21,7 +21,7 @@ Counted: object {
     }
 }
 
-Empty: object {}
+Empty: structure {}
 
 address: function (memory: ref unknown) Int => @ptr_to_address(memory)
 

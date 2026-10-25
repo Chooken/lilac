@@ -133,7 +133,7 @@ native target. **Done**, as follows.
    Arm on Windows, Linux and macOS) at `debug` and `release`,
    cross-linked with the development sysroot's `lld`. A leaked libcall
    is an undefined symbol, which fails the link. Linking checks more
-   than listing an object's undefined symbols would: it also checks the
+   than listing a structure's undefined symbols would: it also checks the
    system stubs. Every later phase adds its intrinsics to `program`.
 2. **The backend defines what its own lowering calls.** In native mode
    that is only two things today:
@@ -395,7 +395,7 @@ intrinsic does it):
   - `borrowing_subtract(other, borrow: Bool) difference, borrow_out`.
 
 `Ordering` (STDLIB §3.1, `lib/Standard/ordering.lilac`) landed here:
-`enum { Less; Equal; Greater }` with `is_less`/`is_equal`/`is_greater`/
+`either { Less; Equal; Greater }` with `is_less`/`is_equal`/`is_greater`/
 `is_less_or_equal`/`is_greater_or_equal`, `reverse`, `and_then` (`then`
 is a keyword) and `@format`, plus `compare` on every numeric type
 (on floats it fails when either operand is a NaN).
@@ -703,7 +703,7 @@ Verification:
   even) from the exact binary value.
 - **Parsing.** `Float64.parse(text: @byte_buffer) value: Float64 else
   error: ParseError` (`Float32.parse`, `Float16.parse`, `Int*.parse` and
-  `Uint*.parse`), with `ParseError: enum { Empty; InvalidDigit;
+  `Uint*.parse`), with `ParseError: either { Empty; InvalidDigit;
   Overflow; Trailing }`. Floats use the exact stack big-integer
   converter (780 significant digits plus a sticky digit), so every input
   including halfway points and subnormals is correctly rounded. The
@@ -860,7 +860,7 @@ A language addition, then a library.
 - **The library: `Standard.Math.Simd`.**
   - `Float32x4`, `Float32x8`, `Float32x16`, `Float64x2`, `Float64x4`,
     `Float64x8`, `Int32x4`, `Int32x8`, `Uint8x16`, `Uint8x32`, …
-    objects over `@vector`, with operator hooks.
+    structures over `@vector`, with operator hooks.
   - Methods: `splat`, `load`/`store` from `ref T` (and slices later),
     `sum`, `min`/`max`, `select`, `shuffle` with constant masks, and the
     phase 4/5 math methods lane-wise (`sqrt`, `floor`, `sin`, `exp`, …,

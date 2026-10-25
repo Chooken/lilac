@@ -9,7 +9,7 @@ using Standard.Heap as Heap
 /// guarded: to change it from more than one thread, make its parts atomics
 /// (`Sync.AtomicInt`) or guard it with a lock. Two values that hold `Shared`s of each other keep each other alive
 /// forever; make one of the links a `Weak`.
-Shared[T]: object {
+Shared[T]: structure {
 
     private {
         ptr: ref SharedData[T]
@@ -69,7 +69,7 @@ Shared[T]: object {
 /// not keep each other alive forever.
 ///
 /// Like `Shared`, copies may be made and dropped on any thread.
-Weak[T]: object {
+Weak[T]: structure {
 
     private {
         ptr: ref SharedData[T]
@@ -109,7 +109,7 @@ Weak[T]: object {
 private {
     // One allocation holds the counts beside the value, so reaching the
     // value from a handle is one step.
-    SharedData[T]: object {
+    SharedData[T]: structure {
         strong_references: Sync.AtomicInt
         // The `Weak`s, plus one held by all the `Shared`s together, so the
         // last `Shared` and the last `Weak` never both free the memory.

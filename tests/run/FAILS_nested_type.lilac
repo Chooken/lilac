@@ -1,8 +1,8 @@
 // expect-error: E036
 // Types are declared only at the top level of a file.
 
-Outer: object {
-    Inner: object {
+Outer: structure {
+    Inner: structure {
         x: @bit8
     }
 }

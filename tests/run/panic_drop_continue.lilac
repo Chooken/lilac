@@ -4,7 +4,7 @@
 // expect-stderr:   at main (panic_drop_continue.lilac:16:9)
 
 // A `continue` drops the loop body's locals at the `continue`.
-Guard: object {
+Guard: structure {
     @on_drop: function (from: ref Guard) nothing {
         @panic("dropped")
     }

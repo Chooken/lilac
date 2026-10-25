@@ -18,18 +18,40 @@ use lilac_span::{Doc, FileId, Span, BYTE_ORDER_MARK};
 
 /// Every keyword, for editor completion.
 pub const KEYWORDS: [&str; 25] = [
-    "object", "function", "enum", "alias", "extern", "export", "using", "private", "ref", "self",
-    "unknown", "nothing", "loop", "if", "then", "else", "match", "break", "continue", "and", "or",
-    "not", "return", "as", "fail",
+    "structure",
+    "function",
+    "either",
+    "alias",
+    "extern",
+    "export",
+    "using",
+    "private",
+    "ref",
+    "self",
+    "unknown",
+    "nothing",
+    "loop",
+    "if",
+    "then",
+    "else",
+    "match",
+    "break",
+    "continue",
+    "and",
+    "or",
+    "not",
+    "return",
+    "as",
+    "fail",
 ];
 
 /// The keyword token `word` spells, if it is a keyword.
 #[must_use]
 pub fn keyword(word: &str) -> Option<TokenKind> {
     Some(match word {
-        "object" => TokenKind::KwObject,
+        "structure" => TokenKind::KwStructure,
         "function" => TokenKind::KwFunction,
-        "enum" => TokenKind::KwEnum,
+        "either" => TokenKind::KwEither,
         "alias" => TokenKind::KwAlias,
         "extern" => TokenKind::KwExtern,
         "export" => TokenKind::KwExport,
@@ -73,12 +95,12 @@ pub enum TokenKind {
     FStrMid,
     /// Closing `"` of an f-string.
     FStrEnd,
-    /// `object`.
-    KwObject,
+    /// `structure`.
+    KwStructure,
     /// `function`.
     KwFunction,
-    /// `enum`.
-    KwEnum,
+    /// `either`.
+    KwEither,
     /// `alias` (a type alias: `Name: alias Type`).
     KwAlias,
     /// `extern`.

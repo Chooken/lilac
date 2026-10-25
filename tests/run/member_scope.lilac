@@ -13,7 +13,7 @@ LIMIT: @bit32 => 0x63
 
 twice: function (x: @bit32) @bit32 => 0x0
 
-Box: object {
+Box: structure {
     LIMIT: @bit32 => 0x7
     DOUBLE: @bit32 => twice(LIMIT)
     STEP: ref function (@bit32) @bit32 => ref next
@@ -44,14 +44,14 @@ Box: object {
     }
 }
 
-Sized[T]: object {
+Sized[T]: structure {
     item: T
 
     size: function () Int => @size_of(T)
     get_size: function (self) Int => size()
 }
 
-Outer: object {
+Outer: structure {
     inner: function () @bit32 => @i_add_32(LIMIT, Box.LIMIT)
 }
 

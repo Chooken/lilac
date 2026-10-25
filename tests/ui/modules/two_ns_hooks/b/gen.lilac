@@ -1,4 +1,4 @@
-Thing: object {
+Thing: structure {
     x: @bit32
 }
 

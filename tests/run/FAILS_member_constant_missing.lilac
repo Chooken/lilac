@@ -1,7 +1,7 @@
 // expect-error: E021
 // `Box.value` names no constant: `value` is a field, read from a value.
 
-Box: object {
+Box: structure {
     LIMIT: @bit32 => 0x7
     value: @bit32
 }

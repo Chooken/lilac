@@ -1,7 +1,7 @@
 using Standard.Sync as Sync
 using Standard.Heap as Heap
 
-Memory[T]: object {
+Memory[T]: structure {
 
     private {
         ptr: ref MemoryHeader[T]
@@ -79,7 +79,7 @@ Memory[T]: object {
 
 private {
 
-    MemoryHeader[T]: object {
+    MemoryHeader[T]: structure {
         allocator: Heap.Allocator
         data: Slice[T]
     }

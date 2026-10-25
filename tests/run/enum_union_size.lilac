@@ -1,11 +1,11 @@
 // expect-exit: 0
-// An enum is a tagged union, the C `struct { uint8_t tag; union { … }
+// An either is a tagged union, the C `struct { uint8_t tag; union { … }
 // payload; }`: three 256-byte payloads share one area after the tag, so the
-// enum is 257 bytes, aligned 1.
+// either is 257 bytes, aligned 1.
 
 using Standard.Process
 
-Three: enum {
+Three: either {
     A: @array(@bit8, 0x100)
     B: @array(@bit8, 0x100)
     C: @array(@bit8, 0x100)

@@ -76,7 +76,7 @@ fn multi_return_writes_both_outs() {
 #[test]
 fn generic_object_instance_names() {
     let (text, _) = lower_src(
-        "GenObject[T]: object {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
+        "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.value\n    }\n}\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    value: @bit32 = variable.get()\n}\n",
     );
     assert!(text.contains("#GenObject[m]"), "{text}");
     assert!(text.contains("call @GenObject[m].get"), "{text}");
@@ -85,7 +85,7 @@ fn generic_object_instance_names() {
 #[test]
 fn method_own_generics_are_distinct() {
     let (text, _) = lower_src(
-        "GenObject[T]: object {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
+        "GenObject[T]: structure {\n    value: T\n    get[U]: function (x: U) result: @bit32 {\n        result = 0x2\n    }\n}\n\ngen[T]: function () out: @bit32 {\n    out = T.get[@bit32](0x0)\n}\n\ngen2[T]: function () out: @bit32 {\n    out = T.get[@bit64](0x0)\n}\n\nmain: function () nothing {\n    a: @bit32 = gen[GenObject[@bit32]]()\n    b: @bit32 = gen2[GenObject[@bit32]]()\n}\n",
     );
     assert!(text.contains("call @GenObject[m].get[m]"), "{text}");
     assert!(text.contains("call @GenObject[m].get[y]"), "{text}");
@@ -94,7 +94,7 @@ fn method_own_generics_are_distinct() {
 #[test]
 fn drop_hook_runs_before_marker() {
     let (text, _) = lower_src(
-        "Object: object {\n    member: @bit32\n    @on_drop: function (from: ref Object) nothing {\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
+        "Object: structure {\n    member: @bit32\n    @on_drop: function (from: ref Object) nothing {\n    }\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
     );
     let call = text.find("call @Object.@on_drop").expect("on_drop call");
     let drop = text.find("drop %variable").expect("drop marker");
@@ -104,7 +104,7 @@ fn drop_hook_runs_before_marker() {
 #[test]
 fn no_drop_without_hook() {
     let (text, _) = lower_src(
-        "Object: object {\n    member: @bit32\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
+        "Object: structure {\n    member: @bit32\n}\nmain: function () nothing {\n    variable: Object = Object {\n        member = 0x1\n    }\n}\n",
     );
     assert!(!text.contains("drop %"), "{text}");
 }
@@ -112,7 +112,7 @@ fn no_drop_without_hook() {
 #[test]
 fn field_drop_glue_runs_parent_then_fields() {
     let (text, _) = lower_src(
-        "Inner: object {\n    v: @bit8\n    @on_drop: function (self) nothing {\n    }\n}\nOuter: object {\n    a: Inner\n    @on_drop: function (self) nothing {\n    }\n}\nmain: function () nothing {\n    o: Outer = Outer { a = Inner { v = 0x1 } }\n}\n",
+        "Inner: structure {\n    v: @bit8\n    @on_drop: function (self) nothing {\n    }\n}\nOuter: structure {\n    a: Inner\n    @on_drop: function (self) nothing {\n    }\n}\nmain: function () nothing {\n    o: Outer = Outer { a = Inner { v = 0x1 } }\n}\n",
     );
     let glue = text
         .split("function @.lilac.drop.Outer")
@@ -150,7 +150,7 @@ fn literals_lower_to_consts() {
 #[test]
 fn size_of_is_a_constant() {
     let (text, _) = lower_src(
-        "Mixed: object {\n    a: @bit8\n    b: @bit32\n    c: @bit16\n}\nmain: function () nothing {\n    n: @bit_native = @size_of(Mixed)\n    m: @bit_native = @size_of(ref Mixed)\n}\n",
+        "Mixed: structure {\n    a: @bit8\n    b: @bit32\n    c: @bit16\n}\nmain: function () nothing {\n    n: @bit_native = @size_of(Mixed)\n    m: @bit_native = @size_of(ref Mixed)\n}\n",
     );
     assert!(text.contains("#bit_native = const 0xc"), "{text}");
     assert!(text.contains("#bit_native = const 0x8"), "{text}");
@@ -194,7 +194,7 @@ fn assert_arm(prelude: &str, cond: &str, taken: Option<bool>) {
     }
 }
 
-const BOOL: &str = "Bool: object {\n    data: @bit8\n    from_int8: function (from: @bit8) Bool => Bool { data = from }\n    @conversion: function (from: Bool) to: @bit8 => from.data\n}\ntrue: Bool => Bool.from_int8(0x1)\nfalse: Bool => Bool.from_int8(0x0)\n";
+const BOOL: &str = "Bool: structure {\n    data: @bit8\n    from_int8: function (from: @bit8) Bool => Bool { data = from }\n    @conversion: function (from: Bool) to: @bit8 => from.data\n}\ntrue: Bool => Bool.from_int8(0x1)\nfalse: Bool => Bool.from_int8(0x0)\n";
 
 #[test]
 fn constant_literals_and_arithmetic() {
@@ -390,9 +390,9 @@ fn recursive_and_block_bodied_calls_are_not_constant() {
 
 #[test]
 fn hooked_types_are_not_constant() {
-    let drop = "Flag: object {\n    data: @bit8\n    @on_drop: function (self) nothing {\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
+    let drop = "Flag: structure {\n    data: @bit8\n    @on_drop: function (self) nothing {\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
     assert_arm(drop, "on", None);
-    let copy = "Flag: object {\n    data: @bit8\n    @on_copy: function (from: ref Flag) to: Flag {\n        to = Flag { data = from.data }\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
+    let copy = "Flag: structure {\n    data: @bit8\n    @on_copy: function (from: ref Flag) to: Flag {\n        to = Flag { data = from.data }\n    }\n    @conversion: function (from: Flag) to: @bit8 => from.data\n}\non: Flag => Flag { data = 0x1 }\n";
     assert_arm(copy, "on", None);
 }
 
@@ -409,7 +409,7 @@ fn value_if_and_logic_skip_the_dead_side() {
 
 #[test]
 fn value_match_in_an_inline_body() {
-    let prelude = "Opt: enum {\n    None\n    Some: @bit8\n}\nget: function (o: Opt) r: @bit8 => match o {\n    .Some -> v: @bit8 => v\n} else 0x0\nkind: function (b: @bit8) r: @bit8 => match b {\n    0x1 => 0x0\n} else 0x1\none: function () r: @bit8 {\n    r = 0x1\n}\npick: function (b: @bit8) r: @bit8 => match b {\n    0x0 => one()\n} else 0x1\n";
+    let prelude = "Opt: either {\n    None\n    Some: @bit8\n}\nget: function (o: Opt) r: @bit8 => match o {\n    .Some -> v: @bit8 => v\n} else 0x0\nkind: function (b: @bit8) r: @bit8 => match b {\n    0x1 => 0x0\n} else 0x1\none: function () r: @bit8 {\n    r = 0x1\n}\npick: function (b: @bit8) r: @bit8 => match b {\n    0x0 => one()\n} else 0x1\n";
     assert_arm(prelude, "get(Opt.Some(0x1))", Some(true));
     assert_arm(prelude, "get(Opt.None)", Some(false));
     assert_arm(prelude, "kind(0x7)", Some(true));
@@ -420,7 +420,7 @@ fn value_match_in_an_inline_body() {
 #[test]
 fn constant_match_statement_lowers_one_arm() {
     let (text, _) = lower_src(
-        "Opt: enum {\n    None\n    Some: @bit8\n}\nboom: function () nothing {\n}\nkeep: function (v: @bit8) nothing {\n}\nmain: function () nothing {\n    match Opt.Some(0x4) {\n        .None => boom()\n        .Some -> v: @bit8 => keep(v)\n    }\n}\n",
+        "Opt: either {\n    None\n    Some: @bit8\n}\nboom: function () nothing {\n}\nkeep: function (v: @bit8) nothing {\n}\nmain: function () nothing {\n    match Opt.Some(0x4) {\n        .None => boom()\n        .Some -> v: @bit8 => keep(v)\n    }\n}\n",
     );
     let main = text.split("function @main").nth(1).expect("main");
     assert!(!main.contains("call @.root.boom"), "{main}");
@@ -440,7 +440,7 @@ fn constant_condition_drops_dead_compile_error() {
 /// 8-byte integer is aligned to 4, so `{ @bit8, @bit64 }` is 12 bytes.
 #[test]
 fn layouts_follow_the_target() {
-    let src = "Pair: object {\n    a: @bit8\n    b: @bit64\n}\n\nmain: function () nothing {\n    size: @bit_native = @size_of(Pair)\n    align: @bit_native = @align_of(Pair)\n}\n";
+    let src = "Pair: structure {\n    a: @bit8\n    b: @bit64\n}\n\nmain: function () nothing {\n    size: @bit_native = @size_of(Pair)\n    align: @bit_native = @align_of(Pair)\n}\n";
     let i686 = lilac_target::Target::parse("x86-unknown-linux-gnu").expect("triple");
     let (text, _) = lower_src_on(src, i686);
     assert!(
@@ -457,7 +457,7 @@ fn layouts_follow_the_target() {
 
 #[test]
 fn not_and_not_equal_are_constant() {
-    let prelude = "one: function () r: @bit8 {\n    r = 0x1\n}\nPair: object {\n    a: @bit8\n    b: @bit8\n}\nOpt: enum {\n    None\n    Some: @bit8\n}\np: Pair => Pair { a = 0x1, b = 0x2 }\nq: Pair => Pair { a = 0x1, b = 0x3 }\n";
+    let prelude = "one: function () r: @bit8 {\n    r = 0x1\n}\nPair: structure {\n    a: @bit8\n    b: @bit8\n}\nOpt: either {\n    None\n    Some: @bit8\n}\np: Pair => Pair { a = 0x1, b = 0x2 }\nq: Pair => Pair { a = 0x1, b = 0x3 }\n";
     assert_arm(prelude, "not 0x0", Some(true));
     assert_arm(prelude, "not 0x1", Some(false));
     // A condition is true when it is nonzero.

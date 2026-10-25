@@ -1,6 +1,6 @@
 // expect-error: E072
 // A format cannot be stored through a `ref`: the target may outlive it.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

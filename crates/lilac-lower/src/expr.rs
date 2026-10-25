@@ -502,7 +502,7 @@ impl Lower<'_> {
             span,
         });
         let Some(Layout::Enum { tag, .. }) = self.layout(expr.ty.id) else {
-            lilac_error::bug!(span, "variant of a non-enum");
+            lilac_error::bug!(span, "variant of a non-either");
         };
         let tag_ty = self.lir_ty(TypeRef::value(*tag));
         let reg = state.reg();

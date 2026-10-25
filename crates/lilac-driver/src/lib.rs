@@ -774,7 +774,7 @@ mod tests {
             Entry::Native,
             OptimizeMode::Release,
         ));
-        assert!(types.contains("Os: enum {\n    Windows\n"), "{types}");
+        assert!(types.contains("Os: either {\n    Windows\n"), "{types}");
         assert!(types.contains("    X86_64\n"), "{types}");
         assert!(target.contains("os: Os => .Windows\n"), "{target}");
         assert!(target.contains("arch: Arch => .X86_64\n"), "{target}");
@@ -884,7 +884,7 @@ mod tests {
     /// they merge into one `ref #unknown` declaration and each call casts.
     #[test]
     fn externs_differing_in_pointee_merge() {
-        let src = "Text: object {
+        let src = "Text: structure {
     first: @bit8
 }
 a: extern \"puts\" function (s: ref @bit8) r: @bit32
@@ -1034,8 +1034,9 @@ main: function () nothing {}
     /// body copying its argument 40 times.
     fn slow_program() -> String {
         use std::fmt::Write as _;
-        let mut src =
-            String::from("A[T]: object {\n    value: T\n}\n\nB[T]: object {\n    value: T\n}\n\n");
+        let mut src = String::from(
+            "A[T]: structure {\n    value: T\n}\n\nB[T]: structure {\n    value: T\n}\n\n",
+        );
         for level in 1..15 {
             let _ = writeln!(src, "f{level}[T]: function (x0: T) nothing {{");
             for copy in 1..=40 {
@@ -1503,7 +1504,7 @@ main: function () nothing {}
             let module = session
                 .compile_lir(
                     "fs.lilac",
-                    "Out: object {}\n\n@format: function (value: ref @byte_buffer, out: ref Out) nothing {}\n\nmain: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args(Out) = $\"a{part}b\"\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
+                    "Out: structure {}\n\n@format: function (value: ref @byte_buffer, out: ref Out) nothing {}\n\nmain: function () nothing {\n    part: @byte_buffer = \"x\"\n    msg: @format_args(Out) = $\"a{part}b\"\n    first: @byte_buffer = @format_args_piece(msg, 0x0)\n}\n",
                 )
                 .unwrap_or_else(|_| panic!("{triple}: {}", session.render_diagnostics()));
             assert_eq!(
@@ -1748,11 +1749,11 @@ helper: function () nothing {{
             "@compiler_print: function (text: @bit32) nothing {
 }
 ",
-            "Out: object {}
+            "Out: structure {}
 @compiler_print: function (text: ref @format_args(Out)) nothing {
 }
 ",
-            "Thing: object {
+            "Thing: structure {
     @entry: function () nothing {
     }
 }
@@ -1769,7 +1770,7 @@ helper: function () nothing {{
     /// generated message (a division by zero) is a template with no holes.
     #[test]
     fn panics_take_what_compiler_print_takes() {
-        let hooks = "Out: object {}
+        let hooks = "Out: structure {}
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 @compiler_print: function (text: @format_args(Out)) nothing {
 }

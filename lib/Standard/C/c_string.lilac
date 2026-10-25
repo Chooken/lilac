@@ -1,4 +1,4 @@
 
-CString: object {
+CString: structure {
     data: ref Int8
 }

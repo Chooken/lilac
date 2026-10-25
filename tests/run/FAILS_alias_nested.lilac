@@ -1,7 +1,7 @@
 // expect-error: E036
 // Aliases, like types, are declared only at the top level of a file.
 
-Outer: object {
+Outer: structure {
     Inner: alias @bit8
 }
 

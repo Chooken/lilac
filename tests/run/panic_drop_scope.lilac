@@ -4,7 +4,7 @@
 // expect-stderr:   at main (panic_drop_scope.lilac:15:1)
 
 // A drop at the end of a scope is reported at the scope's closing `}`.
-Guard: object {
+Guard: structure {
     @on_drop: function (from: ref Guard) nothing {
         @panic("dropped")
     }

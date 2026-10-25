@@ -2,7 +2,7 @@
 // expect-stderr: error[E063]: `self` was discarded
 // After `@discard`, only the fields are places: the whole value is gone.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

@@ -4,7 +4,7 @@
 using Standard.Io
 using Standard.Process
 
-Counted: object {
+Counted: structure {
     copies: @bit32
 
     @on_copy: function (self) out: Counted {

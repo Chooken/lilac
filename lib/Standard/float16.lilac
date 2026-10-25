@@ -6,7 +6,7 @@
 /// `fmod`. `==` compares raw bits (`0.0 == -0.0` is `false` and equal
 /// NaNs are `true`); use `equals` for IEEE equality, `approximately_equals`
 /// for a tolerance and `total_compare` for sorting.
-Float16: object {
+Float16: structure {
 
     private {
         data: @fbit16

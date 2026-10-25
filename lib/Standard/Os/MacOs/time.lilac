@@ -1,13 +1,13 @@
 // Clocks, sleeping and random bytes.
 
 /// `struct timespec`.
-Timespec: object {
+Timespec: structure {
     tv_sec: @bit64
     tv_nsec: @bit64
 }
 
 /// `mach_timebase_info_data_t`: ticks times `numer / denom` is nanoseconds.
-MachTimebaseInfo: object {
+MachTimebaseInfo: structure {
     numer: @bit32
     denom: @bit32
 }

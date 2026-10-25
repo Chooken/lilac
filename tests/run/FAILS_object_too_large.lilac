@@ -1,10 +1,10 @@
 // expect-error: E067
-// An object larger than the target allows (`isize::MAX` bytes) is an
+// A structure larger than the target allows (`isize::MAX` bytes) is an
 // error, not an overflow.
 
 using Standard.Process
 
-Big: object {
+Big: structure {
     a: @array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)
 }
 

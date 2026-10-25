@@ -3,7 +3,7 @@
 // `@memmove`/`@memset` call their leaves, and `@trap` is the abort leaf
 // followed by `unreachable`.
 
-Pair: object {
+Pair: structure {
     low: @bit64
     high: @bit64
 }

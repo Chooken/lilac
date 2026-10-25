@@ -59,25 +59,25 @@ fn targets() -> Vec<Target> {
 /// ABI has no empty struct to compare with).
 fn source() -> String {
     let mut src = String::from(
-        "Point: object {\n    x: @bit32\n    y: @bit32\n}\n\
-         Padded: object {\n    a: @bit64\n    b: @bit8\n}\n\
-         Plain: enum {\n    A\n    B\n    C\n}\n\
-         Lone: enum {\n    Only: @bit16\n}\n\
-         Mixed: enum {\n    Nothing\n    Byte: @bit8\n    Half: @bit16\n    Word: @bit64\n    \
+        "Point: structure {\n    x: @bit32\n    y: @bit32\n}\n\
+         Padded: structure {\n    a: @bit64\n    b: @bit8\n}\n\
+         Plain: either {\n    A\n    B\n    C\n}\n\
+         Lone: either {\n    Only: @bit16\n}\n\
+         Mixed: either {\n    Nothing\n    Byte: @bit8\n    Half: @bit16\n    Word: @bit64\n    \
          Pointer: ref Point\n    Native: @bit_native\n    Real: @fbit64\n    Short: @fbit32\n}\n\
-         Aligned: enum {\n    Small: @bit8\n    Struct: Padded\n    Pair: Point\n}\n\
-         Nested: enum {\n    Inner: Mixed\n    Flag: @bit8\n    Again: Aligned\n}\n\
-         Deep: enum {\n    Wrap: Nested\n    Empty\n}\n\
-         Bytes: enum {\n    A: @array(@bit8, 0x100)\n    B: @array(@bit8, 0x100)\n    \
+         Aligned: either {\n    Small: @bit8\n    Struct: Padded\n    Pair: Point\n}\n\
+         Nested: either {\n    Inner: Mixed\n    Flag: @bit8\n    Again: Aligned\n}\n\
+         Deep: either {\n    Wrap: Nested\n    Empty\n}\n\
+         Bytes: either {\n    A: @array(@bit8, 0x100)\n    B: @array(@bit8, 0x100)\n    \
          C: @array(@bit8, 0x100)\n}\n\
-         Odd: enum {\n    Three: @array(@bit8, 0x3)\n    Two: @bit16\n}\n\
-         Holder: object {\n    a: @bit8\n    m: Mixed\n    b: @bit8\n    \
+         Odd: either {\n    Three: @array(@bit8, 0x3)\n    Two: @bit16\n}\n\
+         Holder: structure {\n    a: @bit8\n    m: Mixed\n    b: @bit8\n    \
          list: @array(Aligned, 0x3)\n    c: @bit16\n    odd: Odd\n}\n\
-         Many: enum {\n    List: @array(Mixed, 0x2)\n    One: Lone\n    Held: Holder\n}\n\
-         Maybe[T]: enum {\n    Some: T\n    None\n}\n",
+         Many: either {\n    List: @array(Mixed, 0x2)\n    One: Lone\n    Held: Holder\n}\n\
+         Maybe[T]: either {\n    Some: T\n    None\n}\n",
     );
     // 257 variants: a 16-bit tag.
-    src.push_str("Wide: enum {\n    First: @bit64\n    Second: @bit8\n");
+    src.push_str("Wide: either {\n    First: @bit64\n    Second: @bit8\n");
     for index in 0..255 {
         let _ = writeln!(src, "    V{index}");
     }
@@ -231,7 +231,7 @@ impl Corpus<'_> {
 #[test]
 fn enum_layouts_match_clang_on_every_target() {
     let Some(clang) = clang() else {
-        eprintln!("skipping the enum C layout test: no clang under `$LLVM_SYS_181_PREFIX/bin`");
+        eprintln!("skipping the either C layout test: no clang under `$LLVM_SYS_181_PREFIX/bin`");
         return;
     };
     let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("enum_c_layout");
@@ -278,7 +278,7 @@ fn enum_layouts_match_clang_on_every_target() {
             .expect("clang runs");
         assert!(
             output.status.success(),
-            "C disagrees with Lilac's enum layouts on `{target}` ({}):\n{}",
+            "C disagrees with Lilac's either layouts on `{target}` ({}):\n{}",
             file.display(),
             String::from_utf8_lossy(&output.stderr)
         );

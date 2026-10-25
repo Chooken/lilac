@@ -12,7 +12,7 @@ using Standard.Process
 using Standard.Heap
 using Standard.Os as Os
 
-Work: object {
+Work: structure {
     tag: @bit8
     failed: @bit32
     allocator: Allocator
@@ -41,7 +41,7 @@ holds: function (memory: ref unknown, size: Int, tag: @bit8) whole: Bool {
     }
 }
 
-Live: object {
+Live: structure {
     memory: ref unknown
     size: Int
 }

@@ -231,11 +231,11 @@ No behavior change; snapshots byte-identical.
 - **6.3 One `Using` record.** Replace `FileUnit::usings`, `using_spans` and
   `using_aliases` (parallel vectors) with `Vec<Using { path, span, alias }>`;
   the private `ScannedUsing` becomes that type.
-- **6.4 Typed builtin types.** A `Builtin` enum in `lilac-ty`, interned in
+- **6.4 Typed builtin types.** A `Builtin` either in `lilac-ty`, interned in
   `Types::new`, so `types.builtin(Builtin::Bit8)` cannot fail and the ~50
   `builtin("@bit8")` string lookups (and their `bug!`) go away.
 - **6.5 AST type shapes.** Replace the empty-name poison `Type` and the
-  `name == "function"`/`"self"` checks with an enum of type shapes (named,
+  `name == "function"`/`"self"` checks with an either of type shapes (named,
   function, array, `self`, error). This was item 1.9 of the previous plan.
 
 ---
@@ -251,7 +251,7 @@ text, so a malformed one reaches the backend as an internal error.
 - **7.1 Newtypes:** `Reg`, `PlaceName`, `Label`, `Symbol` in `lilac-ir`, used
   by `LirInst`, `LirOperand`, `LirCallee` and `LirTerm`. Each displays with
   its sigil, so the printer's text is unchanged.
-- **7.2 Typed constants:** `enum LirConst { Int(u64), Float(f64 bits),
+- **7.2 Typed constants:** `either LirConst { Int(u64), Float(f64 bits),
   Data(Symbol) }` replaces `Const { lit: String }`. Lowering builds the value
   once; the backend's `parse_int` and float parsing go away; the verifier
   checks the constant against its type.

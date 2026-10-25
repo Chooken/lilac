@@ -8,12 +8,12 @@
 using Standard
 using Standard.Io
 
-Point: object {
+Point: structure {
     x: @bit32
     y: @bit32
 }
 
-Shape: enum {
+Shape: either {
     Empty
     Circle: @bit32
 }

@@ -5,7 +5,7 @@
 
 // A temporary dies at the end of its statement, reported at the statement's
 // expression. (`out = ...` drops the zeroed `out` first, hence the guard.)
-Guard: object {
+Guard: structure {
     member: @bit32
     @on_drop: function (from: ref Guard) nothing {
         if @i_less_than_u_32(0x0, from.member) {

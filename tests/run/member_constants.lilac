@@ -4,14 +4,14 @@
 // A constant declared in a type's body is named through the type
 // (`Box.LIMIT`, `Int.MAX`): one value for every instance of a generic
 // (`Gen.SIZE` is `Gen[@bit8].SIZE`), private ones only from the type, and
-// a type parameter's (`T.LIMIT`) resolves per instance. Enums declare them
+// a type parameter's (`T.LIMIT`) resolves per instance. Eithers declare them
 // beside their variants, and they fold like top-level constants: in a
 // global's initializer and in a top-level condition.
 
 using Standard
 using Standard.Io
 
-Box: object {
+Box: structure {
     LIMIT: @bit32 => 0x7
     TWICE: @bit32 => @i_add_32(Box.LIMIT, Box.LIMIT)
     value: @bit32
@@ -23,18 +23,18 @@ Box: object {
     secret: function () @bit32 => Box.SECRET
 }
 
-Color: enum {
+Color: either {
     Red
     Green
     COUNT: @bit32 => 0x2
 }
 
-Gen[T]: object {
+Gen[T]: structure {
     SIZE: @bit32 => 0x4
     item: T
 }
 
-Wide: object {
+Wide: structure {
     LIMIT: @bit32 => 0x9
 }
 

@@ -8,7 +8,7 @@ using Standard
 using Standard.Io
 using Standard.Process
 
-Noisy: object {
+Noisy: structure {
     char: @bit32
 
     // The box drops its value once, at the end of the block (`Box.new`

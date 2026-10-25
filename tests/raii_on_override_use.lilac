@@ -1,4 +1,4 @@
-Object: object {
+Object: structure {
 
     value: @bit32
 

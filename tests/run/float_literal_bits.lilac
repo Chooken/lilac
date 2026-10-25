@@ -14,11 +14,11 @@ check: function (ok: @bit8, code: @bit32) nothing {
     }
 }
 
-Quad: object {
+Quad: structure {
     value: @fbit128
 }
 
-Halves: object {
+Halves: structure {
     low: @bit64
     high: @bit64
 }

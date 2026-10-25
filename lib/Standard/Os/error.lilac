@@ -11,7 +11,7 @@ match @builtin.Target.os {
     using Standard.Os.Linux as Posix
 }
 
-Error: enum {
+Error: either {
     /// A code with no name here.
     Other: @bit32
     NotFound

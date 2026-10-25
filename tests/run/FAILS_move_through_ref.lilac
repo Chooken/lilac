@@ -3,7 +3,7 @@
 // A `ref` does not own what it points at, so a value that cannot be
 // copied cannot be read out through one.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

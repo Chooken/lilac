@@ -12,7 +12,7 @@
 // the second rounding cannot be a double rounding.
 
 private {
-    Dd: object {
+    Dd: structure {
         hi: Float64
         lo: Float64
 
@@ -207,7 +207,7 @@ private {
 
     /// A function's result `(v.hi + v.lo) * 2^k`: the exponent travels apart
     /// so a result past `Float64`'s range is rounded once, at the end.
-    Scaled: object {
+    Scaled: structure {
         v: Dd
         k: Int32
 

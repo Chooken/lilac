@@ -1,11 +1,11 @@
 // Each misspelling gets a `did you mean` help and a machine-applicable fix.
-Point: object {
+Point: structure {
     x: @bit8
     total: function (self) out: @bit8 {
         out = self.x
     }
 }
-Shape: enum {
+Shape: either {
     Dot
     Line
 }

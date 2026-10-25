@@ -1,6 +1,6 @@
 
 
-AtomicInt: object {
+AtomicInt: structure {
 
     private {
         data: @bit_native

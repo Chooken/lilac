@@ -3,7 +3,7 @@
 > Version: 0.7-draft (ownership and drop order, `@bit8` conditions, library mounting, `=>` as always-inline functions). Status: draft, normative for the Rust rewrite.
 > Normative documents: `SPEC.md` (language), `IR_SPEC.md` (IR v2).
 > `docs/history/RUST_REWRITE_PLAN.md` is non-normative (execution plan only).
-> Keyword spelling is `object` and `function` everywhere; all `@` hooks,
+> Keyword spelling is `structure` and `function` everywhere; all `@` hooks,
 > intrinsics, and builtin types are snake_case (`@less_than`, `@i_less_than_8`,
 > `@size_of`, `@compile_error`, `@bit_native`, `@byte_buffer`,
 > `@extend_zero`). Legacy camelCase spellings from earlier drafts and legacy
@@ -43,14 +43,14 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
 
 * **`nothing`**: A parse-time keyword used exclusively in a function's return slot to indicate zero return variables (and in `else nothing`: a function that can fail with no failure outs, §4). It is not a type and occupies no memory.
 
-* **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing object type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
+* **`self`**: A function-prototype-only type. It always desugars to `self: ref SelfType` — a reference to the enclosing structure type, never a by-value copy. `instance.Method()` desugars to `Object.Method(ref instance)`.
 
 ### Fixed-size arrays
 
 * **`@array(T, N)`**: `N` values of `T` in a row, laid out like a C array
   (size `N` times the size of `T`, aligned to `T`). `N` is a number literal
   from 1 to `0xffffffff`. `T` is held by value: a `ref` element is `E010`
-  (wrap it in an object), and so is an element with an RAII hook, itself or
+  (wrap it in a structure), and so is an element with an RAII hook, itself or
   in a field, because an array copies and drops as plain bytes.
 * An array value is written `@array(T, N) {}` and starts zeroed, like all
   memory; `name: @array(T, N) {}` declares one. Elements are reached through
@@ -58,7 +58,7 @@ Lilac operates on raw memory containers rather than semantic primitives. The com
   bracket syntax.
 
 ```lilac
-Buffer: object {
+Buffer: structure {
     used: @bit_native
     bytes: @array(@bit8, 64)
 }
@@ -70,7 +70,7 @@ first = 0x41
 
 ### Universal Zero-Initialization
 
-All allocated memory whether on the stack, heap, or within complex objects is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac: padding bits are deterministic, ensuring 100% reliability for bit equality checks. Zeroed storage is never a value, though: a place nothing has set yet is *empty* (see below), and reading it is an error rather than a zero.
+All allocated memory whether on the stack, heap, or within complex structures is automatically **0 initialized** by the compiler. There is no uninitialized memory in Lilac: padding bits are deterministic, ensuring 100% reliability for bit equality checks. Zeroed storage is never a value, though: a place nothing has set yet is *empty* (see below), and reading it is an error rather than a zero.
 
 ### Ownership: copies, moves and drops
 
@@ -98,9 +98,9 @@ through the function:
 * **What can move.** Only owned places move: a local, a by-value
   parameter, or a field of one, never through a `ref`, out of a global, or
   out of a field of a temporary (`E064`). A field moves out only of a type
-  with no `@on_drop` of its own; the object can then not be used whole,
+  with no `@on_drop` of its own; the structure can then not be used whole,
   its other fields can, and those still full drop with it. Setting the
-  field again makes the object whole.
+  field again makes the structure whole.
 * **A borrowed place moves only by `@move`.** Once a `ref` to a local, or
   to a field of it, is taken (`ref a`, a method call with a `self`
   receiver, an f-string hole, a by-reference capture), a use that would
@@ -122,8 +122,8 @@ through the function:
   reverse declaration order; an empty one is skipped, and one that is full
   on some paths only is dropped when a hidden flag says so. Statement
   temporaries are dropped at the end of their statement. Dropping an
-  object runs its `@on_drop` first, then drops its fields in declaration
-  order; dropping an enum drops its live payload. A type therefore only
+  structure runs its `@on_drop` first, then drops its fields in declaration
+  order; dropping an either drops its live payload. A type therefore only
   manages what it allocated itself.
 * **Assignment** (`place = value`) evaluates `value` first. A full place
   then runs `@on_override(ref place, ref value)` if defined and drops the
@@ -152,19 +152,19 @@ cost.
 ## 2. Literals & Desugaring
 
 String and char literals are compiler-known bytes; number literals are typed
-values (below). There is no mirror object to declare.
+values (below). There is no mirror structure to declare.
 
 Number literals are typed values, not `@byte_buffer`s. An integer literal —
 decimal (`5`), hex (`0x…`), or binary (`0b…`) — takes the smallest
 `@bit8/16/32/64` that holds its unsigned magnitude. An expected bit type, or a
-numeric object's single exact-width `@conversion(from: @bitN)`, grows the
+numeric structure's single exact-width `@conversion(from: @bitN)`, grows the
 literal to that width (never shrinks); a value that does not fit, or one past 64
 bits, is `E060`. So `x: @bit8 = 5` and `x: Int16 = 5` both typecheck (the latter
 grows to `@bit16` for its conversion), while `x: @bit8 = 0x1FF` and
 `x: Int8 = 300` are `E060`.
 
 A float literal is a `.` or exponent form (`3.14`, `1e3`, `1.5e-4`, `2E10`). It
-defaults to `@fbit64`; an expected `@fbit16/32/64/128` (or a numeric object's
+defaults to `@fbit64`; an expected `@fbit16/32/64/128` (or a numeric structure's
 `@conversion(from: @fbitN)`) pins it. Its exact decimal value is rounded
 once, to nearest with ties to even, to that type (IEEE 754 binary16, 32, 64
 or 128), so `0.1` as an `@fbit128` has all 113 bits of `0.1`; a value too
@@ -173,7 +173,7 @@ largest finite value is `E060`. A float literal in a bit or integer slot is
 `E010` (no implicit float→int). Unary `-` is an operator, not part of the
 literal, but `-` directly before a number literal folds into a negative
 literal of the expected type (`x: @bit8 = -128` is `0x80`, `-1.5` is the
-negated float), so it never calls an `@negate`. A numeric object (one
+negated float), so it never calls an `@negate`. A numeric structure (one
 with a `@conversion` from a bit or float type) takes a negative literal
 only when it has an `@negate`, so `-1` into an unsigned integer type is
 `E043`, never its maximum; reading digits from a runtime `@byte_buffer` is standard-library work,
@@ -231,7 +231,7 @@ values of length greater than one.
 * Comments: `//` to the end of the line. A `///` comment that starts its
   line (only spaces and tabs before it) is a **doc comment**; `////` is a
   plain one. A run of doc comments on consecutive lines documents the
-  declaration on the next line: an item, a member, a field or an enum
+  declaration on the next line: an item, a member, a field or an either
   variant. Its text is each line after `///` and at most one space, read
   as Markdown, and the editor shows it with the declaration. A blank line
   or a plain comment ends a run; a run followed by anything else (a
@@ -240,7 +240,7 @@ values of length greater than one.
 
 ```lilac
 /// A point on the screen, in pixels.
-Point: object {
+Point: structure {
     /// Pixels from the left edge.
     x: @bit32
 }
@@ -307,7 +307,7 @@ operator's or a direct hook call's arguments.
 Three intrinsics read a format (§3); a library walks it with them:
 
 ```lilac
-Out: object {
+Out: structure {
     write: function (self, text: @format_args(Out)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0
@@ -325,7 +325,7 @@ A format borrows twice (its holes point at values, and its hole pointers
 sit in the frame that built it), so it stays in that frame, with no
 borrow checker (`E072`):
 
-- Only locals and parameters hold one, never a field, enum payload, array
+- Only locals and parameters hold one, never a field, either payload, array
   element, out, global or constant. A `ref` to one may be anywhere a
   `ref` may.
 - It is never stored through a `ref` or with `@write`.
@@ -369,9 +369,9 @@ An expression is constant when it is one of:
 | `@align_of(T)` | the alignment of `T` (per generic instance) |
 | an inline constant (`name: T => expr`) | its initializer, which must be constant |
 | a `@builtin` constant (`@builtin.Target.os`) | the target or build fact it states |
-| an object or enum-variant literal | if every field / the payload is constant |
-| `value.field` | the field of a constant object |
-| `a == b` | bit equality of two constant values of one type (integers, objects, enum variants with their payloads) |
+| a structure or variant literal | if every field / the payload is constant |
+| `value.field` | the field of a constant structure |
+| `a == b` | bit equality of two constant values of one type (integers, structures, either variants with their payloads) |
 | `a != b` | the negation of `a == b` |
 | `not c` | `0x1` when a constant `c` is zero, else `0x0` |
 | `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
@@ -411,9 +411,9 @@ It needs no `using`, and since `@` names are reserved it cannot collide with
 user code. Its names are always written qualified:
 
 ```lilac
-@builtin.Os: enum { Windows, Linux, MacOs, None }
-@builtin.Arch: enum { X86, X86_64, Arm, Aarch64, Riscv32, Riscv64, Wasm32, Wasm64 }
-@builtin.Mode: enum { Debug, Release, ReleaseSmall }
+@builtin.Os: either { Windows, Linux, MacOs, None }
+@builtin.Arch: either { X86, X86_64, Arm, Aarch64, Riscv32, Riscv64, Wasm32, Wasm64 }
+@builtin.Mode: either { Debug, Release, ReleaseSmall }
 
 @builtin.Target.os: Os                    // None for bare and unknown targets
 @builtin.Target.arch: Arch
@@ -782,7 +782,7 @@ value never passes `self`: members of a type share one namespace, so
 when it is a field, decided per instance in a generic body.
 
 The callee is evaluated first, then the arguments left to right, so a field
-callee is read before an argument can move or reassign its object.
+callee is read before an argument can move or reassign its structure.
 
 ### Control Flow
 
@@ -868,7 +868,7 @@ loop if @i_less_than_32(i, 0xa) {
 
 ### Pattern Matching
 
-The **`match`** statement inspects enum tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else {}` branch).
+The **`match`** statement inspects either tags and byte patterns. Match statements are **not required to be exhaustive**. If no valid branch matches, execution silently falls through (equivalent to an implicit empty `else {}` branch).
 
 ```lilac
 match enum_val {
@@ -879,8 +879,8 @@ match enum_val {
 }
 ```
 
-A pattern may name the enum (`Optional.Some`, `Optional[T].Some`); it must
-be the enum being matched, and lowers exactly like `.Some`.
+A pattern may name the either (`Optional.Some`, `Optional[T].Some`); it must
+be the either being matched, and lowers exactly like `.Some`.
 
 You can attach else to the end of a match to catch invalid matches:
 
@@ -896,13 +896,13 @@ A capture follows the field rule of §1: a payload that copies is copied,
 and one that does not moves out of the matched value, which is then used
 up (it does not drop again). That needs an owned value (a local, a
 by-value parameter, a field of one, or a temporary such as
-`match make() { … }`) whose enum has no `@on_drop` of its own; matching
+`match make() { … }`) whose either has no `@on_drop` of its own; matching
 through a `ref` cannot move a payload out (`E064`). A `match` that names
 every variant has no fall-through path, so an out set in every arm is set.
 
 A **reference capture** `-> name: ref P` on a payload of type `P` is the
 address of the payload inside the matched value: nothing is copied or
-moved, so it works through a `ref`, on an enum with its own `@on_drop`, and
+moved, so it works through a `ref`, on an either with its own `@on_drop`, and
 on a payload that does not copy. Writes through it change the matched
 value in place (`name.field = x`; `name = value` drops the old payload and
 stores the new one, as an assignment to any `ref` does), and
@@ -984,11 +984,11 @@ statically allocated value for the whole program, read and assigned like a
 local (`count = @i_add_32(count, 0x1)`, `origin.x = 0x9`, `ref count`).
 `name: Type` with no initializer is a zeroed global. A top-level
 `name: Type => value` is an inline constant instead (§7), with no storage.
-Globals are top-level only; a type's body declares constants (see Objects).
+Globals are top-level only; a type's body declares constants (see Structures).
 
 The initializer is evaluated at compile time and must be a constant
-expression (the forms in §2's constant-condition table, plus object
-literals and enum variants of constants, also of types with hooks, since
+expression (the forms in §2's constant-condition table, plus structure
+literals and either variants of constants, also of types with hooks, since
 building a value runs none: `slot: Optional[Buffer] = .None`); anything
 else is `E038`. No code
 runs before `@entry`, so a global needing a computed value is declared
@@ -1002,7 +1002,7 @@ scratch: @array(@bit8, 64)   // zeroed
 ```
 
 An initializer may also hold **addresses**: a function's (`ref f`, a
-function value) and another global's (`ref other`), in a field or an enum
+function value) and another global's (`ref other`), in a field or an either
 payload, also cast to another `ref` type (`ref count as ref unknown`).
 That makes static tables of functions (vtables) globals. An address is
 known only once the program is linked, so nothing in an initializer
@@ -1010,7 +1010,7 @@ computes with one: comparing it, branching on it or reading it as a
 number (`@ptr_to_address`) is `E038`.
 
 ```lilac
-Table: object {
+Table: structure {
     add: ref function (context: ref unknown, amount: @bit32) nothing
     total: ref function (context: ref unknown) total: @bit32
 }
@@ -1034,7 +1034,7 @@ else nothing`), so `found.get()` moves `found` at the call site.
 
 ### References & Auto-Dereferencing
 
-References are denoted by the **`ref`** keyword. In Lilac, `ref` acts as a type modifier flag rather than a wrapper container. Because a type cannot be flagged as a reference twice, double references (e.g., `ref ref @bit32`) are syntactically invalid unless wrapped inside an object.
+References are denoted by the **`ref`** keyword. In Lilac, `ref` acts as a type modifier flag rather than a wrapper container. Because a type cannot be flagged as a reference twice, double references (e.g., `ref ref @bit32`) are syntactically invalid unless wrapped inside a structure.
 
 ```lilac
 variable: @bit32 = 0x0
@@ -1069,12 +1069,12 @@ size: @bit_native) …`. Changing a slot's width, or the calling convention
 
 ## 6. Composite Types & Namespaces
 
-### Objects
+### Structures
 
-An **`object`** defines both a custom data layout and a namespace. Functions declared inside an object are public members of that namespace by default.
+An **`structure`** defines both a custom data layout and a namespace. Functions declared inside a structure are public members of that namespace by default.
 
 ```lilac
-Object: object {
+Object: structure {
     Member: @bit32
 
     // Static function (no instance parameter)
@@ -1103,7 +1103,7 @@ the type's namespace and those inside it (`E026`). A type's body declares no
 globals: `NAME: Type = value` there is `E001`.
 
 ```lilac
-Int: object {
+Int: structure {
     private {
         data: @bit_native
     }
@@ -1130,7 +1130,7 @@ through `self` (`self.value`, `self.push(x)`), and an `E021` that names
 one says so. Variants stay `.Variant`.
 
 ```lilac
-Box: object {
+Box: structure {
     LIMIT: @bit32 => 0x7
     value: @bit32
 
@@ -1145,10 +1145,10 @@ A field of a function reference type is **callable**: `machine.step(x)`
 calls through the field, with no `self` (§4). A type's members share one
 namespace, so a field and a method of one name cannot both exist, and
 `value.step(x)` is a method call or a field call by what `step` is. An
-object of function references is an interface's table by hand:
+structure of function references is an interface's table by hand:
 
 ```lilac
-Sink: object {
+Sink: structure {
     context: ref unknown
     write: ref function (context: ref unknown, amount: @bit32) nothing
 }
@@ -1158,11 +1158,11 @@ send: function (sink: ref Sink, amount: @bit32) nothing {
 }
 ```
 
-Types are declared only at the top level of a file: an `object` or `enum`
+Types are declared only at the top level of a file: an `structure` or `either`
 declared inside another type's body is `E036`. Group related types with a
 folder namespace instead.
 
-**An object's layout is its C layout.** An `object` is laid out exactly as
+**A structure's layout is its C layout.** An `structure` is laid out exactly as
 the C struct with the same fields in the same order on the target:
 `sizeof`, `_Alignof` and every `offsetof` are the target C compiler's. Each
 field sits at the next multiple of its alignment and the size is padded to
@@ -1172,13 +1172,13 @@ types map to C as `@bit8`…`@bit64` → `uint8_t`…`uint64_t`, `@bit_native`
 `@fbit128` → the target's 128-bit float (`__float128`, or a binary128 `long
 double`), `ref T` → `T *`, and `@array(T, N)` → `T[N]`. So a `ref Object`
 crosses an `extern` as a `struct Object *` with no conversion, and a C
-header translates field by field. An object with no fields has size 0 and
+header translates field by field. A structure with no fields has size 0 and
 alignment 1, as GCC and Clang lay out an empty struct. Alignment follows
 the target's C ABI, not the size: on 32-bit x86 off Windows, for one,
 `@bit64` and `@fbit64` align to 4, so `{ a: @bit8, b: @bit64 }` is 12
 bytes there and 16 on x86-64. No type may be larger than the target's
-`isize::MAX` bytes (2^31 − 1 or 2^63 − 1): a larger one is `E067`. Enums
-have a C layout too: a tagged union (see Enums).
+`isize::MAX` bytes (2^31 − 1 or 2^63 − 1): a larger one is `E067`. Eithers
+have a C layout too: a tagged union (see Eithers).
 
 ### Namespaces & Visibility
 
@@ -1234,12 +1234,12 @@ everywhere with no import. `using` is only needed for **non-ancestor**
 namespaces, and it imports only their public items.
 
 **`private`.** `private { … }` may wrap items at file top level and at
-`object`-member position; nested blocks flatten. At top level it marks items
+`structure`-member position; nested blocks flatten. At top level it marks items
 *namespace-private*: they are excluded from the namespace's `using` export, so an
 importer sees an unresolved name (`E021`, not a privacy error), while the
-defining namespace and its descendants still see them. Inside an `object` it
-marks members *object-private*, which reach like namespace-private items: the
-object's own namespace and its descendants use them (so two types in one folder
+defining namespace and its descendants still see them. Inside an `structure` it
+marks members *structure-private*, which reach like namespace-private items: the
+structure's own namespace and its descendants use them (so two types in one folder
 build and read each other's private fields), and from anywhere else the member
 is found but inaccessible, which is `E026`. A private declaration still occupies its name (a
 private/public clash is `E020`), and `private` does not gate hook resolution:
@@ -1295,7 +1295,7 @@ User-defined type names and generic instances are qualified the same way, so
 same-named types in different namespaces stay distinct, while builtin types are
 never qualified. Two exceptions carry no prefix: hooks are unit-global (one
 signature-keyed overload table for the whole compilation unit, whether declared
-at top level or inside an object) and `extern` symbols keep their unmangled
+at top level or inside a structure) and `extern` symbols keep their unmangled
 declared name (§9). So a root `free` and `Standard.C`'s `extern` `free`
 coexist: one is `.root.free`, the other `free`.
 
@@ -1325,9 +1325,9 @@ written there, and the other arms are never checked or compiled.
 
 ```lilac
 if @builtin.Target.pointer_size == 0x8 {
-    Word: object { value: @bit64 }
+    Word: structure { value: @bit64 }
 } else {
-    Word: object { value: @bit32 }
+    Word: structure { value: @bit32 }
 }
 
 match @builtin.Target.os {
@@ -1348,34 +1348,34 @@ decided first, and an arm can hold further conditionals. A `using` inside an
 arm takes effect only in the selected arm, but every arm's `using`s are
 loaded, so each must name a folder that exists.
 
-### Enums
+### Eithers
 
-Enums are the single tagged-data type: a closed set of named variants,
-each optionally carrying a payload. In memory an enum is a tagged union:
+Eithers are the single tagged-data type: a closed set of named variants,
+each optionally carrying a payload. In memory an either is a tagged union:
 an explicit discriminator tag, then one area every payload shares. The
-`=>` operator maps constructor branches to their resulting object state.
+`=>` operator maps constructor branches to their resulting structure state.
 
 ```lilac
-Enum: enum { One, Two }
+Enum: either { One, Two }
 ```
 
 ```lilac
-OptionalBit32: enum {
+OptionalBit32: either {
     Some: @bit32
     None
 }
 ```
 
 Values construct as `Enum.Variant` / `Enum.Variant(payload)`, with the
-arguments of a generic enum spelled on the enum (`Optional[@bit32].Some(0x1)`),
+arguments of a generic either spelled on the either (`Optional[@bit32].Some(0x1)`),
 or as a bare `.Variant` / `.Variant(payload)` when the expected type names the
-enum. `match` arms test tags with `.Tag` patterns and bind payloads via
+either. `match` arms test tags with `.Tag` patterns and bind payloads via
 `-> name: Type`. A bare tag's name is on its `.`'s line (a `.` ending a
 line is an error).
 
 The tag is the smallest `@bitN` that holds the variant count (`@bit8` up to
 256 variants), and the tag of a variant is its index in declaration order.
-**An enum's layout is its C layout**, that of the C struct
+**An either's layout is its C layout**, that of the C struct
 
 ```c
 struct { uintN_t tag; union { P0 p0; P1 p1; /* … */ } payload; }
@@ -1383,34 +1383,36 @@ struct { uintN_t tag; union { P0 p0; P1 p1; /* … */ } payload; }
 
 where `uintN_t` is the tag's container and the union has one member per
 variant with a payload, in declaration order, each mapped to C as an
-object's fields are (see Objects). Variants without a payload add no
-member, and an enum with no payloads at all is just its tag. So the tag is
+structure's fields are (see Structures). Variants without a payload add no
+member, and an either with no payloads at all is just its tag. So the tag is
 at offset 0, every payload starts at the tag's size rounded up to the
 strictest payload alignment, and the size is that offset plus the largest
-payload, padded to the enum's alignment (the larger of the tag's and the
+payload, padded to the either's alignment (the larger of the tag's and the
 payloads'). For example `{ A: @array(@bit8, 0x100), B: @array(@bit8,
 0x100), C: @array(@bit8, 0x100) }` is 257 bytes, aligned 1, and
 `Result[@bit32, @bit8]` is 8 bytes, aligned 4. There are no niche layouts:
-`Optional[ref T]` keeps its tag (16 bytes on a 64-bit target). An enum
+`Optional[ref T]` keeps its tag (16 bytes on a 64-bit target). An either
 crosses an `extern` behind a `ref` as a pointer to that C struct.
 
-Like every value, an enum starts zeroed, which is its **first** variant
-(with a zero payload). A variant is always built whole in a zeroed object,
-and every write of an enum (an assignment, an out, `@write`, a global's
+Like every value, an either starts zeroed, which is its **first** variant
+(with a zero payload). A variant is always built whole in a zeroed structure,
+and every write of an either (an assignment, an out, `@write`, a global's
 initializer, a copy) writes the whole value: the bytes of the payload area
-past the live payload, and the padding, are zero. `==` compares an enum's
+past the live payload, and the padding, are zero. `==` compares an either's
 every byte, inactive payload bytes included, so two values of the same
 variant with equal payloads are equal whatever the place held before. A
 type
 that contains itself by value, directly or through other fields and
 payloads, is `E053`; store the recursive part behind a `ref`.
 
-An enum body may also declare members exactly like an object: methods
+An either body may also declare members exactly like a structure: methods
 (`name: function (self) ... { }` or `=> expr`), constants (`NAME: Type =>
 value`, named `Enum.NAME`), hooks (`@name: ...`) and `private { }` blocks. A `name: function (...) ...` with a body is a method; a
 `name: Type` without one is a payload variant. (The old `union` keyword was removed:
 it spelled the same type. Legacy `union { ... }` declarations fail to
-parse; rename them to `enum`.)
+parse; rename them to `either`. Likewise `object` and `enum` were renamed
+`structure` and `either`; an old declaration is `E001` with the new keyword
+as its fix.)
 
 ### Type aliases
 
@@ -1429,10 +1431,10 @@ Callback: alias function (Event) nothing
   are a duplicate (`E020`).
 * An alias may be written wherever a type can: a parameter, out, local,
   field, payload, generic argument, `as`, `ref Bytes`. An alias of an
-  object or enum also names its statics and builds its literals
+  structure or either also names its statics and builds its literals
   (`Spot.origin()`, `Spot { x = 0x1 }`); an alias of a generic instance
   has its arguments already, so `Bytes { ... }` infers nothing.
-* It is an item like an object: declared at the top level of a file only
+* It is an item like a structure: declared at the top level of a file only
   (inside a type body it is `E036`), namespaced and visible like any item
   (`private { }`, `using`), and its name clashes like one (`E020`). It is
   not a value (`E021`).
@@ -1486,7 +1488,7 @@ arguments when the expected type supplies them:
 `x: GenObject[@bit32] = GenObject { value = 0x0 }`.
 
 ```lilac
-GenObj[T]: object {
+GenObj[T]: structure {
     value: T
 }
 
@@ -1498,7 +1500,7 @@ GenFunc[T]: function (value: T) nothing {
 
 Each concrete `(declaration, type arguments)` pair monomorphizes once to
 concrete items, and verified IR is concrete-only (no generic declarations and
-no surviving type parameter). A generic object method's `self` is the applied
+no surviving type parameter). A generic structure method's `self` is the applied
 instance `ref GenObj[T…]`, so `self.value` resolves to the substituted field
 type. Duck-typed requirements are proven at instantiation in both receiver
 forms: **value-based** `value.method()` (a method with `self`, where
@@ -1511,7 +1513,7 @@ generic instances (`E068`). A type's size has no limit: `P[T, T]` applied
 to itself 20 times is a tree of a million leaves, and it compiles in time,
 and to symbols, linear in the number of distinct types it names.
 
-A hook declared inside a generic body (for example an object's `@on_drop`)
+A hook declared inside a generic body (for example a structure's `@on_drop`)
 monomorphizes with its parent and registers once per concrete instantiation,
 so `GenBox[T]` can define `@on_drop` for each `GenBox[@bit32]`-style instance.
 Its signature registers with the instance, so lookups find it, but its
@@ -1568,7 +1570,7 @@ without them only the explicit intrinsic form works:
 }
 ```
 
-**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an enum's payload area past its live payload, since a variant is built whole in a zeroed object), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict. On floating-point values, `==` compares the IEEE 754 bit patterns directly: `0.0 == -0.0` is `0x0` (their sign bits differ) and two `NaN`s with identical bits are `0x1` (`Standard`'s float types provide `equals` for IEEE equality, `approximately_equals` for a tolerance and `total_compare` for `totalOrder` sorting).
+**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an either's payload area past its live payload, since a variant is built whole in a zeroed structure), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict. On floating-point values, `==` compares the IEEE 754 bit patterns directly: `0.0 == -0.0` is `0x0` (their sign bits differ) and two `NaN`s with identical bits are `0x1` (`Standard`'s float types provide `equals` for IEEE equality, `approximately_equals` for a tolerance and `total_compare` for `totalOrder` sorting).
 
 List of operators:
 | op | function |
@@ -1610,7 +1612,7 @@ Operator, `@conversion`, and RAII (`@on_copy`/`@on_drop`) hooks are globally
 indexed by `(name, signature)`: each declaration is a distinct overload keyed by
 its parameter/return shape, so mixed-width bit algebra and custom-type operators
 coexist in one table. The index is unit-global and scope-independent — a
-top-level hook and an object-member hook share the same table — and the same
+top-level hook and an structure-member hook share the same table — and the same
 name with the same qualified signature anywhere in the unit is `E020`.
 `@add(Matrix, Matrix) -> @bit32` simply binds the `Matrix` overload; there is no
 operator-shape lint.
@@ -1718,7 +1720,7 @@ There is no construction hook: a constructor is a static function, and
 Example of defining a constructor and RAII rules
 
 ```lilac
-Buffer: object {
+Buffer: structure {
     ptr: ref @bit8
 
     // A constructor: `buffer: Buffer.new(size)`
@@ -1800,12 +1802,12 @@ malloc: extern function (size: @bit_native) ptr: ref @bit8
 
 Rules: an `extern` uses the platform C ABI. Each parameter maps to its C type:
 a bit integer (`@bit8`/`@bit16`/`@bit32`/`@bit64`/`@bit_native`) or float
-(`@fbitN`) by value, any `ref T` to an opaque pointer, and an object with a
+(`@fbitN`) by value, any `ref T` to an opaque pointer, and a structure with a
 single field of one of those types (a transparent wrapper such as a library
-`CInt` or `FILE`) as that field. Any other object or enum passes by
+`CInt` or `FILE`) as that field. Any other structure or either passes by
 value as its C struct does (below). A single return slot becomes the C
 return value; no return slot is `void`. More than one out, an array by
-value (C has none; pass a `ref`, or wrap it in an object), an empty object
+value (C has none; pass a `ref`, or wrap it in a structure), an empty structure
 (C has no empty struct) or an aggregate on 32-bit Arm macOS is `E028`,
 validated before codegen so it reports as an ordinary diagnostic. An `extern`
 may not be named `main`: extern symbols are unmangled, so the C symbol `main`
@@ -1816,15 +1818,15 @@ libraries to link (`link = ["c"]`) are declared in the package manifest,
 never in code. No overloads, no calling-convention annotations in v1.
 
 **Aggregates cross as their C layout.** C sees exactly the C layout of the
-Lilac type: an `object` is the C struct of its fields in order, and an
-`enum` is `struct { uintN_t tag; union { … } payload; }` (see Objects and
-Enums), on every target, with the same `sizeof`, `_Alignof` and
+Lilac type: an `structure` is the C struct of its fields in order, and an
+`either` is `struct { uintN_t tag; union { … } payload; }` (see Structures and
+Eithers), on every target, with the same `sizeof`, `_Alignof` and
 `offsetof`s. So a `ref Object` or `ref Enum` is a `struct … *` to C with no
-conversion, and a C header translates field by field. By value, an object
-or enum goes exactly as the target's C compiler passes that struct (in
+conversion, and a C header translates field by field. By value, a structure
+or either goes exactly as the target's C compiler passes that struct (in
 registers, split across them, in memory or behind a hidden pointer), in
 every direction: `extern` calls, `export`s and C function values. (`==` on
-objects and enums compares every byte, padding included, and one C built
+structures and eithers compares every byte, padding included, and one C built
 may hold garbage in its padding or past its live payload: compare such
 values field by field.)
 
@@ -1912,7 +1914,7 @@ sort: function (values: ref unknown, count: @bit_native) nothing {
 
 ### Async lives in the standard library
 
-Async needs no compiler support beyond what exists: futures are objects driven
+Async needs no compiler support beyond what exists: futures are structures driven
 by `loop` + `match`, polling fits multi-return (`ready, value = task.poll()`),
 executors accept any type with a structural `poll` via duck-typed generics, and
 `@on_drop` covers task cancellation. Suspending a live call stack — the one

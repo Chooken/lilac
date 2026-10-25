@@ -1,5 +1,5 @@
 // expect-exit: 0
-// A global holding each variant of an enum whose payloads differ in size
+// A global holding each variant of an either whose payloads differ in size
 // and alignment: the initializer puts the tag at 0 and the live payload at
 // the payload area's offset (8 here, every payload's), and leaves the rest
 // zero, so each global reads back, matches, and equals the same variant
@@ -8,13 +8,13 @@
 using Standard
 using Standard.Process
 
-Pair: object {
+Pair: structure {
     a: @bit8
     b: @bit32
 }
 
 // The tag at 0; every payload at 8; 16 bytes, aligned 8.
-Mixed: enum {
+Mixed: either {
     Nothing
     Byte: @bit8
     Half: @bit16

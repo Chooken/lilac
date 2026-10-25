@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Box[T]: object {
+Box[T]: structure {
     value: T
 
     make: function (v: T) out: Box[T] {

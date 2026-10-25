@@ -1,11 +1,11 @@
 // expect-exit: 7
-// `==` on constant enum values (with or without a payload) decides at
+// `==` on constant either values (with or without a payload) decides at
 // lowering, so the arms it rules out are never lowered.
 
 using Standard
 using Standard.Process
 
-Mode: enum {
+Mode: either {
     Fast
     Small
     Level: @bit32

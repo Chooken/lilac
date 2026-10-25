@@ -2,7 +2,7 @@
 // expect-stderr: error[E022]: field `count` is a `@bit32`, not a function
 // Only a field holding a function reference can be called.
 
-Counter: object {
+Counter: structure {
     count: @bit32
 }
 

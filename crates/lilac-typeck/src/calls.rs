@@ -458,7 +458,7 @@ impl Checker<'_> {
                 codes::E010,
                 format!("cannot call static member `{field}` on `{owner}`"),
             )
-            .label(span, true, "static calls need an object type");
+            .label(span, true, "static calls need a structure type");
             if self.is_generic_derived(ty) {
                 let probed = self.probe_args(fcx, args);
                 diagnostic =
@@ -560,7 +560,7 @@ impl Checker<'_> {
                 codes::E010,
                 format!("cannot call method `{field}` on `{owner}`"),
             )
-            .label(span, true, "methods need an object");
+            .label(span, true, "methods need a structure");
             let diagnostic = shadowed_alias_note(diagnostic, shadowed);
             let diagnostic =
                 self.method_requirement(fcx, diagnostic, &receiver, field, args, expected);

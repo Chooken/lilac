@@ -3,7 +3,7 @@
 // `name: Type.function(args)` needs a function that returns exactly one
 // `Type`.
 
-Pair: object {
+Pair: structure {
     a: @bit32
 
     first: function (pair: ref Pair) value: @bit32 {

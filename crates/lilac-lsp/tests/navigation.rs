@@ -10,14 +10,14 @@ use lsp_types::{
 };
 
 const PROGRAM: &str = "\
-Point: object {
+Point: structure {
     x: @bit8
     y: @bit8
     sum: function (self) total: @bit8 {
         total = @i_add_8(self.x, self.y)
     }
 }
-Shape: enum {
+Shape: either {
     Dot
     Line: @bit8
 }
@@ -337,7 +337,7 @@ fn type_definition_of_a_local_goes_to_its_object() {
     )
     .expect("type definition");
     let location: Location = serde_json::from_value(result).expect("location");
-    let shape = at(PROGRAM, "Shape: enum", 0, 0);
+    let shape = at(PROGRAM, "Shape: either", 0, 0);
     assert_eq!(
         location.range.start,
         lsp_types::Position::new(shape.0, shape.1)
@@ -425,7 +425,7 @@ fn rename_refuses_keywords_and_hooks() {
     let (client, handle) = start_server();
     initialize(&client, serde_json::json!({ "capabilities": {} }));
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "Wide: object {\n    data: @bit8\n    @add: function (lhs: Wide, rhs: Wide) Wide => lhs\n}\nmain: function () nothing {\n}\n";
+    let text = "Wide: structure {\n    data: @bit8\n    @add: function (lhs: Wide, rhs: Wide) Wide => lhs\n}\nmain: function () nothing {\n}\n";
     did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
@@ -454,7 +454,7 @@ fn rename_a_member_used_bare_and_qualified() {
     initialize(&client, serde_json::json!({ "capabilities": {} }));
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
     let text = "\
-Box: object {
+Box: structure {
     LIMIT: @bit8 => 0x7
     value: @bit8
     make: function () box: Box {
@@ -656,7 +656,7 @@ fn hovers_show_fields_variants_globals_and_intrinsics() {
 }
 
 const ALIASES: &str = "\
-Point: object {
+Point: structure {
     x: @bit8
 }
 Spot: alias Point
@@ -708,7 +708,7 @@ fn aliases_hover_navigate_and_rename() {
     )
     .expect("type definition");
     let type_definition: Location = serde_json::from_value(type_definition).expect("location");
-    let point = at(ALIASES, "Point: object", 0, 0);
+    let point = at(ALIASES, "Point: structure", 0, 0);
     assert_eq!(
         type_definition.range.start,
         lsp_types::Position::new(point.0, point.1)
@@ -752,7 +752,7 @@ fn function_references_navigate() {
 add: function (a: @bit8, b: @bit8) total: @bit8 {
     total = @i_add_8(a, b)
 }
-Machine: object {
+Machine: structure {
     step: ref function (input: @bit8, scale: @bit8) output: @bit8
     run: function (self, input: @bit8) output: @bit8 {
         output = self.step(input, input)

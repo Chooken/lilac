@@ -1,12 +1,12 @@
 // `E` contains itself by value (`E053`). Every later use sees an error
 // type, so nothing below adds an error of its own.
 
-E: enum {
+E: either {
     A: E
     B
 }
 
-Box[T]: object {
+Box[T]: structure {
     v: T
 }
 

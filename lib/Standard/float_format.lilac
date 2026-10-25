@@ -2,7 +2,7 @@
 // parsing (`ParseError`, `Int*.parse`, `Uint*.parse`, `Float*.parse`).
 
 /// Why parsing a number from text failed.
-ParseError: enum {
+ParseError: either {
     /// The input was empty.
     Empty
     /// A byte was not a valid digit or part of the number format.
@@ -25,7 +25,7 @@ ParseError: enum {
 
 /// A floating-point number formatted with `precision` digits after the
 /// decimal point (ties rounded to even): `{x.fixed(3)}`.
-Fixed: object {
+Fixed: structure {
     private {
         bits: @bit64
         width: @bit32
@@ -40,7 +40,7 @@ Fixed: object {
 /// A floating-point number formatted in scientific notation with
 /// `precision` digits after the decimal point (ties rounded to even):
 /// `{x.scientific(4)}`.
-Scientific: object {
+Scientific: structure {
     private {
         bits: @bit64
         width: @bit32
@@ -70,7 +70,7 @@ private {
     // 64-bit limbs with no zero limb at the top. 64 limbs = 4096 bits,
     // which holds every exact binary64 numerator/denominator and 780-digit
     // decimal significand without heap allocation.
-    Big: object {
+    Big: structure {
         len: @bit_native
         limbs: @array(@bit64, 64)
     }

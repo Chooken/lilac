@@ -2,7 +2,7 @@ gen_function[T]: function () out: T {
     out = T.other()
 }
 
-Object: object {
+Object: structure {
     get: function () result: @bit32 {
         result = 0x2
     }

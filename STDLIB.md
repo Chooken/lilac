@@ -7,7 +7,7 @@
 
 The standard library is ordinary Lilac code. The compiler names **zero**
 standard-library entities (`SPEC.md` §2); everything here is built from bit
-containers, `object`/`enum`, generics, `ref`, `@` hooks, and `extern`.
+containers, `structure`/`either`, generics, `ref`, `@` hooks, and `extern`.
 
 What each declaration does is documented in the source, in `///` doc
 comments above it, which the language server shows in hovers, signature
@@ -48,7 +48,7 @@ another namespace). Therefore the root namespace is a real prelude
 
 ### 0.2 Naming conventions (assumed — confirm)
 
-* **Namespaces, types, objects, enums, fields**: `PascalCase` (`String`,
+* **Namespaces, types, structures, eithers, fields**: `PascalCase` (`String`,
   `HashMap`, `Size`, `Buffer`) — matches `SPEC.md`'s `Object`, `String`,
   `Size`, `Buffer`.
 * **Functions, methods, hooks, locals**: `snake_case` (`at`, `slice`,
@@ -61,7 +61,7 @@ another namespace). Therefore the root namespace is a real prelude
 * **Recoverable** failures return `Result[T, E]` / `Option[T]` (files, parsing,
   allocation, network).
 * **Programmer errors** `panic` (index out of bounds).
-* `Result`/`Option` are plain `enum`s, driven by `match` (statements-only in
+* `Result`/`Option` are plain `either`s, driven by `match` (statements-only in
   v1) and helper methods. Their `get` (and `Result.error`) are functions
   that can fail (`SPEC.md` §4) and take `self` by value (the payload moves
   out), so the caller handles the empty side with a
@@ -185,15 +185,15 @@ unsigned variants; float variants. Unsigned comparisons bind
 `@rotate_left`, `@rotate_right`, `@popcount`, `@leading_zeros`,
 `@trailing_zeros`, `@byte_swap`.
 
-**Core enums & types:**
+**Core eithers & types:**
 
 | Type | Definition | Key methods |
 |---|---|---|
-| `Option[T]` | `enum { Some: T; None }` | `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`, `and_then`, `or`, `or_else`, `take`, `replace`, `iter` |
-| `Result[T, E]` | `enum { Ok: T; Error: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
-| `Ordering` | `enum { Less; Equal; Greater }` | `and_then`, `reverse`, `is_less`… |
-| `Never` | `enum {}` (empty) | uninhabited; result of `panic`/`abort` |
-| `Unit` | alias for `nothing`-shaped empty object | for generic uniformity |
+| `Option[T]` | `either { Some: T; None }` | `is_some`, `is_none`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `expect`, `map`, `and_then`, `or`, `or_else`, `take`, `replace`, `iter` |
+| `Result[T, E]` | `either { Ok: T; Error: E }` | `is_ok`, `is_err`, `unwrap`, `unwrap_err`, `unwrap_or`, `expect`, `map`, `map_err`, `and_then`, `or_else` |
+| `Ordering` | `either { Less; Equal; Greater }` | `and_then`, `reverse`, `is_less`… |
+| `Never` | `either {}` (empty) | uninhabited; result of `panic`/`abort` |
+| `Unit` | alias for `nothing`-shaped empty structure | for generic uniformity |
 
 > **Today:** `Optional[T]` (`Some`, `None`; `get: value: T else nothing`,
 > `get_ref: value: ref T else nothing` (the value in place),
@@ -273,7 +273,7 @@ consumer meet in it:
 
 | Item | What it is |
 |---|---|
-| `Formatter` | Where formatted text goes: an object holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
+| `Formatter` | Where formatted text goes: a structure holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
 | `Format` | `alias @format_args(Formatter)`: the type of an f-string written into a `Formatter`. |
 | `FormatSink` | `alias function (target: ref unknown, bytes: @byte_buffer) nothing`: what a consumer hands a `Formatter`. |
 | `Hex`, `Binary` | A number's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}`. |
@@ -284,7 +284,7 @@ A type is formattable when it has a `@format` hook for `Formatter`, found
 by exact signature (`SPEC.md` §8):
 
 ```lilac
-Point: object {
+Point: structure {
     x: Int
     y: Int
 
@@ -339,7 +339,7 @@ formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
 | `Allocator` | structural convention (§2) | `alloc(size, align)`, `free(ptr, size, align)`, `realloc(ptr, old, new, align)`, `alloc_type[T]() Unique[T]`, `alloc_slice[T](count) Slice[T]` |
 | `SystemAllocator` | malloc/free-backed; **the process default** | implements `Allocator`; `global() ref Allocator` |
 | `Arena` | bump/region allocator; bulk free via `reset` | `new(backing)`, `alloc`, `reset`, `reset_retain`, `used`, `capacity` |
-| `Pool[T]` | fixed-size object freelist (nice-to-have) | `alloc`, `free`, `reserve` |
+| `Pool[T]` | fixed-size structure freelist (nice-to-have) | `alloc`, `free`, `reserve` |
 
 **Ownership:**
 
@@ -355,7 +355,7 @@ Constructors are static functions (`b: Unique[T].new(value)`). Hooks:
 `@on_override` (drop the previous value), `@on_drop` (`Unique` frees;
 `Rc`/`Arc` decrement and free at zero).
 
-**Helpers:** `defer`/guard objects for RAII scopes; `align_up`; `mem_copy`,
+**Helpers:** `defer`/guard structures for RAII scopes; `align_up`; `mem_copy`,
 `mem_move`, `mem_set`, `mem_compare` (thin wrappers over `@memcpy`/`C`).
 
 ---
@@ -369,8 +369,8 @@ Constructors are static functions (`b: Unique[T].new(value)`). Hooks:
 | `StringBuilder` | growable text buffer | `new`, `with_capacity`, `push_char`, `push_str`, `push_int`, `push_float`, `append_literal(@byte_buffer)` (f-string handler shape), `append[T](T)`, `build() String`, `clear`, `len` |
 | `Utf8` | encoding/decoding | `encode(codepoint) String`, `decode(view) Result[Char, Utf8Error]`, `next_codepoint(view, ref i) Option[Char]`, `validate(view) Result[@bit_native, Utf8Error]`, `count_codepoints` |
 | `Unicode` | scalar properties | `category(c)`, `is_letter`, `is_digit`, `is_whitespace`, `is_alphanumeric`, `to_lower(c)`, `to_upper(c)` |
-| `ParseError` | `enum { Empty; InvalidDigit; Overflow; Trailing }` | |
-| `Utf8Error` | `enum { InvalidStart; InvalidContinuation; Truncated }` | |
+| `ParseError` | `either { Empty; InvalidDigit; Overflow; Trailing }` | |
+| `Utf8Error` | `either { InvalidStart; InvalidContinuation; Truncated }` | |
 
 **Functions:** `parse_int(view) Result[Int64, ParseError]`,
 `parse_uint`, `parse_int_radix(view, radix)`, `parse_float(view)
@@ -429,7 +429,7 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 
 * `Iterator[T]`: `next(self) Option[T]`.
 * `Sequence[T]`: `iter(self) Iterator-shaped`.
-* Adapters (generic objects/functions): `map`, `filter`, `filter_map`, `fold`
+* Adapters (generic structures/functions): `map`, `filter`, `filter_map`, `fold`
   / `reduce`, `zip`, `enumerate`, `take`, `take_while`, `skip`, `chain`,
   `flatten`, `collect_into[List[T]]`, `count`, `any`, `all`, `find`,
   `position`, `sum`, `product`, `min`/`max`.
@@ -513,7 +513,7 @@ still makes system calls for everything else.
 | Type | Purpose | Key methods |
 |---|---|---|
 | `File` | OS file handle (`@on_drop` closes) | `open(path, mode) Result[File, IoError]`, `create`, `read(buf) Result[@bit_native, IoError]`, `read_to_string() Result[String, IoError]`, `write(bytes)`, `write_str`, `write_all`, `seek(off, whence)`, `size() Result[@bit_native, IoError]`, `flush`, `close` |
-| `OpenMode` | `enum { Read; Write; Append; ReadWrite }` + create/truncate flags | |
+| `OpenMode` | `either { Read; Write; Append; ReadWrite }` + create/truncate flags | |
 | `Path` | path value | `new(s)`, `join(part)`, `parent() Option[Path]`, `file_name() Option[String]`, `extension() Option[String]`, `is_absolute`, `normalize`, `to_string` |
 | `Directory` | directory ops | `create`, `remove`, `exists`, `list() Result[List[Path], IoError]` |
 | `Reader` | structural read shape | `read(buf) Result[@bit_native, IoError]`, `read_u8`, `read_line() Result[Option[String], IoError]`, `read_all` |
@@ -521,7 +521,7 @@ still makes system calls for everything else.
 | `BufferedReader[R]` | buffered wrapper | over any `Reader`; `read_line`, `read_until` |
 | `BufferedWriter[W]` | buffered wrapper | over any `Writer`; `flush` |
 | `Stdin` / `Stdout` / `Stderr` | standard streams | `print`, `println`, `eprint`, `eprintln`, `read_line`, `write`, `flush`; `@on_drop` flushes |
-| `IoError` | `enum { NotFound; PermissionDenied; AlreadyExists; IsADirectory; NotADirectory; Interrupted; UnexpectedEof; Other: @bit32 }` | `message() String` |
+| `IoError` | `either { NotFound; PermissionDenied; AlreadyExists; IsADirectory; NotADirectory; Interrupted; UnexpectedEof; Other: @bit32 }` | `message() String` |
 
 **Conversions:** `@conversion(from: String) to: Path`,
 `@conversion(from: @byte_buffer) to: Path`; writers accept `String` /
@@ -604,7 +604,7 @@ raw addresses require explicit conversion to `@bit_native`).
 | `RwLock[T]` | reader/writer lock | `read()`, `write()`, `try_read`, `try_write` |
 | `Condvar` | condition variable | `wait(guard)`, `notify_one`, `notify_all` |
 | `Channel[T]` | MPMC/SPSC queue | `new(capacity)`, `send(v)`, `recv() Option[T]`, `try_send`, `try_recv`, `close` |
-| `ThreadError` | `enum { SpawnFailed; Poisoned }` | |
+| `ThreadError` | `either { SpawnFailed; Poisoned }` | |
 
 Atomics live in `Standard.C` (`Atomic[T]`); `Arc[T]` in `Standard.Memory`
 becomes fully thread-safe through them.
@@ -682,11 +682,11 @@ the same bits on every target in every build mode.
 | Type | Purpose | Key methods |
 |---|---|---|
 | `Diagnostic` | structured message | `error(code, msg)`, `warning`, `note`, `help`, `with_label(span, text)`, `render() String` |
-| `Level` | `enum { Error; Warning; Note; Help }` | |
+| `Level` | `either { Error; Warning; Note; Help }` | |
 | `Span` | `{ lo; hi; file }` source location | `merge`, `contains` |
 | `SourceMap` | file id ↔ name registry | `add(path)`, `name(id)`, `lookup(span)` |
 | `Color` | ANSI styling | `red`, `green`, `bold`, `reset`, `enabled` (tty detection) |
-| `EmitMode` | `enum { Human; Json }` | |
+| `EmitMode` | `either { Human; Json }` | |
 
 **Functions:** `format(spec, args)` (format specifiers beyond f-strings),
 `pretty_print(value)` (over `@format`), `write_diagnostic(w, d)`,
@@ -783,7 +783,7 @@ stdlib workaround via `extern`.
 
 * **Traits/protocols/concepts** — abstraction stays structural; a first-class
   feature is deferred (revisit after the stdlib proves the shapes).
-* **Async** — futures/executors are objects over `loop` + `match`; `await` is
+* **Async** — futures/executors are structures over `loop` + `match`; `await` is
   deferred (`SPEC.md` §9). Not in this layout yet.
 * **Networking, JSON, regex, compression** — Tier-3 extras, later.
 * **A `Standard` umbrella that re-exports children** — impossible without

@@ -1,6 +1,6 @@
 // expect-error: E022
 // `@format` takes the value by `ref` and the writer by `ref`.
-Out: object {}
+Out: structure {}
 
 @format: function (value: ref @bit32, out: ref Out) nothing {}
 

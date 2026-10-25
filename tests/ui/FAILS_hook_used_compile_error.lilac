@@ -1,4 +1,4 @@
-Object: object {
+Object: structure {
     member: @bit32
     @on_drop: function (from: ref Object) nothing {
         @compile_error("used hook")

@@ -1,4 +1,4 @@
-Thing: object {
+Thing: structure {
     a_field: @bit32
 
     @on_drop: function (from: ref Thing) nothing {

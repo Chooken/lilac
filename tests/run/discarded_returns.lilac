@@ -5,7 +5,7 @@
 
 using Standard.Io
 
-Noisy: object {
+Noisy: structure {
     c: @bit32
 
     // Skips the zeroed out slot a callee drops when it first assigns it.

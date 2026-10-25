@@ -1,14 +1,14 @@
 // expect-stdout: kl||nr
 // expect-stdout: kl|r
 // expect-stdout: |lr
-// A field moves out of an object with no `@on_drop` of its own: the rest
+// A field moves out of a structure with no `@on_drop` of its own: the rest
 // of it still drops, setting the field again makes it whole, and a field
 // moved on one branch only drops once either way.
 
 using Standard
 using Standard.Io
 
-Leaf: object {
+Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -16,7 +16,7 @@ Leaf: object {
     }
 }
 
-Pair: object {
+Pair: structure {
     left: Leaf
     right: Leaf
 }

@@ -373,7 +373,7 @@ impl Parser {
                     self.expect(
                         diags,
                         TokenKind::Dot,
-                        "`.` after the enum name in a pattern",
+                        "`.` after the either name in a pattern",
                     )?;
                     self.expect(diags, TokenKind::Ident, "match tag after `.`")?
                         .text
@@ -406,7 +406,7 @@ impl Parser {
                 return Err(Self::expected(
                     diags,
                     self.peek(),
-                    "`.Tag`, `Enum.Tag`, or a literal pattern for match arm",
+                    "`.Tag`, `Either.Tag`, or a literal pattern for match arm",
                 ));
             }
         })

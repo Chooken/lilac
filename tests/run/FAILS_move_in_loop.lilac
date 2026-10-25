@@ -3,7 +3,7 @@
 // A value moved in a loop's body is empty when the next iteration reads
 // it, unless the body sets it again.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

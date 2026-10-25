@@ -44,9 +44,9 @@ pub fn declaration(resolved: &Resolved, def: DefId, slots: usize) -> Rendered {
         }
         DefKind::Object | DefKind::Enum => {
             let keyword = if matches!(data.kind, DefKind::Object) {
-                "object"
+                "structure"
             } else {
-                "enum"
+                "either"
             };
             out.push(&generic_name(&data.name, &data.generic_params));
             out.push(": ");
@@ -63,8 +63,8 @@ pub fn declaration(resolved: &Resolved, def: DefId, slots: usize) -> Rendered {
                     let more = data.slots.len().saturating_sub(slots);
                     if more > 0 {
                         let noun = match (keyword, more) {
-                            ("object", 1) => "field",
-                            ("object", _) => "fields",
+                            ("structure", 1) => "field",
+                            ("structure", _) => "fields",
                             (_, 1) => "variant",
                             _ => "variants",
                         };

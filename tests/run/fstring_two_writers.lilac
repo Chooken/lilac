@@ -5,7 +5,7 @@
 using Standard.Os as Os
 
 // Writes formatted text straight to standard output.
-Out: object {
+Out: structure {
     write: function (self, text: @format_args(Out)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0
@@ -42,7 +42,7 @@ write_bytes: function (bytes: @byte_buffer) nothing {
 
 
 // Writes `@bit32`s in hexadecimal.
-Hex: object {
+Hex: structure {
     write: function (self, text: @format_args(Hex)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0

@@ -1,4 +1,4 @@
-GenBox[T]: object {
+GenBox[T]: structure {
     value: T
 
     get: function (instance: ref GenBox[T]) result: T {

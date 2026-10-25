@@ -5,7 +5,7 @@
 /// `+`, `-`, `*` and negation panic on overflow in Debug builds and wrap in
 /// Release; the `wrapping_*` methods wrap in every mode. `/` and `%`
 /// panic on a zero divisor and on `MIN / -1`.
-Int16: object {
+Int16: structure {
 
     private {
         data: @bit16

@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Num: object {
+Num: structure {
     data: @bit32
 
     @negate: function (value: Num) out: Num {

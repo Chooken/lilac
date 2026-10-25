@@ -1,4 +1,4 @@
-Holder[T]: object {
+Holder[T]: structure {
     value: T
 
     make: function (v: T) out: Holder[T] {

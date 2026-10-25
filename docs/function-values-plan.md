@@ -4,7 +4,7 @@
 > "agreed" were settled in discussion; the rest are proposed.
 >
 > Goal: a function value is a `ref function`. It can live anywhere a value
-> lives (a field, a global, a constant, an array, an enum payload, a
+> lives (a field, a global, a constant, an array, an either payload, a
 > generic argument), and any expression of that type can be called,
 > including `object.field(args)`, which passes no `self`. Static tables of
 > functions (vtables) can be globals. Inside a type's own bodies, its
@@ -79,7 +79,7 @@ on it.
     are the function value types.
   - A `function (…)` or `export function (…)` type anywhere else is
     `E077`. That includes a local, parameter, out, field, global,
-    constant, generic argument, array element, enum payload, `as` target
+    constant, generic argument, array element, either payload, `as` target
     and `@size_of`.
   - The one exception is an alias target: `FormatSink: alias function
     (…) nothing` stays bare, and every use writes `ref FormatSink`, as
@@ -118,7 +118,7 @@ on it.
 
   **Evaluation order:** the callee first, then the arguments left to
   right. A field callee is read before an argument can move or reassign
-  its object.
+  its structure.
 - **Never dereferenced.** A function reference points to code.
   - Auto-deref skips it, as it skips `ref unknown`.
   - `==`/`!=` compare addresses, and both sides need the same function
@@ -326,14 +326,14 @@ Known sites:
     its field.
   - `function_ref_items.lilac`: a call through a global, a constant, a
     qualified global, a call result and a parenthesized expression.
-  - `function_ref_table.lilac`: an object of function references built
+  - `function_ref_table.lilac`: a structure of function references built
     at run time, used as an interface (context plus table), with
     `ref Type.method` laundered through `ref unknown`.
   - `function_ref_equality.lilac`: the same function is equal; different
     functions are not; equality holds across a `ref unknown` round
     trip.
   - `function_ref_c.lilac`: a `ref export function` field called with
-    the C ABI (qsort's comparator stored in an object).
+    the C ABI (qsort's comparator stored in a structure).
 - **`FAILS_` run tests:**
   - `FAILS_function_ref_ref.lilac`: the old miscompile is now `E010`.
   - `FAILS_bare_function_type.lilac`, `FAILS_bare_function_value.lilac`
@@ -362,7 +362,7 @@ Known sites:
   - §1 types: function references next to `unknown`
   - §4 functions: values, calls through values, evaluation order
   - §5 references: never dereferenced, identity, casts and the ABI note
-  - §6 objects: callable fields
+  - §6 structures: callable fields
   - §9 C function values
 - **AGENTS.md:** the "C function values" bullet is rewritten as
   "Function values" (`ref function`, `HirCallee::Value`,
@@ -432,7 +432,7 @@ Notes on the rule:
   - Semantic tokens: own-name uses color as their kind (constant,
     function), from the recorded sites.
 - **Docs:**
-  - SPEC §6 objects: "Inside a type's bodies…"
+  - SPEC §6 structures: "Inside a type's bodies…"
   - AGENTS.md "Paths" and "Member constants" bullets
   - `E021`'s page: the field/method help
 
@@ -461,14 +461,14 @@ Notes on the rule:
 
 A global's initializer may hold `ref f`, a function's address, and
 `ref OTHER`, another global's address, anywhere a value of that type
-fits: a field, an array element, an enum payload. Casts between `ref`
+fits: a field, an array element, an either payload. Casts between `ref`
 types keep the address. Anything that computes with an address is not
 constant (`E038`, as today): arithmetic, comparison, branching on it, or
 `@ptr_to_address`. `=>` constants are unchanged; they have no storage
 and are lowered at each use, so they already work after Phase 1.
 
 ```lilac
-AllocatorTable: object {
+AllocatorTable: structure {
     allocate: ref function (context: ref unknown, size: Int, alignment: Int) memory: ref unknown
     resize: ref function (context: ref unknown, memory: ref unknown, old_size: Int, new_size: Int, alignment: Int) memory: ref unknown
     free: ref function (context: ref unknown, memory: ref unknown, size: Int, alignment: Int) nothing
@@ -534,7 +534,7 @@ ARENA_TABLE: AllocatorTable = AllocatorTable {
 
 - **Run tests:**
   - `static_vtable.lilac`: a global table of three functions called
-    through a global interface object (`{ context, table: ref TABLE }`
+    through a global interface structure (`{ context, table: ref TABLE }`
     in a second global's initializer).
   - A table that names an `export` and an `extern`.
   - A function reached only through a vtable survives DCE.
@@ -607,11 +607,11 @@ ARENA_TABLE: AllocatorTable = AllocatorTable {
 ## What this unlocks
 
 `docs/ownership-plan.md` Phase 5.1's `Allocator` becomes an ordinary
-library object, with no language interface. It holds a context and a
+library structure, with no language interface. It holds a context and a
 static table:
 
 ```lilac
-Allocator: object {
+Allocator: structure {
     private {
         context: ref unknown
         table: ref AllocatorTable
@@ -619,7 +619,7 @@ Allocator: object {
     alloc_raw: function (self, size: Int, alignment: Int) memory: ref unknown => self.table.allocate(self.context, size, alignment)
 }
 
-ArenaAllocator: object {
+ArenaAllocator: structure {
     allocator: function (self) result: Allocator {
         result = Allocator { context = self as ref unknown, table = ref ARENA_TABLE }
     }

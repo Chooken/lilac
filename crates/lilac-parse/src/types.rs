@@ -64,7 +64,7 @@ impl Parser {
                     return Err(Self::err(
                         diags,
                         span,
-                        "double references are invalid unless wrapped inside an object",
+                        "double references are invalid unless wrapped inside a structure",
                     ));
                 }
                 if self.peek().kind == TokenKind::KwFunction {

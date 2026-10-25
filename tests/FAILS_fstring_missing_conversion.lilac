@@ -1,4 +1,4 @@
-Out: object {}
+Out: structure {}
 
 main: function () nothing {
     n: @bit32 = 0x1

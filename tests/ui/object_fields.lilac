@@ -1,9 +1,9 @@
-Number: enum {
+Number: either {
     One
     Two
 }
 
-Object: object {
+Object: structure {
     member: @bit8
 
     get: function (value: @bit8) result: @bit8 {

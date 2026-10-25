@@ -1,6 +1,6 @@
 // expect-exit: 0
 // build-arg: --release
-// An enum is built whole in a zeroed object, so bytes past its live payload
+// An either is built whole in a zeroed structure, so bytes past its live payload
 // are zero, and writing a value writes all of it. A place that held a
 // large variant and then a small one equals a freshly built small one
 // (`==` compares every byte), whether the place is a local, an out, a
@@ -8,20 +8,20 @@
 
 using Standard.Process
 
-Wide: object {
+Wide: structure {
     a: @bit64
     b: @bit64
     c: @bit64
 }
 
 // The tag at 0; every payload at 8; 32 bytes.
-Mixed: enum {
+Mixed: either {
     Nothing
     Small: @bit8
     Large: Wide
 }
 
-Holder: object {
+Holder: structure {
     first: @bit8
     value: Mixed
 }

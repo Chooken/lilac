@@ -120,7 +120,7 @@ impl Checker<'_> {
         )
         .label(span, true, label)
         .note(format!(
-            "an object on `{}` is at most {} bytes",
+            "a structure on `{}` is at most {} bytes",
             self.target, too_large.limit
         ));
         self.emit_requirement(diagnostic, Requirement::Size, &[id])

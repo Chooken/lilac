@@ -8,41 +8,41 @@ using Standard.Io
 using Standard.Process
 
 // SDL_GUID: `struct { Uint8 data[16]; }`.
-Guid: object {
+Guid: structure {
     data: @array(Uint8, 0x10)
 }
 
-GuidText: object {
+GuidText: structure {
     bytes: @array(@bit8, 0x21)
 }
 
-FPoint: object {
+FPoint: structure {
     x: Float32
     y: Float32
 }
 
-FColor: object {
+FColor: structure {
     r: Float32
     g: Float32
     b: Float32
     a: Float32
 }
 
-FRect: object {
+FRect: structure {
     x: Float32
     y: Float32
     w: Float32
     h: Float32
 }
 
-Vertex: object {
+Vertex: structure {
     position: FPoint
     color: FColor
     tex_coord: FPoint
 }
 
 // SDL_Event is a 128-byte union whose first field is the event type.
-Event: object {
+Event: structure {
     type: @bit32
     rest: @array(@bit8, 0x7C)
 }

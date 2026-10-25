@@ -1,11 +1,11 @@
 // expect-stdout: pr|Oabx
 // Drop order: a by-value parameter is dropped by the callee, `return`
-// drops live locals, an object drops itself before its fields (in
+// drops live locals, a structure drops itself before its fields (in
 // declaration order), and locals drop in reverse declaration order.
 
 using Standard.Io
 
-Inner: object {
+Inner: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
@@ -13,7 +13,7 @@ Inner: object {
     }
 }
 
-Outer: object {
+Outer: structure {
     a: Inner
     b: Inner
 

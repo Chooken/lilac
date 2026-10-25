@@ -1,4 +1,4 @@
-Out: object {
+Out: structure {
     count: @bit_native
 }
 

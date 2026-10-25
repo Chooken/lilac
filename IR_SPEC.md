@@ -115,7 +115,7 @@ other member a payload at one shared offset, the tag's size rounded up to
 the strictest payload's alignment; the size is that offset plus the largest
 payload, rounded up to the alignment (the tag's or the strictest payload's,
 whichever is larger), and with no payload members it is just the tag.
-Lowering lays out every enum this way: the tag (named `tag`), then one
+Lowering lays out every either this way: the tag (named `tag`), then one
 member per payload variant, named after it, in declaration order, so a
 variant's payload is the member after the tag counting only variants with
 a payload. A variant is built in a zeroed place, so the payload bytes past
@@ -232,7 +232,7 @@ written in *regions*, compactly, with every repeat a backreference.
 
 **The readable part** is a function's namespace path or owning type, then
 its name: `A.B.foo`, `.root.foo` (a root free function), `Object.Method`,
-`Box.@on_drop`. An object or enum type's name is its qualified name
+`Box.@on_drop`. A structure or either type's name is its qualified name
 (`A.Holder`). Readable parts use `[A-Za-z0-9_.@]` and never a bracket.
 
 **Regions** hold the types:
@@ -244,7 +244,7 @@ its name: `A.B.foo`, `.root.foo` (a root free function), `Object.Method`,
 - `(<params>E<returns>)` after a hook's name holds its signature, so
   overloads stay distinct: `GenBox[m].@on_drop(RI6GenBoxmEE)` (`(ref
   GenBox[@bit32])`), `@conversion(mEh)` (`(@bit32) -> @bit8`).
-- A type that is not an object, enum or instance is named by a region of
+- A type that is not a structure, either or instance is named by a region of
   its own (`[Am3_]` is `@array(@bit32, 4)`).
 
 A type's name keys its `type` layout (`#GenObject[m]`) and its glue
@@ -271,7 +271,7 @@ backref = "B" number
 | `y` | `@bit64` | `q` | `@fbit128` | `r` | error (never in verified IR) |
 | `j` | `@bit_native` | | | | |
 
-- An object or enum is its path: `N <parent> <name>` from the root, so
+- A structure or either is its path: `N <parent> <name>` from the root, so
   `A.B.Holder` is `NN1A1B6Holder`. `R` is `ref`; `I` an instance (its
   generic type, its arguments, `E`); `A` an array (its element, its
   length); `w` an `@format_args` (its writer); `F` a function type

@@ -3,7 +3,7 @@
 // Once a `ref` to a value that cannot be copied is taken, using the value
 // by value would move it out from under the reference: only `@move` may.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

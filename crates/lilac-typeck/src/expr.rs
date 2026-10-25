@@ -847,7 +847,11 @@ impl Checker<'_> {
         };
         let diagnostic =
             Diagnostic::error(codes::E026, format!("`{}` is a private member", def.name))
-                .label(access, true, "accessed from outside its object's namespace")
+                .label(
+                    access,
+                    true,
+                    "accessed from outside its structure's namespace",
+                )
                 .label(decl, false, "declared private here")
                 .note(format!(
                     "only code in {path} and the namespaces inside it can use it"
@@ -1045,7 +1049,7 @@ impl Checker<'_> {
         let Some(want) = expected.filter(|id| *id != TypeId::ERROR) else {
             if expected.is_none() {
                 self.diags.emit(
-                    Diagnostic::error(codes::E024, "tag literal needs an expected enum type")
+                    Diagnostic::error(codes::E024, "tag literal needs an expected either type")
                         .label(span, true, "annotate the binding"),
                 );
             }
@@ -1135,7 +1139,7 @@ impl Checker<'_> {
                 .label(
                     span,
                     true,
-                    "double references are invalid unless wrapped inside an object",
+                    "double references are invalid unless wrapped inside a structure",
                 );
             if self.types.is_func(place.ty.id) {
                 diagnostic = diagnostic.help(match value {
@@ -1827,10 +1831,10 @@ impl Checker<'_> {
         let display = self.show_id(object.id);
         let Some(layout) = self.fields_of(object.id) else {
             self.diags.emit(
-                Diagnostic::error(codes::E010, format!("`{display}` is not an object")).label(
+                Diagnostic::error(codes::E010, format!("`{display}` is not a structure")).label(
                     span,
                     true,
-                    "only objects construct with `{ ... }`",
+                    "only structures construct with `{ ... }`",
                 ),
             );
             return self.struct_lit_failed(fcx, fields, span);

@@ -1,6 +1,6 @@
 using b
 
-Base: object {
+Base: structure {
     x: @bit32
 }
 

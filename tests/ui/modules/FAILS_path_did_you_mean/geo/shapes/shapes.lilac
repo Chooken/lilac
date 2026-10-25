@@ -1,4 +1,4 @@
-Square: object {
+Square: structure {
     side: @bit32
 }
 

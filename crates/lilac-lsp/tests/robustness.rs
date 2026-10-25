@@ -14,7 +14,7 @@ use lsp_types::{
 };
 
 const PROGRAM: &str = "\
-P: object {
+P: structure {
     x: @bit8
 }
 f: function (p: P, n: @byte_buffer) nothing {

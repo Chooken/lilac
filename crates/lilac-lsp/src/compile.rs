@@ -563,9 +563,9 @@ mod tests {
         assert!(!declares_main(
             "s: @byte_buffer => \"main: function () nothing {}\"\n"
         ));
-        assert!(!declares_main("main: object {\n}\n"));
+        assert!(!declares_main("main: structure {\n}\n"));
         assert!(!declares_main(
-            "Holder: object {\n    main: function () nothing {\n    }\n}\n"
+            "Holder: structure {\n    main: function () nothing {\n    }\n}\n"
         ));
     }
 

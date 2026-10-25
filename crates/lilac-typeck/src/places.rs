@@ -1764,12 +1764,12 @@ mod tests {
         id: TypeId(100),
         is_ref: false,
     };
-    /// `object { a: Leaf  b: Leaf }`.
+    /// `structure { a: Leaf  b: Leaf }`.
     const PAIR: TypeRef = TypeRef {
         id: TypeId(101),
         is_ref: false,
     };
-    /// `object { a: Leaf  b: Pair }`.
+    /// `structure { a: Leaf  b: Pair }`.
     const OUTER: TypeRef = TypeRef {
         id: TypeId(102),
         is_ref: false,

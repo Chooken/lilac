@@ -10,7 +10,7 @@ using Standard.Io
 
 drops: Int = 0
 
-Guarded: object {
+Guarded: structure {
     private {
         value: Int
         next: Optional[ref Guarded]

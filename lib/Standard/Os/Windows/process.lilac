@@ -27,7 +27,7 @@ SwitchToThread: extern function () switched: @bit32
 WaitForSingleObject: extern function (hHandle: ref unknown, dwMilliseconds: @bit32) result: @bit32
 WaitForMultipleObjects: extern function (nCount: @bit32, lpHandles: ref unknown, bWaitAll: @bit32, dwMilliseconds: @bit32) result: @bit32
 
-STARTUPINFOW: object {
+STARTUPINFOW: structure {
     cb: @bit32
     lpReserved: ref @bit16
     lpDesktop: ref @bit16
@@ -48,7 +48,7 @@ STARTUPINFOW: object {
     hStdError: ref unknown
 }
 
-PROCESS_INFORMATION: object {
+PROCESS_INFORMATION: structure {
     hProcess: ref unknown
     hThread: ref unknown
     dwProcessId: @bit32

@@ -1,6 +1,6 @@
 using Standard.Heap as Heap
 
-Set[K]: object {
+Set[K]: structure {
 
     private {
         map: Map[K, Nothing]

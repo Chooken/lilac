@@ -10,14 +10,14 @@
 
 using Standard.Os
 
-Block: object {
+Block: structure {
     // The whole block, header included.
     size: @bit_native
     // `0x1` while allocated.
     used: @bit_native
 }
 
-FreeList: object {
+FreeList: structure {
     start: @bit_native
     end: @bit_native
 }

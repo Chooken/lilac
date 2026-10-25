@@ -2,14 +2,14 @@
 // expect-stderr: error[E064]: cannot move a field out of `Pair`, which has its own `@on_drop`
 // A type's own `@on_drop` needs every field, so none moves out of it.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {
     }
 }
 
-Pair: object {
+Pair: structure {
     left: Handle
     right: Handle
 

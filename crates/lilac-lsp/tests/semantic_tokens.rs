@@ -227,7 +227,7 @@ fn initialize_advertises_the_semantic_tokens_legend() {
     handle.join().expect("server thread");
 }
 
-const FIXTURE: &str = "Colour: enum {\n    Red\n    Green\n}\nObj: object {\n    member: @bit8\n}\npi: @bit32 = 0x2A\nfoo: function (p: @bit32) result: @bit32 {\n    result = p\n    return\n}\nmain: function () nothing {\n    x: @bit32 = pi\n    v: Obj = Obj {\n        member = 0x1\n    }\n    y: @bit8 = v.member\n    z: @bit32 = foo(x)\n    w: @bit32 = @i_add_32(z, 0x1)\n    c: Colour = .Red\n}\n";
+const FIXTURE: &str = "Colour: either {\n    Red\n    Green\n}\nObj: structure {\n    member: @bit8\n}\npi: @bit32 = 0x2A\nfoo: function (p: @bit32) result: @bit32 {\n    result = p\n    return\n}\nmain: function () nothing {\n    x: @bit32 = pi\n    v: Obj = Obj {\n        member = 0x1\n    }\n    y: @bit8 = v.member\n    z: @bit32 = foo(x)\n    w: @bit32 = @i_add_32(z, 0x1)\n    c: Colour = .Red\n}\n";
 
 #[test]
 fn full_returns_tokens_for_every_kind() {
@@ -251,11 +251,11 @@ fn full_returns_tokens_for_every_kind() {
     // Object type reference and declaration name (both `type`).
     let ty = token_after(&decoded, FIXTURE, "v: Obj =", 3);
     assert_eq!((ty.token_type, ty.modifiers, ty.length), (TYPE, 0, 3));
-    let obj_decl = token_after(&decoded, FIXTURE, "Obj: object", 0);
+    let obj_decl = token_after(&decoded, FIXTURE, "Obj: structure", 0);
     assert_eq!((obj_decl.token_type, obj_decl.modifiers), (TYPE, 0));
 
     // Enum declaration, a variant declaration, and a `.Variant` use.
-    let enum_decl = token_after(&decoded, FIXTURE, "Colour: enum", 0);
+    let enum_decl = token_after(&decoded, FIXTURE, "Colour: either", 0);
     assert_eq!((enum_decl.token_type, enum_decl.modifiers), (ENUM, 0));
     let variant_decl = token_after(&decoded, FIXTURE, "Red\n", 0);
     assert_eq!(
@@ -334,7 +334,7 @@ fn variant_declaration_and_use_are_enum_members() {
     let (client, handle) = start_server();
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "Colour: enum {\n    Red\n    Green\n}\nmain: function () nothing {\n    c: Colour = .Red\n}\n";
+    let text = "Colour: either {\n    Red\n    Green\n}\nmain: function () nothing {\n    c: Colour = .Red\n}\n";
     did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
@@ -353,7 +353,7 @@ fn variant_declaration_and_use_are_enum_members() {
         decoded.iter().all(|token| !(token.line == line
             && token.character == character
             && token.token_type == ENUM)),
-        "a `.Variant` use must not color as `enum`: {decoded:?}"
+        "a `.Variant` use must not color as `either`: {decoded:?}"
     );
     assert!(
         decoded
@@ -371,7 +371,8 @@ fn payloaded_variant_colors_name_and_payload_type_separately() {
     let (client, handle) = start_server();
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "Optional: enum {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n}\n";
+    let text =
+        "Optional: either {\n    Some: @bit32\n    None\n}\nmain: function () nothing {\n}\n";
     did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
@@ -396,7 +397,7 @@ fn ref_type_colors_only_the_name() {
     let (client, handle) = start_server();
     initialize(&client);
     let uri = Url::parse("file:///c:/main.lilac").expect("uri");
-    let text = "Obj: object {\n    member: @bit8\n}\ntake: function (o: ref Obj) nothing {\n}\nmain: function () nothing {\n}\n";
+    let text = "Obj: structure {\n    member: @bit8\n}\ntake: function (o: ref Obj) nothing {\n}\nmain: function () nothing {\n}\n";
     did_open(&client, &uri, text);
     let _ = publish_for(&client, &uri);
 
@@ -479,7 +480,7 @@ fn namespaces_color_in_usings_paths_and_conditions() {
     std::fs::write(dir.join("Geo").join("geo.lilac"), "unit: @bit32 => 0x1\n").expect("write");
     std::fs::write(
         dir.join("Geo").join("Shapes").join("shapes.lilac"),
-        "Point: object {\n    x: @bit32\n}\narea: function () r: @bit32 {\n    r = 0x1\n}\n",
+        "Point: structure {\n    x: @bit32\n}\narea: function () r: @bit32 {\n    r = 0x1\n}\n",
     )
     .expect("write");
     let text = "using Geo.Shapes as S\n\

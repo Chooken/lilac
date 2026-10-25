@@ -3,7 +3,7 @@
 // An instance is a function value only behind `ref`, past a type's
 // arguments too.
 
-Box[T]: object {
+Box[T]: structure {
     value: T
 
     make[U]: function (value: T, extra: U) out: Box[T] {

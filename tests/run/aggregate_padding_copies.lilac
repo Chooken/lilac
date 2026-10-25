@@ -1,18 +1,18 @@
 // expect-exit: 0
 // build-arg: --release
 // An aggregate is its bytes: a copy through a parameter, an out, a field
-// and a `ref` keeps the padding too (a `memcpy` of the whole object), and
+// and a `ref` keeps the padding too (a `memcpy` of the whole structure), and
 // `==` on two copies compares them byte for byte (a `memcmp`).
 
 using Standard.Process
 
-Padded: object {
+Padded: structure {
     a: @bit8
     b: @bit64
     c: @bit16
 }
 
-Holder: object {
+Holder: structure {
     tag: @bit8
     inner: Padded
 }

@@ -14,7 +14,7 @@ add_one: function (value: @bit32) result: @bit32 {
     result = @i_add_32(value, 0x1)
 }
 
-Picker: object {
+Picker: structure {
     pick: function (big: @bit8) chosen: ref function (@bit32) @bit32 {
         chosen = ref add_one
         if big == 0x1 {

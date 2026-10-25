@@ -1,7 +1,7 @@
 // expect-error: E044
 // An alias is not generic: it takes no arguments where it is used.
 
-Holder[T]: object {
+Holder[T]: structure {
     value: T
 }
 

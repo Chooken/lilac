@@ -106,13 +106,13 @@ instead of copying it, and `a` is empty afterwards.
   place ABI; only ownership differs.
 - Bare `self` is `self: ref T`. A consuming method writes `self: T`, so
   `box.into_inner()` moves `box` at the call site.
-- A field moves out of an object the function owns (a local or by-value
-  parameter) when the object's type has no `@on_drop` of its own. The
-  object can no longer be used as a whole; its other fields can, and the
+- A field moves out of a structure the function owns (a local or by-value
+  parameter) when the structure's type has no `@on_drop` of its own. The
+  structure can no longer be used as a whole; its other fields can, and the
   ones still full drop at scope end. Moving out through a `ref` is an
   error.
 - A `match` payload binding follows the same rule: matching an owned
-  value moves the bound payload out (an error if the enum has its own
+  value moves the bound payload out (an error if the either has its own
   `@on_drop`), and matching through a `ref` cannot move a non-copyable
   payload. Matching a temporary (`match Arena.create(size) { … }`) moves
   out of the temporary.
@@ -222,8 +222,8 @@ No compiler change.
 
 - **0.1 Drop recursion.** `tests/run/drop_nested.lilac`: a hook runs
   before its fields, fields drop in declaration order at every depth, an
-  object with no hook drops its fields, generics (`Holder[Holder[T]]`),
-  enums drop only the live payload, `Optional` of a hooked type. Hooks
+  structure with no hook drops its fields, generics (`Holder[Holder[T]]`),
+  eithers drop only the live payload, `Optional` of a hooked type. Hooks
   ignore a zero `c` so the output does not depend on zero drops.
 - **0.2 Pending targets.** `// pending:` run tests for: an out slot's
   first assignment drops nothing; copying an arena-like type is a move;
@@ -341,7 +341,7 @@ follows its decisions and never re-derives them.
   bare `self`. `Optional.get` and `Result.get` take `self` by value.
 - **3.8 `match` bindings**: the field rule. A payload binding on an owned
   scrutinee moves the payload (the pass treats the payload as a field
-  path of the scrutinee); on an enum with its own `@on_drop`, or through
+  path of the scrutinee); on an either with its own `@on_drop`, or through
   a `ref`, binding a non-copyable payload is an error.
 - **3.9 Standard**: `Box` loses `move()` and its `@on_copy` error (it moves
   by rule). `Box.create` moves `data` into the heap. The `ArenaAllocator`
@@ -414,7 +414,7 @@ follows its decisions and never re-derives them.
   - `@discard` errors are `E066`, also for discarding on some paths only
     (torn: one path would run `@on_drop`, the other not). Using the value
     whole after is `E063`. A type with no `@on_drop` of its own discards
-    as a no-op. Enums cannot be discarded (no fields to keep).
+    as a no-op. Eithers cannot be discarded (no fields to keep).
   - `Allocator` also gained `free[T](ref T)` for a slot whose value was
     moved out with `@read` (`Box.into_inner`); Phase 5 replaces it.
   - `Os.allocate` still zeroes (it is the OS heap's contract); nothing

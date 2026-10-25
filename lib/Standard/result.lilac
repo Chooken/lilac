@@ -1,6 +1,6 @@
 /// The outcome of an operation that can fail: `Ok` with its value, or
 /// `Error` with why. A zeroed `Result` is `Error` with a zero value.
-Result[T, E]: enum {
+Result[T, E]: either {
     /// It failed, for this reason.
     Error: E
     /// It worked, giving this value.

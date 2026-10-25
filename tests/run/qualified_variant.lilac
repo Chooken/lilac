@@ -2,7 +2,7 @@
 
 using Standard.Process
 
-Opt: enum {
+Opt: either {
     Some: @bit32
     None
 }

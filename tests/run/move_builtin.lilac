@@ -5,7 +5,7 @@
 
 using Standard.Io
 
-Shared: object {
+Shared: structure {
     id: @bit32
 
     @on_copy: function (self) copy: Shared {

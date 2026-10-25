@@ -3,7 +3,7 @@
 /// back to it when freed. It keeps no state, so every thread may use it,
 /// but each allocation takes at least a page: allocate in bulk from it, or
 /// put an arena over it. Aligns to at most a page.
-PageAllocator: object {
+PageAllocator: structure {
 
     ALLOCATOR_TABLE: ref AllocatorTable[PageAllocator] => ref page_table
 

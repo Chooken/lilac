@@ -1,0 +1,14 @@
+// expect-error: E001
+// expect-stderr: error[E001]: `object` is not a keyword; a type is declared with `structure`
+// expect-stderr:   = help: did you mean `structure`?
+// expect-stderr: error[E001]: `enum` is not a keyword; a type is declared with `either`
+// expect-stderr:   = help: did you mean `either`?
+
+Point: object { x: @bit8 }
+Shape: enum { Dot: Point, None }
+
+// `object` and `enum` were the keywords before `structure` and `either`:
+// old code gets an error whose fix is the new keyword (one-line
+// declarations keep the help lines' indentation the same).
+
+main: function () nothing {}

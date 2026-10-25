@@ -11,7 +11,7 @@
 
 using Standard.Io
 
-Sink: object {
+Sink: structure {
     context: ref unknown
     add: ref function (context: ref unknown, amount: @bit32) nothing
     total: ref function (context: ref unknown) total: @bit32
@@ -26,7 +26,7 @@ Sink: object {
     }
 }
 
-Counter: object {
+Counter: structure {
     count: @bit32
 
     add: function (self, amount: @bit32) nothing {
@@ -47,7 +47,7 @@ Counter: object {
     }
 }
 
-Doubler: object {
+Doubler: structure {
     sum: @bit32
 
     add: function (self, amount: @bit32) nothing {

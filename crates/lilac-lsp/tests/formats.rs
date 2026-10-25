@@ -11,15 +11,15 @@ use lsp_types::{
 };
 
 const PROGRAM: &str = "\
-Out: object {}
+Out: structure {}
 @format: function (value: ref @bit8, out: ref Out) nothing {
 }
-Point: object {
+Point: structure {
     x: @bit8
     @format: function (self, out: ref Out) nothing {
     }
 }
-Bare: object {
+Bare: structure {
     y: @bit8
 }
 consume: function (text: @format_args(Out)) nothing {

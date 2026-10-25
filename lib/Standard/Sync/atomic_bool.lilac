@@ -1,6 +1,6 @@
 
 // Maybe check for atomic @bit8 support or default to @bit32?
-AtomicBool: object {
+AtomicBool: structure {
 
     private {
         data: @bit8

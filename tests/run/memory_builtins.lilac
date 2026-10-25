@@ -5,12 +5,12 @@
 
 using Standard.Process
 
-Bytes: object {
+Bytes: structure {
     low: @bit64
     high: @bit64
 }
 
-Mixed: object {
+Mixed: structure {
     a: @bit8
     b: @bit32
 }

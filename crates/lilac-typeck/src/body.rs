@@ -917,7 +917,11 @@ impl Checker<'_> {
                                     self.show_id(scrutinee)
                                 ),
                             )
-                            .label(qualifier.span, true, "wrong enum"),
+                            .label(
+                                qualifier.span,
+                                true,
+                                "wrong either",
+                            ),
                         );
                         return poison;
                     }
@@ -1031,11 +1035,8 @@ impl Checker<'_> {
         }
         let Some(variants) = self.variants_of(ty) else {
             return Err(self.diags.emit(
-                Diagnostic::error(codes::E010, format!("tag `.{name}` needs an enum type")).label(
-                    span,
-                    true,
-                    "expected a tag here",
-                ),
+                Diagnostic::error(codes::E010, format!("tag `.{name}` needs an either type"))
+                    .label(span, true, "expected a tag here"),
             ));
         };
         let Some(index) = variants.iter().position(|(variant, _)| variant == name) else {

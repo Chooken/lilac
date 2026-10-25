@@ -5,7 +5,7 @@
 // expect-stderr:   at main (panic_drop_return.lilac:23:5)
 
 // An early `return` drops the scope's locals at the `return`.
-Guard: object {
+Guard: structure {
     @on_drop: function (from: ref Guard) nothing {
         @panic("dropped")
     }

@@ -1,4 +1,4 @@
-Holder: object {
+Holder: structure {
     tag: @bit8
     items: @array(@bit32, 4)
 }

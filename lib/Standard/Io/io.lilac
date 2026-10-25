@@ -63,7 +63,7 @@ print_char: function (c: @bit32) nothing {
 private {
     /// Formatted bytes on their way to a stream: written when a line ends,
     /// when the buffer fills, and at `flush`.
-    Line: object {
+    Line: structure {
         handle: Os.Handle
         used: @bit_native
         bytes: @array(@bit8, 0x100)

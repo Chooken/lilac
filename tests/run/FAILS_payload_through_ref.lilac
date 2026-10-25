@@ -3,14 +3,14 @@
 // Matching through a `ref` cannot move a payload that cannot be copied
 // out: the reference does not own it.
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {
     }
 }
 
-Slot: enum {
+Slot: either {
     Full: Handle
     Empty
 }

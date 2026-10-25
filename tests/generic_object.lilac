@@ -1,4 +1,4 @@
-GenObject[T]: object {
+GenObject[T]: structure {
     value: T
 }
 

@@ -15,7 +15,7 @@ if @builtin.Target.pointer_size == 0x8 {
     width: function () n: @bit32 => 0x20
 }
 
-// `==` against an enum constant, in both spellings of the variant.
+// `==` against an either constant, in both spellings of the variant.
 if @builtin.Target.os == @builtin.Os.Windows {
     using Plat.Win as Equal
 } else if @builtin.Target.os == .Linux or @builtin.Target.os == .MacOs {

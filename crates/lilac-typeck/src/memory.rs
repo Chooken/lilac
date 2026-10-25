@@ -183,8 +183,8 @@ impl Checker<'_> {
                 ))
             } else {
                 Diagnostic::error(codes::E066, format!("`{shown}` cannot be discarded"))
-                    .label(arg.span(), true, "not an object")
-                    .help("`@discard` turns an object's fields into places of their own")
+                    .label(arg.span(), true, "not a structure")
+                    .help("`@discard` turns a structure's fields into places of their own")
             };
             return Err(self.emit_involving(diagnostic, &[place.ty.id]));
         }

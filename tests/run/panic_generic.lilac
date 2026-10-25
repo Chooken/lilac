@@ -3,7 +3,7 @@
 // expect-stderr:   at Holder[@bit32].make (panic_generic.lilac:10:9)
 // expect-stderr:   at main (panic_generic.lilac:15:25)
 
-Holder[T]: object {
+Holder[T]: structure {
     value: T
 
     make: function (v: T) out: Holder[T] {

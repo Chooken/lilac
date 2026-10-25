@@ -1,6 +1,6 @@
 // expect-stdout: [noisy] [noisy]
 // expect-stdout: drop
-// A hole borrows its value: an owned object used in a hole is still owned
+// A hole borrows its value: an owned structure used in a hole is still owned
 // afterwards, is formatted where the format is written, and drops once.
 // (With a `@conversion` to `@byte_buffer` the hole consumed it, and the
 // second use was `E063`.)
@@ -8,7 +8,7 @@
 using Standard.Os as Os
 
 // Writes formatted text straight to standard output.
-Out: object {
+Out: structure {
     write: function (self, text: @format_args(Out)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0
@@ -21,7 +21,7 @@ Out: object {
     }
 }
 
-Noisy: object {
+Noisy: structure {
     value: @bit32
 
     @format: function (self, out: ref Out) nothing {

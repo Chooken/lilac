@@ -12,7 +12,7 @@ VirtualProtect: extern function (lpAddress: ref unknown, dwSize: @bit_native, fl
 
 GetSystemInfo: extern function (lpSystemInfo: ref SYSTEM_INFO) nothing
 
-SYSTEM_INFO: object {
+SYSTEM_INFO: structure {
     wProcessorArchitecture: @bit16
     wReserved: @bit16
     dwPageSize: @bit32

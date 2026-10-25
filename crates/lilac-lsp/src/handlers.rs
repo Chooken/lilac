@@ -385,8 +385,8 @@ fn encode(mut raw: Vec<(Range, u32, u32)>, lines: &LineIndex) -> SemanticTokens 
 fn colored(sources: &lilac_span::SourceMap, span: Span, kind: &str) -> Option<(Range, u32)> {
     let token_type = match kind {
         "function" | "hook" => TOKEN_FUNCTION,
-        "object" | "alias" => TOKEN_TYPE,
-        "enum" => TOKEN_ENUM,
+        "structure" | "alias" => TOKEN_TYPE,
+        "either" => TOKEN_ENUM,
         "field" => TOKEN_PROPERTY,
         "const" | "global" => TOKEN_VARIABLE,
         _ => return None,
@@ -418,7 +418,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let file = sources.add_file("main.lilac", src);
         let (range, token_type) =
-            colored(&sources, Span::new(0, 7, file), "object").expect("range");
+            colored(&sources, Span::new(0, 7, file), "structure").expect("range");
         let tokens = encode(vec![(range, token_type, 0)], &LineIndex::new(src));
         assert_eq!(tokens.data.len(), 1);
         assert_eq!(tokens.data[0].length, 3); // "abc", not the part past the newline
@@ -432,7 +432,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let file = sources.add_file("main.lilac", src);
         let (range, token_type) =
-            colored(&sources, Span::new(2, 5, file), "object").expect("range");
+            colored(&sources, Span::new(2, 5, file), "structure").expect("range");
         assert_eq!(range.start, Position::new(0, 1));
         assert_eq!(range.end, Position::new(0, 4));
         let tokens = encode(vec![(range, token_type, 0)], &LineIndex::new(src));

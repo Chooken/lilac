@@ -330,8 +330,12 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
         if let Ok(size) = u32::try_from(size) {
             return byte.array_type(size).into();
         }
-        let chunks = u32::try_from(size / u64::from(CHUNK))
-            .unwrap_or_else(|_| bug!(self.at(), "an object of {size} bytes is past LLVM's limit"));
+        let chunks = u32::try_from(size / u64::from(CHUNK)).unwrap_or_else(|_| {
+            bug!(
+                self.at(),
+                "a structure of {size} bytes is past LLVM's limit"
+            )
+        });
         let rest = u32::try_from(size % u64::from(CHUNK)).unwrap_or(0);
         let chunk = byte.array_type(CHUNK);
         self.context
@@ -639,7 +643,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                     codes::E028,
                     format!("`extern` parameter `{place}` has unsupported C type `{ty}`"),
                 )
-                .help("C slots must be a bit integer, a float, `ref T` or an object"));
+                .help("C slots must be a bit integer, a float, `ref T` or a structure"));
             }
         }
         match func.outs.as_slice() {
@@ -650,7 +654,7 @@ impl<'ctx, 'a> Lower<'ctx, 'a> {
                         codes::E028,
                         format!("`extern` return `{place}` has unsupported C type `{ty}`"),
                     )
-                    .help("C slots must be a bit integer, a float, `ref T` or an object"));
+                    .help("C slots must be a bit integer, a float, `ref T` or a structure"));
                 }
             }
             _ => {

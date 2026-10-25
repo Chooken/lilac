@@ -735,7 +735,7 @@ impl Lower<'_> {
     /// LIR field index and name of a payload variant.
     fn payload_field(&self, ty: TypeId, variant: u32) -> (u32, String) {
         let Some(Layout::Enum { variants, .. }) = self.layout(ty) else {
-            lilac_error::bug!(Span::dummy(), "payload of a non-enum type");
+            lilac_error::bug!(Span::dummy(), "payload of a non-either type");
         };
         let before = variants[..variant as usize]
             .iter()
@@ -750,7 +750,7 @@ impl Lower<'_> {
     fn field_name(&self, ty: TypeId, index: u32) -> (String, TypeRef) {
         match self.layout(ty) {
             Some(Layout::Object { fields }) => fields[index as usize].clone(),
-            _ => lilac_error::bug!(Span::dummy(), "field of a non-object type"),
+            _ => lilac_error::bug!(Span::dummy(), "field of a non-structure type"),
         }
     }
 

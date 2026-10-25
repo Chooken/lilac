@@ -8,14 +8,14 @@
 using Standard
 using Standard.Io
 
-Numbers: object {
+Numbers: structure {
     a: @bit32
     b: @bit32
     c: @bit32
     d: @bit32
 }
 
-CTable: object {
+CTable: structure {
     compare: ref export function (a: ref @bit32, b: ref @bit32) order: @bit32
     absolute: ref export function (x: @bit32) y: @bit32
 }

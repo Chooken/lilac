@@ -1,7 +1,7 @@
 //! Untyped AST produced by `lilac-parse`.
 //!
 //! Covers `SPEC.md` surface syntax: functions (multi-return, inline `=>`,
-//! generics), `object`/`enum`, `using`, `extern`, `ref` types, and the
+//! generics), `structure`/`either`, `using`, `extern`, `ref` types, and the
 //! statement/expression forms (`if` values lower later; `match` arms keep
 //! their `=>`-or-block bodies).
 
@@ -34,14 +34,14 @@ pub struct Item {
 pub enum ItemKind {
     /// `name: function ...` (or `extern function ...` with no body).
     Func(FuncDecl),
-    /// `name: object { ... }`.
+    /// `name: structure { ... }`.
     Object {
         /// Member declarations.
         members: Vec<Item>,
         /// Generic parameters (`GenObj[T]`).
         generic_params: Vec<String>,
     },
-    /// `name: enum { One, Two }` (payload variants like `Some: @bit32`
+    /// `name: either { One, Two }` (payload variants like `Some: @bit32`
     /// make it the single tagged-data type).
     Enum {
         /// Variant names in order.
@@ -75,7 +75,7 @@ pub enum ItemKind {
         /// Wrapped declarations.
         items: Vec<Item>,
     },
-    /// `member: @bit8` bare field inside an `object` (no initializer).
+    /// `member: @bit8` bare field inside a `structure` (no initializer).
     Field {
         /// Declared type.
         ty: Type,

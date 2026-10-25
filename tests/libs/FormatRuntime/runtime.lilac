@@ -32,7 +32,7 @@
 }
 
 // Writes formatted text to standard error.
-Err: object {
+Err: structure {
     write: function (self, text: @format_args(Err)) nothing {
         last: @bit_native = @format_args_holes(text)
         index: @bit_native = 0x0

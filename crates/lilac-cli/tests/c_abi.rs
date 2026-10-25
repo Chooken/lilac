@@ -175,13 +175,13 @@ impl Corpus {
         for (index, decl) in self.decls.iter().enumerate() {
             match decl {
                 Decl::Object(fields) => {
-                    let _ = writeln!(src, "T{index}: object {{");
+                    let _ = writeln!(src, "T{index}: structure {{");
                     for (at, field) in fields.iter().enumerate() {
                         let _ = writeln!(src, "    f{at}: {}", Self::lilac_ty(field));
                     }
                 }
                 Decl::Enum(variants) => {
-                    let _ = writeln!(src, "T{index}: enum {{");
+                    let _ = writeln!(src, "T{index}: either {{");
                     for (at, payload) in variants.iter().enumerate() {
                         match payload {
                             Some(ty) => {

@@ -452,10 +452,10 @@ impl Lower<'_> {
     ) -> Reg {
         let (value, constant, lir) = if is_enum {
             let HirPattern::Variant(index) = pattern else {
-                lilac_error::bug!(span, "byte pattern on an enum");
+                lilac_error::bug!(span, "byte pattern on an either");
             };
             let Some(Layout::Enum { tag, .. }) = self.layout(ty.id) else {
-                lilac_error::bug!(span, "enum without a layout");
+                lilac_error::bug!(span, "either without a layout");
             };
             let tag = self.lir_ty(TypeRef::value(*tag));
             let value = state.reg();

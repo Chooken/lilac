@@ -1,5 +1,5 @@
 /// The IEEE 754 category of a floating-point value (`classify`).
-FloatClass: enum {
+FloatClass: either {
     /// Not a number (`NaN`).
     Nan
     /// Positive or negative infinity (`±∞`).

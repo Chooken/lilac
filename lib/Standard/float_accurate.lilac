@@ -134,7 +134,7 @@ private {
 
     /// An argument as a quadrant `n` (0 to 3) and an angle `|t| <= pi / 4`
     /// with `x = n pi / 2 + t` modulo `2 pi`.
-    MpAngle: object {
+    MpAngle: structure {
         quadrant: Int
         angle: Mp
     }

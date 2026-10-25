@@ -8,10 +8,10 @@
 
 using Standard.Process
 
-Empty: object {
+Empty: structure {
 }
 
-P[A, B, C, D]: object {
+P[A, B, C, D]: structure {
     a: A
     b: B
     c: C

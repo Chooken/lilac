@@ -2,7 +2,7 @@
 // A constant of a type with `@on_drop` is not a constant expression (folding
 // it would skip the hook), so the guarded `@compile_error` is reachable.
 
-Flag: object {
+Flag: structure {
     data: @bit8
 
     @on_drop: function (self) nothing {

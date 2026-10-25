@@ -1,25 +1,25 @@
 // expect-exit: 0
-// `@array(T, N)`: C layout inside objects, copies, `@array_at` reads and
+// `@array(T, N)`: C layout inside structures, copies, `@array_at` reads and
 // writes, nested arrays and `@array_len`.
 
 using Standard.Process
 
 // C: `struct { uint8_t tag; uint32_t items[3]; }` is 16 bytes, aligned 4.
-Small: object {
+Small: structure {
     tag: @bit8
     items: @array(@bit32, 3)
 }
 
 // C: `struct { uint16_t a; uint64_t wide[2]; uint8_t bytes[5]; }` is 32
 // bytes, aligned 8.
-Wide: object {
+Wide: structure {
     a: @bit16
     wide: @array(@bit64, 2)
     bytes: @array(@bit8, 5)
 }
 
 // C: `struct { uint16_t rows[2][3]; }` is 12 bytes, aligned 2.
-Grid: object {
+Grid: structure {
     rows: @array(@array(@bit16, 3), 2)
 }
 
@@ -65,7 +65,7 @@ main: function () nothing {
     check32(sum(ref small.items), 0xc, 0x9)
     check(@array_len(small.items), 0x3, 0xa)
 
-    // Copying the object copies the array.
+    // Copying the structure copies the array.
     copy: Small = small
     slot = @array_at(ref copy.items, 0x0)
     slot = 0x64

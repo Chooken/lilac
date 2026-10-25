@@ -2,7 +2,7 @@
 // expect-stderr: error[E063]: `point` is empty, so its fields cannot be set
 // An out starts empty: it is set whole before a field of it is.
 
-Point: object {
+Point: structure {
     x: @bit32
     y: @bit32
 }

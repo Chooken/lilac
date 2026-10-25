@@ -1,4 +1,4 @@
-Box[T]: object {
+Box[T]: structure {
     value: T
 }
 

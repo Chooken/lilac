@@ -1,10 +1,10 @@
 // expect-exit: 7
-// A 64 KiB object is copied, then passed by value; the copy keeps every
+// A 64 KiB structure is copied, then passed by value; the copy keeps every
 // byte. Aggregate copies are `memcpy`s, so their size costs LLVM nothing.
 
 using Standard.Process
 
-Block: object {
+Block: structure {
     bytes: @array(@bit8, 0x10000)
 }
 

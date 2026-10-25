@@ -10,17 +10,17 @@
 > clear error.
 >
 > Decisions made with the owner (2026-10-12):
-> - **Layouts are C layouts, strictly.** An `object` is laid out exactly as
+> - **Layouts are C layouts, strictly.** An `structure` is laid out exactly as
 >   the C struct with the same fields in the same order on the target:
 >   `sizeof`, `_Alignof` and every `offsetof` are equal. A `ref Object`
 >   crosses an `extern` as a `struct Object *` with no conversion, and C
 >   headers translate field by field. Fields are never reordered. Scalars
 >   map to `uint8_t`…`uint64_t`, `uintptr_t` (`@bit_native`), `_Float16`,
 >   `float`, `double`, `__float128` (where the target's C has it), and
->   `T *` (`ref T`); arrays are C arrays. An object with no fields has size 0
+>   `T *` (`ref T`); arrays are C arrays. A structure with no fields has size 0
 >   and alignment 1, as GCC and Clang lay out an empty struct (ISO C has
 >   none).
-> - **Enums are tagged unions**, laid out as the C
+> - **Eithers are tagged unions**, laid out as the C
 >   `struct { uintN_t tag; union { P0 p0; P1 p1; … } payload; }`, where
 >   `uintN_t` is the tag container and variants without a payload add no
 >   union member (no payloads at all: just the tag). No niche layouts yet
@@ -43,7 +43,7 @@
 >   reappear on its own instantiation chain at most 64 times (as rustc
 >   counts per definition). A compile builds at most a fixed number of
 >   generic instances, with its own error.
-> - **No object is larger than the target allows**: the target's
+> - **No structure is larger than the target allows**: the target's
 >   `isize::MAX` (2^31 − 1 or 2^63 − 1 bytes). A larger type is a new error,
 >   `E067`.
 > - **32-bit x86 follows its platform C ABI** (`i64`/`f64` aligned to 4 on
@@ -79,7 +79,7 @@ Each was reproduced on 2026-10-11 against the `ai` branch:
 | 2 | a struct holding `@array(@array(@bit64, 0xFFFFFFFF), 0xFFFFFFFF)` | debug: overflow panic in `lilac_ir::size_align`; release: wrapped, wrong `@size_of` |
 | 3 | `y: B = x` with a 64 KiB `B` | `lilac build` segfaults inside LLVM; 32 KiB takes 3.7 s (copies are first-class `load`/`store` of the whole struct) |
 | 4 | `==` on a struct over 1 MiB | ICE "comparison of a zero-sized aggregate" (compared as one LLVM integer, max 2^23 bits) |
-| 5 | `enum { A: [256 x @bit8], B: …, C: … }` | 769 bytes, where a union needs 257 |
+| 5 | `either { A: [256 x @bit8], B: …, C: … }` | 769 bytes, where a union needs 257 |
 | 6 | `@i_div_u_32(0x1, 0x0)` in a body | silently `store i32 poison`; at runtime x86 traps, aarch64 returns 0 |
 | 7 | 17 different generic functions calling each other, no recursion | `E051` "possible infinite recursion" |
 | 8 | `f[T]` calling `f[W[T]]` and `f[V[T]]` | 2^16 instances, 16 s to check six lines |
@@ -87,7 +87,7 @@ Each was reproduced on 2026-10-11 against the `ai` branch:
 | 10 | every aggregate access | emitted `align 1`; pointer arithmetic is `ptrtoint`/`inttoptr`, which hides provenance from LLVM |
 | 11 | `"\q"` | 5 errors (the string ends at the bad escape and the rest re-lexes) |
 | 12 | a UTF-8 byte-order mark | "unexpected character; `[`/`]` are generics-only…" |
-| 13 | `E: enum { A: E  B }` then `e: E = .B` | correct `E053`, plus a spurious `E024` |
+| 13 | `E: either { A: E  B }` then `e: E = .B` | correct `E053`, plus a spurious `E024` |
 | 14 | a folder junction `A/B → A` | the same file loaded 64 times, until the OS path limit |
 
 Also found by reading: the ownership pass stops a loop's fixpoint after 16
@@ -107,7 +107,7 @@ later phase runs against them.
 - **0.1 Pending tests.** One test per problem above, marked `// pending:`
   where the harness supports it, `#[ignore]` with the phase number
   otherwise:
-  - run tests for 3, 5 (`@size_of` of the three-payload enum is 257 on
+  - run tests for 3, 5 (`@size_of` of the three-payload either is 257 on
     x86-64), 6 (the program panics with "division by zero", exit 101);
   - `FAILS_` tests for 2 (`E067`), 4 (no ICE; it compiles and compares);
   - CLI tests for 1 (each input finishes within 5 s with `E000`), 7, 8, 9.
@@ -132,7 +132,7 @@ removes the exclusion).
 
 - **Delivered notes.**
   - Run tests (`// pending:` names the phase): `aggregate_copy_large`
-    (3: a 64 KiB object copied, then passed by value), `enum_union_size`
+    (3: a 64 KiB structure copied, then passed by value), `enum_union_size`
     (5: 257 bytes, aligned 1), `division_by_zero` (6: exit 101, `panic:
     division by zero`, the trace's site is the `@i_div_u_32` call, like
     `@array_at`'s), `FAILS_object_too_large` (2: `E067`) and
@@ -318,7 +318,7 @@ oversized type wraps or panics.
     i686-linux, tagged layouts, the overflow boundary.
 - **2.3 Typeck reports oversized types.** `lilac_typeck::Options` carries
   the `Target` (replacing `native_bits`). When `ensure_type` first builds
-  a concrete object, enum or array type, it computes its layout through
+  a concrete structure, either or array type, it computes its layout through
   `lilac-layout`; `TooLarge` is `E067` "type is larger than the target
   allows" at the field or array length that crossed the limit, with the
   size reached. Generic templates are skipped (sizes are only known for
@@ -345,16 +345,16 @@ oversized type wraps or panics.
   `offsetof` against `lilac-layout`'s numbers, and compiles them with the
   toolchain Clang (`$LLVM_SYS_181_PREFIX/bin/clang -fsyntax-only
   --target=<triple>`) for every supported triple. The corpus covers every
-  scalar after every other, nested objects, arrays of objects, trailing
-  padding, empty objects (GCC/Clang extension), and enums as their
+  scalar after every other, nested structures, arrays of structures, trailing
+  padding, empty structures (GCC/Clang extension), and eithers as their
   struct-with-union equivalent. `@fbit128` is included on targets whose C
   has a 128-bit float. Skipped with a message when Clang is missing.
 
 No generated code changes on 64-bit targets: the offsets are the ones
-used today. (The enum change waits for Phase 4.)
+used today. (The either change waits for Phase 4.)
 
 **Tests:** problem 2's `FAILS_` test un-pended (`E067`); a run test whose
-`@size_of` values are pinned for objects and arrays; the 2.5 and 2.6
+`@size_of` values are pinned for structures and arrays; the 2.5 and 2.6
 target tests; snapshots byte-identical apart from the new layout header
 line in `.lir` files.
 
@@ -387,7 +387,7 @@ line in `.lir` files.
   - 2.3: arrays are reported at their length (`Checker::ensure_syntax`
     walks the written type, so `@array(@array(…), N)` blames the `N` that
     crossed); a too-large array type is not remembered, so each place that
-    names it is an error, while an object that fails is `Failed` as
+    names it is an error, while a structure that fails is `Failed` as
     before. `Requirement::Size` folds a generic instance's `E067` into
     `E042` (whose notes are now de-duplicated). A `Failed` type met again
     takes its token from a pending `E042` when one waits for the worklist
@@ -400,8 +400,8 @@ line in `.lir` files.
     `size_align` returns `Option<SizeAlign>` (`None` for an unsized type
     or an array past the limit, which the verifier also rejects as a
     type). Lowering lays types out in dependency order (`Lower::lay_out`:
-    `TypeId` order puts an outer object before the types it holds), from
-    `lilac_hir::Layout::slots`, the one place that says an enum is its tag
+    `TypeId` order puts an outer structure before the types it holds), from
+    `lilac_hir::Layout::slots`, the one place that says an either is its tag
     then every payload. The LLVM backend also checks LLVM's placement of
     every struct type against the `LirLayout` (`Lower::check_layout`, an
     ICE on a mismatch) until Phase 3 removes the struct types.
@@ -425,8 +425,8 @@ line in `.lir` files.
   - Snapshots: 14 `tests/ui/*.lir` and 3 `tests/ui/modules/*.lir` files
     changed, each only in its `type #… {` lines (now `type #… size S align
     A {`); every `.ll` snapshot is unchanged. `tests/run/layout_sizes`
-    pins `@size_of`/`@align_of` of objects, nested objects, arrays of
-    objects, nested arrays, an empty object and `@fbit128` on 64-bit
+    pins `@size_of`/`@align_of` of structures, nested structures, arrays of
+    structures, nested arrays, an empty structure and `@fbit128` on 64-bit
     hosts; `lilac-lower`'s `layouts_follow_the_target` pins i686.
 
 ---
@@ -474,10 +474,10 @@ the size at 1 MiB. Every access is `align 1`.
   `ptrtoint` arithmetic go; `@ptr_to_address`/`@address_to_ptr` stay casts
   by definition.
 - **3.6 Sparse global initializers.** `LirGlobal::init` becomes runs:
-  `Vec<(offset, bytes)>` over an implicitly zero object, and the backend
+  `Vec<(offset, bytes)>` over an implicitly zero structure, and the backend
   emits a packed constant of those runs with `zeroinitializer` gaps.
   Compiler memory is proportional to the initialized bytes, not the
-  object size, so a large array inside an initialized global costs
+  structure size, so a large array inside an initialized global costs
   nothing.
 - **3.7 Docs.** `IR_SPEC.md` "Memory": the register rule, what `copy`
   and `zero` mean for aggregates, layouts with offsets, `@memcmp`.
@@ -534,7 +534,7 @@ snapshots re-blessed once, with every change in the diff being a
     checks runs are non-empty, ordered, disjoint and inside the size.
     Globals print as `= bytes { 0: "…", 64: "…" }`.
   - Measurements (`lilac build tests/run/aggregate_copy_large.lilac`, a
-    64 KiB object copied and passed by value, release compiler, Windows
+    64 KiB structure copied and passed by value, release compiler, Windows
     x86-64): 76 ms in debug and 95 ms with `--release` as reported by
     `Finished`, about 0.19 s and 0.20 s wall clock with linking; before,
     LLVM crashed. The 2 MiB `==` program builds and runs in the same
@@ -546,51 +546,51 @@ snapshots re-blessed once, with every change in the diff being a
 
 ---
 
-## Phase 4: Enums are tagged unions
+## Phase 4: Eithers are tagged unions
 
 Built on Phase 3, it is a layout change plus the few places that compute
 payload positions.
 
-- **4.1 Layout.** Lowering describes an enum as `Tagged { tag, payloads }`
+- **4.1 Layout.** Lowering describes an either as `Tagged { tag, payloads }`
   (`crates/lilac-lower/src/lib.rs:216`). `payload_field` keeps returning a
   field index, and every payload field's offset is the payload area's.
 - **4.2 Construction keeps `==` deterministic.** A variant is built in a
   zeroed temporary and copied whole (`variant_value` does this today), so
-  bytes beyond the active payload are zero. Audit every other way an enum
+  bytes beyond the active payload are zero. Audit every other way an either
   place is written: assignment, outs, `@write`, captures, globals. Each
   must write a whole value, never a payload into a place that held
   another variant. The ownership pass and the drop and copy glue already
   touch only the live payload (`variant_guard`).
 - **4.3 Globals and constants.** `globals.rs` writes a variant's payload
-  at the area's offset; `@size_of`/`@align_of` of enums come from the
+  at the area's offset; `@size_of`/`@align_of` of eithers come from the
   layout.
-- **4.4 Docs.** `SPEC.md` §Enums: the layout, written as its C
+- **4.4 Docs.** `SPEC.md` §Eithers: the layout, written as its C
   equivalent (`struct { uintN_t tag; union { … } payload; }`), and that
   `==` compares the whole value, inactive bytes included, which
   construction keeps zero. `SPEC.md`'s extern section states the C layout
-  guarantee for objects and enums. `IR_SPEC.md`: `Tagged` layouts.
-- **4.5 C conformance.** The 2.7 corpus gains mixed enums (no payloads,
-  one payload, payloads of different alignments, nested enums), now
-  checked against Lilac's real enum layout.
+  guarantee for structures and eithers. `IR_SPEC.md`: `Tagged` layouts.
+- **4.5 C conformance.** The 2.7 corpus gains mixed eithers (no payloads,
+  one payload, payloads of different alignments, nested eithers), now
+  checked against Lilac's real either layout.
 
 **Tests:** problem 5 un-pended (257 bytes); `drop_nested` and
 `match_moves_payload` unchanged; a run test that assigns a large variant,
 then a small one, then compares with a freshly built small one (`==` is
-true); a global holding each variant of a mixed enum; `Optional` and
+true); a global holding each variant of a mixed either; `Optional` and
 `Result` sizes pinned.
 
 - **Delivered notes.**
   - 4.1: `Lower::lay_out` picks `LirLayoutKind::Tagged` for a
-    `Layout::Enum` (`Struct` for an object); the field list is still
+    `Layout::Enum` (`Struct` for a structure); the field list is still
     `Layout::slots` (the tag, then each payload by variant name), so
     `payload_field`, `slot_pairs`, the drop and copy glue and `match`
     lowering are unchanged: the shared offset comes from the layout.
-    Typeck (`layout.rs`) sizes enums with `tagged_layout` over the same
-    slots, so `@size_of`, `E067` and lowering agree; an enum's `E067`
+    Typeck (`layout.rs`) sizes eithers with `tagged_layout` over the same
+    slots, so `@size_of`, `E067` and lowering agree; an either's `E067`
     label says "this variant brings `E` to N bytes" at the payload that
     crossed (`enum_sizes_are_tagged_unions`: two 1 GiB payloads now fit a
     32-bit target).
-  - 4.2 audit, every way an enum place is written: a variant
+  - 4.2 audit, every way an either place is written: a variant
     (`variant_value`) is built in a fresh temporary that is `zero`ed
     first; `let`, assignment (all `HirOld` cases, `replace`), outs,
     `@write` (an assignment to `*p`), assignment through a `ref`, field
@@ -598,7 +598,7 @@ true); a global holding each variant of a mixed enum; `Optional` and
     all write a whole value (`FnState::write`/`read_into`: a whole-object
     `copy`, `copy ref` or `store`); outs and drop flags start zeroed in
     the prologue; a `match` capture copies or moves the payload *out* and
-    never writes the enum; the copy glue is a whole-object copy and then
+    never writes the either; the copy glue is a whole-object copy and then
     writes a whole payload value over the same variant's payload; drop
     glue and `@discard` write nothing; globals encode over a zero object
     (`encode` now places the payload through `payload_field` and the
@@ -609,29 +609,29 @@ true); a global holding each variant of a mixed enum; `Optional` and
     a local, an out, a field, a `ref` and `@write`, including the bytes
     past the small payload.
   - 4.3: `@size_of`/`@align_of` already read the module layout
-    (`size_align`), and the constant evaluator folds enum `==` on
+    (`size_align`), and the constant evaluator folds either `==` on
     `Value::Variant`s, which equal bits under the zero-based rule.
-  - 4.5: the `lilac-layout` corpus gained mixed enums (every payload
+  - 4.5: the `lilac-layout` corpus gained mixed eithers (every payload
     alignment, `_Float16` and 128-bit float payloads where C has them,
-    nested enums, arrays of enums, enums in structs). Checking "Lilac's
-    real enum layout" needed the compiler, which `lilac-layout` cannot
+    nested eithers, arrays of eithers, eithers in structs). Checking "Lilac's
+    real either layout" needed the compiler, which `lilac-layout` cannot
     depend on, so a new test, `crates/lilac-lower/tests/enum_c_layout.rs`,
-    checks and lowers a Lilac corpus (10 enums, 8 instances of a generic
-    one, a 257-variant enum with a 16-bit tag, enums in objects and arrays)
+    checks and lowers a Lilac corpus (10 eithers, 8 instances of a generic
+    one, a 257-variant either with a 16-bit tag, eithers in structures and arrays)
     for the 34 supported targets and the six ABI variants, declares every
-    resulting layout in C (the shape from the HIR's object/enum kind, the
+    resulting layout in C (the shape from the HIR's structure/either kind, the
     numbers from `LirModule::layouts`) and has Clang check over 100
-    asserts per target. Lowering enums as `Struct` again fails it.
+    asserts per target. Lowering eithers as `Struct` again fails it.
   - Sizes (64-bit hosts): `Optional[@bit8]` 2, `Optional[@bit64]` 16,
     `Optional[ref T]` 16, `Optional[Point]` 12 (all unchanged: one
     payload); `Result[@bit32, @bit8]` 12 → 8, `Result[@bit8, @bit64]` 16,
-    `Result[Point, @bit16]` 16 → 12; problem 5's enum 769 → 257;
-    `enum_globals`' six-payload enum 32 → 16; `enum_layout_sizes` pins
-    these and nested enums and arrays of enums.
-  - Snapshots: six `.lir` files changed, each only its enum's
+    `Result[Point, @bit16]` 16 → 12; problem 5's either 769 → 257;
+    `enum_globals`' six-payload either 32 → 16; `enum_layout_sizes` pins
+    these and nested eithers and arrays of eithers.
+  - Snapshots: six `.lir` files changed, each only its either's
     `type #… {` line gaining `tagged` (`builtin_target_match`,
     `enum_implicit_member`, `enum_payload_use`, `enum_use`, `match_enum`,
-    `match_enum_payload`); no snapshot has an enum with two payloads, so
+    `match_enum_payload`); no snapshot has an either with two payloads, so
     no offset or size moved, and every `.ll` snapshot is unchanged.
 
 ---
@@ -775,12 +775,12 @@ recursion ends with `E051` or `E068` within the time bound.
     - `State::Unusable` carries its `ErrorGuaranteed` (later requests return
       it instead of `already_reported`), since a template's `E051` is
       dropped and nothing else proves it.
-    - Types: `type_stack` had the same flaw (17 distinct objects nested by
+    - Types: `type_stack` had the same flaw (17 distinct structures nested by
       value were `E051`). A definition laid out inside itself past 64 times
       is `E051` (`type_counts`, kept as the stack is pushed and popped, so
       the count is O(1)), with the same poisoning for types that grow in
       two fields. Without the old cap of 16, layout recursion depth was
-      unbounded: 20,000 distinct nested objects overflowed the 64 MiB
+      unbounded: 20,000 distinct nested structures overflowed the 64 MiB
       compile stack in a debug build (about 3.3 KiB per level). Types now
       nest at most `MAX_TYPE_NESTING` = 1,024 deep (`E051`, "types nest too
       deeply to lay out"); the deepest accepted nesting checks in a debug
@@ -840,7 +840,7 @@ recursion ends with `E051` or `E068` within the time bound.
     mutual recursion (129 frames, `a` named), no note when arguments do
     not grow, branching recursion and branching type growth reporting
     once, an unused branching generic checking cleanly, and 20 distinct
-    nested objects; `lilac-ty` tests for `contains_param` and
+    nested structures; `lilac-ty` tests for `contains_param` and
     `display_bounded` on a 2^200-node type. Expected text: no existing
     fixture's expected output changed; the `E051` notes now count 65
     frames instead of 17 (no test pinned that count) and gained the
@@ -880,11 +880,11 @@ OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
     takes the field types through a small trait (`FieldTypes`, the
     checker's layouts or a test table), so `places::tests` checks it
     exhaustively over representative states of a leaf, a two-field
-    object and a nested object (`Full`, `Empty`/`Maybe` with and without
+    structure and a nested structure (`Full`, `Empty`/`Maybe` with and without
     spans, three `Cond`s, every `Parts` split, `Discarded` torn and not):
     idempotent, commutative and associative (spans aside), an upper
     bound of both sides, and monotone. A rank (one per leaf at maybe;
-    one per object node split into parts, two discarded, three torn)
+    one per structure node split into parts, two discarded, three torn)
     rises on every strict rise and never passes `height`, which is the
     bound's per-local term. The bound (`Pass::round_bound`) is one plus
     the sum over the body's locals of `height(type) + 1` (the `+ 1` is a
@@ -892,7 +892,7 @@ OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
     with `height` memoized per type. Past it `lower_loop` is an ICE at
     the loop's span. Field types behind a `ref` are now none
     (`FieldTypes for Checker`): an owned path never goes through one, and
-    this keeps `height` finite on `object { next: ref Self }`.
+    this keeps `height` finite on `structure { next: ref Self }`.
   - Rounds seen: across the whole test suite (instrumented once, then
     removed) no loop took more than 2 rounds, against bounds of 3 to 57.
     That is the expected maximum for a program that checks: every
@@ -919,8 +919,8 @@ OS refuses to create one); unit tests for 7.1; `FAILS_` test for 7.2.
     once a slot of a layout failed, the later slots are only resolved
     (`slot_type`: names reported), not laid out. Before, `W[T]` holding
     a `W[W[T]]` that holds a `W[T]` reported `E053` once per level, 64
-    times, and an object reaching itself through two fields reported it
-    twice; each is now one error. An object too large (`E067`) is an
+    times, and a structure reaching itself through two fields reported it
+    twice; each is now one error. A structure too large (`E067`) is an
     error type the same way.
   - 7.3: `Fs::canonicalize` (`StdFs`: `std::fs::canonicalize`;
     `OverlayFs`: the same, else, for a path only open documents give,
@@ -1158,7 +1158,7 @@ Decisions made with the owner (2026-10-12): follow Rust.
   - **Encoding, after v0.**
     - Identifiers are length-prefixed (`<decimal len>[_]<bytes>`, with
       the `_` when the bytes start with a digit or `_`).
-    - Each type kind has a tag: builtins as single letters, objects as
+    - Each type kind has a tag: builtins as single letters, structures as
       paths, `I … E` for an instance's arguments, `A` for an array plus
       its length, `R` for `ref`, and `F … E` for function types with
       their `export` flag.
@@ -1310,7 +1310,7 @@ Decisions made with the owner (2026-10-12): follow Rust.
 
 ## Out of scope
 
-- Passing objects or enums **by value** across `extern` or `export` (still
+- Passing structures or eithers **by value** across `extern` or `export` (still
   `E028`). It needs each target's C calling-convention classification;
   the C layout guarantee here makes `ref Object` ↔ `struct Object *` work.
 - Niche layouts (`Optional[ref T]` as a nullable pointer). They need their

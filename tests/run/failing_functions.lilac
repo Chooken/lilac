@@ -6,7 +6,7 @@
 using Standard
 using Standard.Process
 
-Pair: object {
+Pair: structure {
     a: @bit32
     b: @bit32
 
@@ -38,7 +38,7 @@ quarter: function (n: @bit32) value: @bit32 else nothing {
     value = @i_div_u_32(half, 0x2)
 }
 
-Countdown: object {
+Countdown: structure {
     left: @bit32
 
     // The next number, until none are left.

@@ -5,15 +5,15 @@ main: function
 //  ^ keyword.operator.lilac
 //    ^^^^^^^^ storage.type.lilac
 
-Shape: object
+Shape: structure
+// <----- entity.name.type.lilac
+//   ^ keyword.operator.lilac
+//     ^^^^^^^^^ storage.type.lilac
+
+Color: either
 // <----- entity.name.type.lilac
 //   ^ keyword.operator.lilac
 //     ^^^^^^ storage.type.lilac
-
-Color: enum
-// <----- entity.name.type.lilac
-//   ^ keyword.operator.lilac
-//     ^^^^ storage.type.lilac
 
 write: extern function
 // <----- entity.name.function.lilac

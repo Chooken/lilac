@@ -19,7 +19,7 @@ id[T]: function (value: T) out: T {
     out = value
 }
 
-Box[T]: object {
+Box[T]: structure {
     value: T
 
     make: function (value: T) out: Box[T] {
@@ -35,7 +35,7 @@ Box[T]: object {
     }
 }
 
-Plain: object {
+Plain: structure {
     pick[T]: function (first: T, second: T) out: T {
         out = second
     }
@@ -46,7 +46,7 @@ Plain: object {
     }
 }
 
-Table: object {
+Table: structure {
     id: ref function (value: @bit32) @bit32
     make: ref function (value: @bit8) Box[@bit8]
     get: ref function (self: ref Box[@bit8]) @bit8

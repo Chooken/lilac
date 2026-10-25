@@ -7,7 +7,7 @@ using Standard.Heap as Heap
 /// the same allocator. So `T` must be copyable: hold a value that only
 /// moves through a wrapper that copies, such as a reference-counted one.
 /// Every index is checked, and one out of range panics.
-List[T]: object {
+List[T]: structure {
 
     private {
         data: Memory[T]

@@ -1,6 +1,6 @@
 // expect-error: E021
 
-Obj: object {
+Obj: structure {
     v: @bit32
 
     make: function () out: @bit32 {

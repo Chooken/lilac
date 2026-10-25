@@ -11,7 +11,7 @@ using Standard.Io
 using Standard.Process
 using Standard.Os as Os
 
-Work: object {
+Work: structure {
     counter: ref @bit32
     slot: @bit32
 }

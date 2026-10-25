@@ -6,7 +6,7 @@
 using Standard
 using Standard.Io
 
-Handle: object {
+Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {

@@ -5,7 +5,7 @@
 
 using Standard.Process
 
-Pair: object {
+Pair: structure {
     a: @bit32
     b: @bit32
 
@@ -14,7 +14,7 @@ Pair: object {
     }
 }
 
-Holder[T]: object {
+Holder[T]: structure {
     value: T
 
     create: function (value: T) holder: Holder[T] {

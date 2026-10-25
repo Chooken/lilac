@@ -1,7 +1,7 @@
 using Standard.Memory
 using Standard.Heap as Heap
 
-Map[K, V]: object {
+Map[K, V]: structure {
 
     private {
 
@@ -288,7 +288,7 @@ Map[K, V]: object {
 
 private {
 
-    MapBucket[K, V]: object {
+    MapBucket[K, V]: structure {
         key: K
         value: V
         psl: Int32
