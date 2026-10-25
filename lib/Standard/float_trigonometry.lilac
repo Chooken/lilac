@@ -1,7 +1,9 @@
 // Trigonometry (math plan phase 5): `sin`, `cos`, `tan`, `sin_cos`,
 // `sin_pi`, `cos_pi` and `tan_pi`.
 //
-// An argument `a >= pi / 4` is reduced by Payne-Hanek: `a = M 2^E` times the
+// An argument `pi / 4 <= a < 2^20 pi / 2` is reduced by Cody-Waite
+// (`trig_reduce_medium`): `t = a - n pi/2` with `pi / 2` in parts that `n`
+// multiplies exactly. A larger one is reduced by Payne-Hanek: `a = M 2^E` times the
 // bits of `2 / pi` gives `a 2/pi = n + f` with `|f| <= 1/2`, computed on
 // 64-bit limbs to 192 bits after the point, so that even an argument whose
 // `f` is 2^-62 (the closest a double comes to a multiple of `pi / 2`) keeps
@@ -121,6 +123,20 @@ private {
         res = Reduced { quadrant = (quadrant as Uint64).to_int32_wrapping(), angle = angle }
     }
 
+    /// `pi / 4 <= a < 2^20 pi / 2` as a quadrant and an angle (Cody-Waite):
+    /// `t = a - n pi/2` with `pi / 2` in four 32-bit parts, each `n` times a
+    /// part exact (`n < 2^21`), so the sum loses nothing to cancellation, and
+    /// a fifth part; the angle is within 2^-100 relative.
+    trig_reduce_medium: function (a: Float64) res: Reduced {
+        nf: Float64 = (a * TWO_OVER_PI_DOUBLE + 6755399441055744.0) - 6755399441055744.0
+        d: Dd = Dd.two_sum(a - nf * PI_2_CW1, -(nf * PI_2_CW2))
+        d = d - nf * PI_2_CW3
+        d = d - nf * PI_2_CW4
+        d = d - nf * PI_2_CW5
+        quarter: Float64 = (nf * 0.25).floor()
+        res = Reduced { quadrant = (nf - quarter * 4.0).to_int32_truncated(), angle = d }
+    }
+
     /// `(f0 2^-64 + f1 2^-128 + f2 2^-192) * pi / 2` as a pair.
     fraction_angle: function (f0: @bit64, f1: @bit64, f2: @bit64) res: Dd {
         lz: @bit64 = 0x0
@@ -168,6 +184,8 @@ private {
     reduce_angle: function (a: Float64) res: Reduced {
         if a < 0.7853981633974483 {
             res = Reduced { quadrant = 0, angle = Dd.of(a) }
+        } else if a < 1647099.3291652855 {
+            res = trig_reduce_medium(a)
         } else {
             res = trig_reduce(a)
         }

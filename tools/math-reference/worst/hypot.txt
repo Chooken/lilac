@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `hypot` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `hypot.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.000001cc784cbp+52,0x1.fdd67bceb35fp+52  # 999
+0x1.78854804d5a08p+0,0x1.dc21e4607bbfdp+1  # 999
+0x1.78854804d5a08p+1,0x1.dc21e4607bbfdp+2  # 999
+0x1.78854804d5a08p+10,0x1.dc21e4607bbfdp+11  # 999
+0x1.78854804d5a08p+100,0x1.dc21e4607bbfdp+101  # 999
+0x1.78854804d5a08p+101,0x1.dc21e4607bbfdp+102  # 999
+0x1.78854804d5a08p+102,0x1.dc21e4607bbfdp+103  # 999
+0x1.78854804d5a08p+103,0x1.dc21e4607bbfdp+104  # 999
+0x1.78854804d5a08p+104,0x1.dc21e4607bbfdp+105  # 999
+0x1.78854804d5a08p+105,0x1.dc21e4607bbfdp+106  # 999
+0x1.78854804d5a08p+106,0x1.dc21e4607bbfdp+107  # 999
+0x1.78854804d5a08p+107,0x1.dc21e4607bbfdp+108  # 999
+0x1.78854804d5a08p+108,0x1.dc21e4607bbfdp+109  # 999
+0x1.78854804d5a08p+109,0x1.dc21e4607bbfdp+110  # 999
+0x1.78854804d5a08p+11,0x1.dc21e4607bbfdp+12  # 999
+0x1.78854804d5a08p+110,0x1.dc21e4607bbfdp+111  # 999
+0x1.78854804d5a08p+111,0x1.dc21e4607bbfdp+112  # 999
+0x1.78854804d5a08p+112,0x1.dc21e4607bbfdp+113  # 999
+0x1.78854804d5a08p+113,0x1.dc21e4607bbfdp+114  # 999
+0x1.78854804d5a08p+114,0x1.dc21e4607bbfdp+115  # 999
+0x1.78854804d5a08p+115,0x1.dc21e4607bbfdp+116  # 999
+0x1.78854804d5a08p+116,0x1.dc21e4607bbfdp+117  # 999
+0x1.78854804d5a08p+117,0x1.dc21e4607bbfdp+118  # 999
+0x1.78854804d5a08p+118,0x1.dc21e4607bbfdp+119  # 999
+0x1.78854804d5a08p+119,0x1.dc21e4607bbfdp+120  # 999
+0x1.78854804d5a08p+12,0x1.dc21e4607bbfdp+13  # 999
+0x1.78854804d5a08p+120,0x1.dc21e4607bbfdp+121  # 999
+0x1.78854804d5a08p+121,0x1.dc21e4607bbfdp+122  # 999
+0x1.78854804d5a08p+122,0x1.dc21e4607bbfdp+123  # 999
+0x1.78854804d5a08p+123,0x1.dc21e4607bbfdp+124  # 999
+0x1.78854804d5a08p+124,0x1.dc21e4607bbfdp+125  # 999
+0x1.78854804d5a08p+125,0x1.dc21e4607bbfdp+126  # 999
+0x1.78854804d5a08p+126,0x1.dc21e4607bbfdp+127  # 999
+0x1.78854804d5a08p+127,0x1.dc21e4607bbfdp+128  # 999
+0x1.78854804d5a08p+128,0x1.dc21e4607bbfdp+129  # 999
+0x1.78854804d5a08p+129,0x1.dc21e4607bbfdp+130  # 999
+0x1.78854804d5a08p+13,0x1.dc21e4607bbfdp+14  # 999
+0x1.78854804d5a08p+130,0x1.dc21e4607bbfdp+131  # 999
+0x1.78854804d5a08p+131,0x1.dc21e4607bbfdp+132  # 999
+0x1.78854804d5a08p+132,0x1.dc21e4607bbfdp+133  # 999

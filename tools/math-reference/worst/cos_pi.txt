@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `cos_pi` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `cospi.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.8242846e3d0afp-24  # 59
+0x1.e1b2117e97295p-1  # 57
+0x1.e4dee8168d6b0p-5  # 57
+0x1.e4dee8168d6bp-5  # 57
+0x1.f3beb28414801p-10  # 57
+0x1.f9a45ce01134fp-20  # 57
+0x1.ccf6429be6621p-29  # 56
+0x1.0d1245667cb39p+1  # 55
+0x1.1a248accf9672p+0  # 55
+0x1.381fbd2a5e55ep-4  # 55
+0x1.396d4be3ead8cp-9  # 55
+0x1.72edba99834c7p+1  # 55
+0x1.82e06677256d1p-4  # 55
+0x1.8d1245667cb39p+1  # 55
+0x1.8f346b4c305bfp-28  # 55
+0x1.9d9ce0957f1c8p-22  # 55
+0x1.a248accf9672p-4  # 55
+0x1.b0fdedbce51edp-6  # 55
+0x1.cbb6ea660d31cp-1  # 55
+0x1.e5db75330698ep+0  # 55
+0x1.f2edba99834c7p+1  # 55
+0x1.192cf274b2b7p-24  # 54
+0x1.30e5cded67cafp-27  # 54
+0x1.31cad58b29a9ep-8  # 54
+0x1.5725295c952ebp-17  # 54
+0x1.595ab6556fa3p-20  # 54
+0x1.5bbef584e580dp-9  # 54
+0x1.70c3e3f71bd49p-18  # 54
+0x1.83d1fc2e1ace6p-7  # 54
+0x1.9cbff3284a4fbp-18  # 54
+0x1.a8407fe55410ap-12  # 54
+0x1.ae77cc45f8687p-24  # 54
+0x1.b018020fc41c3p-16  # 54
+0x1.ba2c9dba2216dp-8  # 54
+0x1.ccf6429be6622p-29  # 54
+0x1.ff108349596a7p-11  # 54
+0x1.03186425a1e11p+5  # 53
+0x1.04e79bda5e1efp+5  # 53
+0x1.0630c84b43c22p+4  # 53
+0x1.09cf37b4bc3dep+4  # 53

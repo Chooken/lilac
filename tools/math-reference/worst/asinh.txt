@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `asinh` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `asinh.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.31143c7c0b1e6p+961  # 60
+0x1.382c35530591fp+520  # 59
+0x1.b9bd2112d4ffbp+22  # 59
+0x1.e4a048cf48923p+530  # 58
+0x1.e9932a9538279p+382  # 58
+0x1.290aad468d568p+465  # 57
+0x1.910aeb868a927p+813  # 57
+0x1.0800d77b1b97ep+208  # 56
+0x1.39fed6a9e3d6dp+886  # 56
+0x1.4621fa49c65d1p+213  # 56
+0x1.4be612170747bp+730  # 56
+0x1.5541e6aa8f0b7p+550  # 56
+0x1.8acf3ac412737p+71  # 56
+0x1.b24b24a3eefcep+910  # 56
+0x1.c901b6ae9ae9cp+323  # 56
+0x1.d3987760275acp+78  # 56
+0x1.e8476e6e79dcbp+212  # 56
+0x1.fb29869acfc16p+698  # 56
+0x1.ff5390b769446p+447  # 56
+0x1.05518e08fbc1dp+96  # 55
+0x1.148e9ff4b4409p+228  # 55
+0x1.3d3ed57bf7778p+602  # 55
+0x1.4b1334047363dp+792  # 55
+0x1.4c649a4bc3a78p+1004  # 55
+0x1.50bb6eddf8034p+410  # 55
+0x1.8193ec490be13p+765  # 55
+0x1.86c6c12286af2p+451  # 55
+0x1.add2fc4bfdb9cp+1004  # 55
+0x1.ba68c4a35a82ep+72  # 55
+0x1.cca0105145563p+930  # 55
+0x1.ecf113f6e747dp+293  # 55
+0x1.f5725c574bdb1p+536  # 55
+0x1.0d644ebb35847p+641  # 54
+0x1.13db2c80ced45p+484  # 54
+0x1.16ddea33174afp+484  # 54
+0x1.1922f39685d71p+323  # 54
+0x1.432bd4171ff6ap+698  # 54
+0x1.57e4525e09371p+410  # 54
+0x1.69125882602fap+867  # 54
+0x1.691ac70aa2b17p+235  # 54

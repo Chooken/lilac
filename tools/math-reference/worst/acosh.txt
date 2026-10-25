@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `acosh` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `acosh.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.fd15daa6ce332p+731  # 63
+0x1.04517520386e5p+136  # 59
+0x1.618a1864daf76p+643  # 59
+0x1.27febcf1290a5p+566  # 58
+0x1.526b38ab2ed1fp+81  # 58
+0x1.e4a048cf48923p+530  # 58
+0x1.ffa782593240ap+909  # 58
+0x1.190ade3a78858p+152  # 57
+0x1.58b4fdecc499fp+848  # 57
+0x1.72befaed13541p+779  # 57
+0x1.9aa67eb0931fcp+786  # 57
+0x1.fda768e5b84bfp+760  # 57
+0x1.2313d9563e5ddp+595  # 56
+0x1.4621fa49c65d1p+213  # 56
+0x1.5698a513ee7b8p+811  # 56
+0x1.6236bbba2783p+338  # 56
+0x1.64f8118dc1d55p+458  # 56
+0x1.82e19d2c04549p+798  # 56
+0x1.b2595a1adba5ep+313  # 56
+0x1.b9b5863881fbep+419  # 56
+0x1.d2c7e98e15ea3p+863  # 56
+0x1.d6a05e2c35157p+973  # 56
+0x1.0c5a0243751f4p+334  # 55
+0x1.0f79bcfabd753p+39  # 55
+0x1.42725250922a8p+142  # 55
+0x1.4c649a4bc3a78p+1004  # 55
+0x1.991bb0b044874p+714  # 55
+0x1.9a6d784171216p+352  # 55
+0x1.9b48cc4edc522p+984  # 55
+0x1.9c81223269d0cp+191  # 55
+0x1.ba1ae42871a4dp+512  # 55
+0x1.c27b12b61c93dp+171  # 55
+0x1.cca0105145563p+930  # 55
+0x1.ceeacc1dfe661p+571  # 55
+0x1.dbde14afd1b8dp+868  # 55
+0x1.dcc624177588ap+143  # 55
+0x1.ebbc4471da98cp+1012  # 55
+0x1.08222bc279f8ep+495  # 54
+0x1.0e02ced133a81p+349  # 54
+0x1.1a9a005579cd4p+92  # 54

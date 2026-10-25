@@ -346,190 +346,286 @@ Float64: object {
 
     /// `e^self`. Overflows to `+inf` and underflows to `+0.0`; `exp(-inf)` is `0.0`; a NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    exp: function (self: Float64) Float64 => exp_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    exp: function (self: Float64) r: Float64 {
+        r = quick64(exp_fast(self))
+        if r.is_nan() {
+            s: Scaled = exp_kernel(self)
+            r = if s.sure64() then s.round64() else mp_round64(exp_accurate(self))
+        }
+    }
 
     /// `2^self`. Overflows to `+inf` and underflows to `+0.0`; exact for integer `self`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    exp2: function (self: Float64) Float64 => exp2_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    exp2: function (self: Float64) r: Float64 {
+        s: Scaled = exp2_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(exp2_accurate(self))
+    }
 
     /// `10^self`. Overflows to `+inf` and underflows to `+0.0`; exact when `10^self` is representable.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    exp10: function (self: Float64) Float64 => exp10_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    exp10: function (self: Float64) r: Float64 {
+        s: Scaled = exp10_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(exp10_accurate(self))
+    }
 
     /// `e^self - 1`, accurate for `self` near zero. `exp_m1(-inf)` is `-1.0`; overflows to `+inf`; `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    exp_m1: function (self: Float64) Float64 => expm1_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    exp_m1: function (self: Float64) r: Float64 {
+        s: Scaled = expm1_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(exp_m1_accurate(self))
+    }
 
     /// The natural logarithm. `ln(+-0.0)` is `-inf`, `ln(1.0)` is `+0.0`, `ln(+inf)` is `+inf`, and a negative value or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    ln: function (self: Float64) Float64 => ln_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    ln: function (self: Float64) r: Float64 {
+        r = quick64(ln_fast(self))
+        if r.is_nan() {
+            s: Scaled = ln_kernel(self)
+            r = if s.sure64() then s.round64() else mp_round64(ln_accurate(self))
+        }
+    }
 
     /// The base-2 logarithm (exact for powers of two). `log2(+-0.0)` is `-inf`; a negative value or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    log2: function (self: Float64) Float64 => log2_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    log2: function (self: Float64) r: Float64 {
+        s: Scaled = log2_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(log2_accurate(self))
+    }
 
     /// The base-10 logarithm. `log10(+-0.0)` is `-inf`; a negative value or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    log10: function (self: Float64) Float64 => log10_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    log10: function (self: Float64) r: Float64 {
+        s: Scaled = log10_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(log10_accurate(self))
+    }
 
     /// `ln(1 + self)`, accurate for `self` near zero. `ln_1p(-1.0)` is `-inf`, below `-1.0` it is NaN, and `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    ln_1p: function (self: Float64) Float64 => ln_1p_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    ln_1p: function (self: Float64) r: Float64 {
+        s: Scaled = ln_1p_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(ln_1p_accurate(self))
+    }
 
     /// The error function `2/sqrt(pi) * integral of e^-t^2 from 0 to self`, in `[-1, 1]`; `erf(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
+    /// Within 1 ulp, and almost always correctly rounded: the kernel's result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-37 ulp of a rounding boundary; exact results are exact.
     erf: function (self: Float64) Float64 => erf_kernel(self).round64()
 
     /// The complementary error function `1 - erf(self)`, in `[0, 2]`, accurate where it is tiny; `erfc(+inf)` is `0.0` and `erfc(-inf)` is `2.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
+    /// Within 1 ulp, and almost always correctly rounded: the kernel's result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-37 ulp of a rounding boundary; exact results are exact.
     erfc: function (self: Float64) Float64 => erfc_kernel(self).round64()
 
     /// The gamma function (`gamma(n + 1) = n!`). NaN at the negative integers and `-inf`; `gamma(+-0.0)` is `+-inf`; overflows to `+inf` past 171.62.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
+    /// Within 1 ulp, and almost always correctly rounded: the kernel's result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-37 ulp of a rounding boundary; exact results are exact.
     gamma: function (self: Float64) Float64 => gamma_kernel(self).round64()
 
     /// The natural logarithm of the absolute value of the gamma function; `+inf` at zero and the negative integers, and `ln_gamma(1.0)` and `ln_gamma(2.0)` are `+0.0`. Series around 1 and 2 keep it accurate there; at the zeros between the negative integers the absolute error stays below 2^-95, so the relative error grows to about 2^-45 for an argument within one ulp of a zero.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
+    /// Within 1 ulp, and almost always correctly rounded: the kernel's result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-37 ulp of a rounding boundary; exact results are exact. Near the zeros between the negative integers only the absolute error is that small (see above).
     ln_gamma: function (self: Float64) Float64 => lgamma_kernel(self).round64()
 
     /// The hyperbolic sine. Overflows to `+-inf`; `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    sinh: function (self: Float64) Float64 => sinh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    sinh: function (self: Float64) r: Float64 {
+        s: Scaled = sinh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(sinh_accurate(self))
+    }
 
     /// The hyperbolic cosine. Overflows to `+inf`; `cosh(+-inf)` is `+inf`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    cosh: function (self: Float64) Float64 => cosh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    cosh: function (self: Float64) r: Float64 {
+        s: Scaled = cosh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(cosh_accurate(self))
+    }
 
     /// The hyperbolic tangent, in `[-1, 1]`; `tanh(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    tanh: function (self: Float64) Float64 => tanh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    tanh: function (self: Float64) r: Float64 {
+        s: Scaled = tanh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(tanh_accurate(self))
+    }
 
     /// The inverse hyperbolic sine; `asinh(+-inf)` is `+-inf` and `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    asinh: function (self: Float64) Float64 => asinh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    asinh: function (self: Float64) r: Float64 {
+        s: Scaled = asinh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(asinh_accurate(self))
+    }
 
     /// The inverse hyperbolic cosine, for `self >= 1.0`; `acosh(1.0)` is `+0.0`, below `1.0` it is NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    acosh: function (self: Float64) Float64 => acosh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    acosh: function (self: Float64) r: Float64 {
+        s: Scaled = acosh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(acosh_accurate(self))
+    }
 
     /// The inverse hyperbolic tangent, for `|self| <= 1.0`; `atanh(+-1.0)` is `+-inf`, beyond it NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    atanh: function (self: Float64) Float64 => atanh_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    atanh: function (self: Float64) r: Float64 {
+        s: Scaled = atanh_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(atanh_accurate(self))
+    }
 
     /// The arctangent, in `[-pi/2, pi/2]`. `atan(+-inf)` is `+-pi/2`; `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    atan: function (self: Float64) Float64 => atan_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    atan: function (self: Float64) r: Float64 {
+        s: Scaled = atan_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(atan_accurate(self))
+    }
 
     /// The arcsine, in `[-pi/2, pi/2]`. NaN outside `[-1, 1]`; `-0.0` stays `-0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    asin: function (self: Float64) Float64 => asin_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    asin: function (self: Float64) r: Float64 {
+        s: Scaled = asin_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(asin_accurate(self))
+    }
 
     /// The arccosine, in `[0, pi]`. NaN outside `[-1, 1]`; `acos(1.0)` is `+0.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    acos: function (self: Float64) Float64 => acos_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    acos: function (self: Float64) r: Float64 {
+        s: Scaled = acos_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(acos_accurate(self))
+    }
 
     /// The sine of an angle in radians; any finite argument is reduced exactly (`(1e300).sin()` is right). `sin(+-0.0)` keeps its sign; an infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    sin: function (self: Float64) Float64 => sin_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    sin: function (self: Float64) r: Float64 {
+        s: Scaled = sin_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(sin_accurate(self))
+    }
 
     /// The cosine of an angle in radians; any finite argument is reduced exactly. An infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    cos: function (self: Float64) Float64 => cos_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    cos: function (self: Float64) r: Float64 {
+        s: Scaled = cos_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(cos_accurate(self))
+    }
 
     /// The tangent of an angle in radians; any finite argument is reduced exactly. `tan(+-0.0)` keeps its sign; an infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    tan: function (self: Float64) Float64 => tan_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    tan: function (self: Float64) r: Float64 {
+        s: Scaled = tan_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(tan_accurate(self))
+    }
 
     /// `sin(pi * self)`, with the argument reduced exactly: `sin_pi(n)` is a zero with the sign of `self`, `sin_pi(0.5)` is `1.0`. An infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    sin_pi: function (self: Float64) Float64 => sin_pi_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    sin_pi: function (self: Float64) r: Float64 {
+        s: Scaled = sin_pi_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(sin_pi_accurate(self))
+    }
 
     /// `cos(pi * self)`, with the argument reduced exactly: `cos_pi(0.5)` is `+0.0`, `cos_pi(1.0)` is `-1.0`. An infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    cos_pi: function (self: Float64) Float64 => cos_pi_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    cos_pi: function (self: Float64) r: Float64 {
+        s: Scaled = cos_pi_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(cos_pi_accurate(self))
+    }
 
     /// `tan(pi * self)`: `tan_pi(n)` is a zero with the sign of `self`, and at the half-integers (the poles) it is an infinity with the sign of `self`. An infinity or NaN gives NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    tan_pi: function (self: Float64) Float64 => tan_pi_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    tan_pi: function (self: Float64) r: Float64 {
+        s: Scaled = tan_pi_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(tan_pi_accurate(self))
+    }
 
     /// The logarithm of `self` to `base`, `ln(self) / ln(base)`. NaN when
     /// `self` is negative or `base` is not positive or is `1.0`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    log: function (self: Float64, base: Float64) Float64 => log_base_kernel(self, base).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    log: function (self: Float64, base: Float64) r: Float64 {
+        s: Scaled = log_base_kernel(self, base)
+        r = if s.sure64() then s.round64() else mp_round64(log_base_accurate(self, base))
+    }
 
     /// The sine and cosine of an angle in radians, as `(sine, cosine)`; each is
     /// exactly what `sin` and `cos` return.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
     sin_cos: function (self: Float64) (sine: Float64, cosine: Float64) {
         s: Scaled, c: Scaled = sin_cos_kernel(self)
-        sine = s.round64()
-        cosine = c.round64()
+        sine = if s.sure64() then s.round64() else mp_round64(sin_accurate(self))
+        cosine = if c.sure64() then c.round64() else mp_round64(cos_accurate(self))
     }
 
     /// The angle of the point `(other, self)` (`self` is y, `other` is x), in
     /// `[-pi, pi]`, with C's `atan2` special values: `atan2(+-0.0, -0.0)` is `+-pi`,
     /// `atan2(+-0.0, +0.0)` is `+-0.0`, and infinities give multiples of `pi/4`.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    atan2: function (self: Float64, other: Float64) Float64 => atan2_kernel(self, other).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    atan2: function (self: Float64, other: Float64) r: Float64 {
+        s: Scaled = atan2_kernel(self, other)
+        r = if s.sure64() then s.round64() else mp_round64(atan2_accurate(self, other))
+    }
 
     /// `self` raised to the power `other`, with C's special values: `pow(x, +-0.0)` and
     /// `pow(1.0, y)` are `1.0` even for NaN; a negative base with a non-integer
     /// exponent is NaN; `pow(+-0.0, y)` is an infinity for negative `y`; `pow(-1.0, +-inf)` is `1.0`.
     /// Exact when the result is representable (`pow(3.0, 2.0)`).
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    pow: function (self: Float64, other: Float64) Float64 => pow_kernel(self, other).round64_ties()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    pow: function (self: Float64, other: Float64) r: Float64 {
+        s: Scaled = pow_kernel(self, other)
+        r = if s.sure64() then s.round64() else mp_round64(pow_accurate(self, other))
+    }
 
     /// `self` raised to the integer power `n` (`pow` with an exact exponent).
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    pow_int: function (self: Float64, n: Int32) Float64 => pow_kernel(self, n as Float64).round64_ties()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    pow_int: function (self: Float64, n: Int32) r: Float64 {
+        s: Scaled = pow_kernel(self, n as Float64)
+        r = if s.sure64() then s.round64() else mp_round64(pow_accurate(self, n as Float64))
+    }
 
     /// The cube root (defined for negative values; exact for cubes).
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    cbrt: function (self: Float64) Float64 => cbrt_kernel(self).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    cbrt: function (self: Float64) r: Float64 {
+        s: Scaled = cbrt_kernel(self)
+        r = if s.sure64() then s.round64() else mp_round64(cbrt_accurate(self))
+    }
 
     /// `sqrt(self^2 + other^2)` without intermediate overflow; an infinity wins over NaN.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    hypot: function (self: Float64, other: Float64) Float64 => hypot_kernel(self, other).round64_ties()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    hypot: function (self: Float64, other: Float64) r: Float64 {
+        s: Scaled = hypot_kernel(self, other)
+        r = if s.sure64() then s.round64() else mp_round64(hypot_accurate(self, other))
+    }
 
     /// The `n`-th root of `self`: negative values have odd roots only, `n = 0` is NaN,
     /// and a negative `n` is the reciprocal root.
     ///
-    /// Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.
-    root: function (self: Float64, n: Int32) Float64 => root_kernel(self, n).round64()
+    /// Correctly rounded (to nearest, ties to even): the kernel's result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).
+    root: function (self: Float64, n: Int32) r: Float64 {
+        s: Scaled = root_kernel(self, n)
+        r = if s.sure64() then s.round64() else mp_round64(root_accurate(self, n))
+    }
 
     @conversion: function (from: @fbit64) Float64 => Float64 { data = from }
     @conversion: function (from: Float64) @fbit64 => from.data

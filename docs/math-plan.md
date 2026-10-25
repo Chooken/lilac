@@ -1,7 +1,8 @@
 # Standard Math Plan
 
-> Status: agreed, 2026-10-14; phases 0-6 done (phase 5 with the accuracy
-> stated under it).
+> Status: agreed, 2026-10-14; phases 0-6 done (phase 5 correctly rounded
+> but for `erf`, `erfc`, `gamma` and `ln_gamma`, which are within 1 ulp;
+> see "Phase 5 status").
 >
 > Goal: a production-grade math library that feels like Lilac and serves
 > two kinds of user. A beginner should be able to write `x.sqrt()`,
@@ -37,8 +38,8 @@
 >
 >   Speed comes from explicit operations (`multiply_add`, vectors, a
 >   chosen CPU), never from loosening an existing one.
-> - **Elementary functions are correctly rounded** (as built: within 0.5 ulp
->   plus 2^-37 ulp for `Float64` and 2^-60 ulp for the narrower types; see
+> - **Elementary functions are correctly rounded** (as built: all but
+>   `erf`, `erfc`, `gamma` and `ln_gamma`, which are within 1 ulp; see
 >   "Phase 5 status").
 >   Every `Float32` and `Float64` function returns the exactly rounded
 >   result. A correctly rounded answer is the same whatever the
@@ -558,33 +559,92 @@ How it is built (`lib/Standard`, all `private` except the methods):
   in three parts, table of 46 reciprocals for the logarithm),
   `float_power` (`pow` = `exp(y ln x)` with `ln x` as a pair; Newton step
   for `cbrt`; scaled sum of squares for `hypot`), `float_trigonometry`
-  (Payne-Hanek on 64-bit limbs to 192 bits, so `(1e300).sin()` is right;
+  (Cody-Waite below 2^20 pi/2, beyond it Payne-Hanek on 64-bit limbs to
+  192 bits, so `(1e300).sin()` is right;
   exact reduction for the `_pi` forms), `float_inverse_trigonometry`,
   `float_hyperbolic`, `float_special` (series and Laplace's continued
   fraction for `erf`/`erfc`; Stirling's series with a shift, reflection and
   Taylor series around the zeros at 1 and 2 for `gamma`/`ln_gamma`).
 
-Accuracy actually achieved (the `///` of each method says it):
-- The kernels' error is below 2^-90 relative (measured 2^-105 for the
-  logarithm, about 2^-94 for `pow` and `exp10` at the extremes). A final
-  `Float64` is therefore correctly rounded unless the exact value lies within
-  2^-37 ulp of a rounding boundary; `Float32`/`Float16` within 2^-60 ulp.
-  This is **not** a proof of correct rounding: the hardest cases for
-  `Float64` (CORE-MATH's worst cases, which sit 2^-60 ulp from a boundary)
-  need a fallback that was not written (a triple-double or big-integer
-  path). Their tables were not available offline, so they are not in the
-  tests.
-- `ln_gamma` has absolute error below 2^-95 at its zeros between the
-  negative integers, where the relative error grows to about 2^-45.
-- Speed: an `exp` plus `ln_1p` pair measured about 0.8 microseconds in
-  Release on the development machine; libm is several times faster. Only
-  Dekker's product (instead of the software fused multiply-add) was
-  done for speed, and the Cody-Waite fast path for small trigonometric
-  arguments was not written (every argument above pi/4 uses Payne-Hanek).
-- Ties: `pow`, `hypot` and exact roots detect an exactly representable or
-  exactly half-way result (`finish64_ties`, and a 2^-86 snap for narrower
-  types), so `pow(94906267, 2)` and `pow(11, 7)` in `Float32` round to
-  even.
+Correct rounding (`float_mp.lilac`, `float_accurate.lilac`): each method
+rounds in up to three tiers and takes the next only when the one before
+cannot be sure.
+1. **Fast tier** (`Float64` `exp` and `ln` only; `exp_fast`, `ln_fast` in
+   `float_exponential.lilac`): plain doubles, a 128-entry table
+   (`ExpTable`, `LnTable`) and a short polynomial give a pair with relative
+   error below 2^-66; `quick64` rounds it when every value within 2^-63
+   relative rounds alike, and is NaN otherwise (about one argument in a
+   thousand, a subnormal or overflowing result, or an argument outside the
+   fast range).
+2. **Kernel tier**: the double-double kernel (error below 2^-90 relative:
+   measured 2^-105 for the logarithm, about 2^-94 for `pow` and `exp10` at
+   the extremes) is rounded when `Scaled.sure64`/`sure32`/`sure16` finds
+   every value within 2^-70 relative of it rounds alike.
+3. **Fallback**: an `Mp` (384-bit mantissa, six 64-bit limbs) evaluation
+   of the same function, `mp_round`ed. A value within 2^-240 relative of a
+   midpoint is taken for the midpoint and rounds to even, which is what
+   makes exact halfway results (`pow`, `hypot`, `root` of exact operands)
+   round right; `finish64_ties` and the narrow-type snap are gone. `atan2`
+   steps past that window itself when its quotient `y/x` is below 2^-100
+   (`atan q` lies within 2^-200 below `q`, and a subnormal `q` can be an
+   exact midpoint).
+
+Accuracy achieved (each method's `///` says it):
+- **Correctly rounded** (to nearest, ties to even) on `Float16`,
+  `Float32` and `Float64`: `exp`, `exp2`, `exp10`, `exp_m1`, `ln`, `log2`,
+  `log10`, `ln_1p`, `log`, `pow`, `pow_int`, `cbrt`, `hypot`, `root`,
+  `sin`, `cos`, `tan`, `sin_cos`, `sin_pi`, `cos_pi`, `tan_pi`, `asin`,
+  `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`,
+  `atanh`. The argument rests on the error bounds of the three tiers
+  (each far inside its test's margin) and on the worst cases: a result is
+  wrong only if the exact value lies within 2^-240 relative of a midpoint
+  without being one. For the one-argument `Float64` functions CORE-MATH's
+  searches find none closer than 2^-101 ulp (about 2^-154 relative;
+  `ln_1p`), and the narrower types' inputs are few enough that their
+  worst cases are far coarser. For `pow`, `atan2` and `hypot` no complete
+  search exists, so their claim rests on no known input coming near.
+- **Within 1 ulp** (no fallback, as the plan allowed): `erf`, `erfc`,
+  `gamma`, `ln_gamma`. The kernel is rounded once, so the result is wrong
+  only when the exact value is within 2^-37 ulp (`Float64`) or 2^-60 ulp
+  (narrower) of a rounding boundary. `ln_gamma` has absolute error below
+  2^-95 at its zeros between the negative integers, where the relative
+  error grows to about 2^-45.
+
+Speed (`bench/math/main.lilac` against `bench/math/c/bench.c`, the
+Windows C runtime built by clang -O2, on the same inputs; Release,
+nanoseconds per call on the development machine, where a call through a
+function value costs 1.2):
+
+| function | Lilac | C |
+|---|---:|---:|
+| `exp` | 13.5 | 2.4 |
+| `exp_m1` | 288 | 4.3 |
+| `ln` | 16.5 | 3.0 |
+| `ln_1p` | 218 | 5.2 |
+| `log2` | 216 | 4.7 |
+| `sin` (±6) | 329 | 3.5 |
+| `sin` (10^3 to 10^6) | 328 | 4.0 |
+| `sin` (10^20 to 10^300) | 361 | 10.3 |
+| `cos` | 333 | 4.6 |
+| `tan` | 381 | 5.0 |
+| `atan` | 238 | 3.2 |
+| `asin` | 303 | 4.4 |
+| `sinh` | 369 | 5.1 |
+| `tanh` | 353 | 5.5 |
+| `asinh` | 320 | 12.8 |
+| `cbrt` | 145 | 14.7 |
+| `erf` | 4000 | 4.7 |
+| `gamma` | 834 | 24.4 |
+
+`exp` and `ln` are within about 5.5 times the C library (from 243 and
+171 ns before the fast tier). The rest still run the double-double
+kernel on every call and are 10 to 100 times slower (`erf`'s continued
+fraction about 850 times). The Cody-Waite reduction
+(`trig_reduce_medium`, for `pi/4 <= |x| < 2^20 pi/2`: `pi/2` in four
+32-bit parts and a fifth, each product with `n < 2^21` exact) replaced
+Payne-Hanek there but changed little, since the series, not the
+reduction, is the cost. Fast tiers like `exp`'s for the other functions
+are the next speed step: `docs/math-speed-plan.md`.
 
 Verification:
 - `tools/math-reference/reference.py` computes the references with the
@@ -592,14 +652,30 @@ Verification:
   packages), `gen_tests.py` writes `tools/math-reference/data/*.txt`
   (hex rows for every function and width: C Annex F specials, random inputs
   over each domain with edge ranges, the nearly-hard cases among a pool,
-  and for trigonometry the double nearest a multiple of pi/2), and
-  `crates/lilac-cli/tests/math.rs` checks every row in Debug and Release
-  (about 300 rows per function and width for 34 tabled functions; `sin_cos` is covered by the identities test).
+  for trigonometry the double nearest a multiple of pi/2, and the worst
+  cases below), and `crates/lilac-cli/tests/math.rs` checks every row in
+  Debug and Release (about 390 rows per `Float64` function, 13,184 in all,
+  for 34 tabled functions; `sin_cos` is covered by the identities test).
+  The tables are not checked in (`.gitignore`): run `gen_tests.py` (about
+  six minutes) before the test.
+- Worst cases: `tools/math-reference/pick_worst.py` reads CORE-MATH's
+  worst-case lists (`*.wc`, MIT licence), measures each input's distance
+  to a midpoint with `reference.py`, and writes the hardest 40 per
+  function (47 for `exp`, with the lists' specials) to
+  `tools/math-reference/worst/*.txt`, which `gen_tests.py` adds to every
+  `Float64` table: 27 functions (`exp`, `exp2`, `exp10`, `exp_m1`, `ln`,
+  `log2`, `log10`, `ln_1p`, `pow`, `cbrt`, `hypot`, and the trigonometric,
+  `_pi`, inverse and hyperbolic ones). The hardest sit 2^-55 to 2^-101 ulp
+  from a midpoint, and `atan2`'s include exact subnormal midpoints (the
+  bug they found).
 - `stress.py` checks fresh random rows outside the suite: 15,000-30,000 per
   function at 64, 32 and 16 bits (8,000 for `erf`/`erfc`, 2,500 for
   `gamma`/`ln_gamma` at 64) with no wrong result once the bugs it found were
-  fixed (a table entry computed under a 28-digit default context, and a
-  subnormal rounding case).
+  fixed. After the fast tier and Cody-Waite, 3,000 random rows and 4,000
+  rows aimed at the new paths' edges (the fast ranges' ends, `x` near 1,
+  multiples of pi/2 up to 2^20) for each of `exp`, `ln`, `sin`, `cos` and
+  `tan` found none. The fallback alone (every `sure` forced false) was
+  checked the same way before the fast tier went in.
 - `tests/run/math_identities.lilac`: oddness, `sin_cos`, exact results and
   monotonicity at the branch points.
 - `float32_agrees_with_the_float64_path_on_every_input` (`--ignored`) runs
@@ -608,9 +684,10 @@ Verification:
   of 20 million inputs per function found no disagreement. The full 2^32 run
   takes hours and was not done.
 - `numeric_link.rs` links every method for the six native targets.
-- Not done: the benchmarks (`bench/math/`), the CORE-MATH worst cases, a
-  correctly-rounding fallback, `Float16` tables beyond 120-ish rows (its
-  check is the sampled sweep), and the `Features.fma` fast path (phase 8).
+- Not done: fast tiers beyond `exp` and `ln`, a correctly rounded `erf`,
+  `erfc`, `gamma` and `ln_gamma`, `Float16` tables beyond 120-ish rows
+  (its check is the sampled sweep), and the `Features.fma` fast path
+  (phase 8).
 
 ## Phase 6: printing and parsing floats
 

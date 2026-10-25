@@ -1,0 +1,87 @@
+// Throughput of Standard's elementary functions (math plan phase 5).
+// Hand-run, not a gate:
+//
+//     lilac build bench/math --release --lib=Standard=lib/Standard
+//     build/release/math.exe
+//
+// Each line is the mean time of one call in nanoseconds over a table of
+// inputs spread over the function's usual range (`bench/math/c/bench.c` measures
+// the C library on the same inputs).
+
+using Standard
+using Standard.Io
+using Standard.Os as Os
+
+Unary: alias function (x: Float64) Float64
+
+COUNT: Int => 4096
+ROUNDS: Int => 64
+
+// A small generator of well-spread doubles in `[0, 1)`.
+next: function (state: ref @bit64) value: Float64 {
+    state = @i_add_64(@i_mul_64(state, 0x5851F42D4C957F2D), 0x14057B7EF767814F)
+    bits: @bit64 = @bit_shift_right_u_64(state, 0xB)
+    value = (bits as Uint64).to_float64_rounded() * 1.1102230246251565e-16
+}
+
+inputs: @array(Float64, 4096)
+
+fill: function (low: Float64, high: Float64) nothing {
+    state: @bit64 = 0x2545F4914F6CDD1D
+    i: Int = 0
+    loop {
+        if i >= COUNT { break }
+        slot: ref Float64 = @array_at(ref inputs, i as @bit_native)
+        slot = low + (high - low) * next(ref state)
+        i = i + 1
+    }
+}
+
+sink: Float64 = 0.0
+
+run: function (name: @byte_buffer, f: ref Unary, low: Float64, high: Float64) nothing {
+    fill(low, high)
+    total: Float64 = 0.0
+    start: @bit64 = Os.monotonic_nanos()
+    round: Int = 0
+    loop {
+        if round >= ROUNDS { break }
+        i: Int = 0
+        loop {
+            if i >= COUNT { break }
+            total = total + f(@array_at(ref inputs, i as @bit_native))
+            i = i + 1
+        }
+        round = round + 1
+    }
+    elapsed: @bit64 = @i_sub_64(Os.monotonic_nanos(), start)
+    sink = sink + total
+    ns: Float64 = (elapsed as Uint64).to_float64_rounded() / (COUNT * ROUNDS).to_float64_rounded()
+    print_line($"{name} {ns.fixed(1)} ns")
+}
+
+// The loop and call alone, for scale.
+square: function (x: Float64) Float64 => x * x
+
+main: function () nothing {
+    run("(call)", ref square, -1.0, 1.0)
+    run("exp", ref Float64.exp, -700.0, 700.0)
+    run("exp_m1", ref Float64.exp_m1, -1.0, 1.0)
+    run("ln", ref Float64.ln, 1e-300, 1e300)
+    run("ln_1p", ref Float64.ln_1p, -0.5, 1.0)
+    run("log2", ref Float64.log2, 0.001, 1000.0)
+    run("sin", ref Float64.sin, -6.0, 6.0)
+    run("sin_big", ref Float64.sin, 1e3, 1e6)
+    run("sin_huge", ref Float64.sin, 1e20, 1e300)
+    run("cos", ref Float64.cos, -6.0, 6.0)
+    run("tan", ref Float64.tan, -1.5, 1.5)
+    run("atan", ref Float64.atan, -10.0, 10.0)
+    run("asin", ref Float64.asin, -1.0, 1.0)
+    run("sinh", ref Float64.sinh, -5.0, 5.0)
+    run("tanh", ref Float64.tanh, -5.0, 5.0)
+    run("asinh", ref Float64.asinh, -5.0, 5.0)
+    run("cbrt", ref Float64.cbrt, -1000.0, 1000.0)
+    run("erf", ref Float64.erf, -3.0, 3.0)
+    run("gamma", ref Float64.gamma, 0.5, 20.0)
+    print_line($"(checksum {sink})")
+}

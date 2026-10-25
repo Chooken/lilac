@@ -18,6 +18,7 @@ so regenerating changes no byte.
 """
 import os
 import random
+import struct
 import sys
 from fractions import Fraction
 
@@ -1008,6 +1009,21 @@ def decode_args(args, width):
     return tuple(out)
 
 
+def worst_inputs(name):
+    """The 64-bit argument rows of `worst/<name>.txt`, if there is one."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worst', name + '.txt')
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.split('#')[0].strip()
+            if line:
+                rows.append(tuple(struct.unpack('<Q', struct.pack('<d', float.fromhex(p)))[0]
+                                  for p in line.split(',')))
+    return rows
+
+
 def make_rows(spec, width):
     global spec_kinds_hint
     spec_kinds_hint = spec.kinds
@@ -1026,6 +1042,10 @@ def make_rows(spec, width):
             add((s,))
     elif spec.specials:
         for args in spec.specials(width):
+            add(args)
+    # the hardest-to-round inputs known (`worst/`, from pick_worst.py)
+    if width == 64:
+        for args in worst_inputs(spec.name):
             add(args)
     # random inputs
     for _ in range(RANDOM_ROWS[width]):

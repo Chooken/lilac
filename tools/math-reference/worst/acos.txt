@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `acos` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `acos.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.cf37d41c69889p-24  # 57
+-0x1.336bdf57f4b42p-17  # 55
+-0x1.43c77c84b20f8p-5  # 55
+-0x1.cb3b399d747f1p-55  # 55
+-0x1.4811e077b0202p-14  # 54
+-0x1.e7da995dfc4e1p-16  # 54
+0x1.0ac3566d3857cp-6  # 54
+0x1.0c953eb1a6263p-26  # 54
+0x1.313faeb270984p-10  # 54
+0x1.c69898cc51702p-52  # 54
+0x1.da29cc6fd3c8fp-10  # 54
+0x1.e34c4c6628b81p-51  # 54
+0x1.e66a5b2767562p-9  # 54
+0x1.fa10184634bfap-23  # 54
+-0x1.398fbcd9cb3ap-23  # 53
+-0x1.4c981717543fcp-11  # 53
+-0x1.774ac4bdb074ep-9  # 53
+-0x1.bccc9c7ce58fap-22  # 53
+-0x1.cb3b399d747edp-55  # 53
+-0x1.f09f561b2315bp-6  # 53
+0x1.0c953e31a6263p-26  # 53
+0x1.321c97e3ee0e9p-3  # 53
+0x1.43062ea6e6085p-7  # 53
+0x1.8d313198a2e02p-53  # 53
+0x1.9351eac5c5f1cp-20  # 53
+0x1.95ddae650262cp-16  # 53
+0x1.990a8c9fa6c56p-18  # 53
+0x1.be56bfb36a47ap-16  # 53
+-0x1.0039676733ae9p-44  # 52
+-0x1.0139676733ae9p-44  # 52
+-0x1.0239676733ae9p-44  # 52
+-0x1.0339676733ae9p-44  # 52
+-0x1.0439676733ae9p-44  # 52
+-0x1.0539676733ae9p-44  # 52
+-0x1.0639676733ae9p-44  # 52
+-0x1.0739676733ae9p-44  # 52
+-0x1.0839676733ae9p-44  # 52
+-0x1.0939676733ae9p-44  # 52
+-0x1.0a39676733ae9p-44  # 52
+-0x1.0b39676733ae9p-44  # 52

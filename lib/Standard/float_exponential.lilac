@@ -256,4 +256,77 @@ private {
         res = Scaled.plain(ln_positive(x) / ln_positive(base))
         return
     }
+    // ---- the fast tier (plain doubles) ---------------------------------------
+    //
+    // `exp_fast` and `ln_fast` compute the result as a pair in plain doubles
+    // with a relative error below 2^-66, from a 128-entry table and a short
+    // polynomial, and the method rounds it when `quick64` (a margin of 2^-63)
+    // says that is sure, which fails for about one argument in a thousand;
+    // those, and every argument outside the fast range, take the kernel.
+
+    /// `e^x` for `-708.4 < x < 709.8` (where the result is normal), else NaN:
+    /// `x = (128 k + j) ln2 / 128 + r` with `|r| <= ln 2 / 256`, and
+    /// `e^x = 2^k 2^(j/128) (1 + r + r^2 P(r))`, the pair before the `2^k`.
+    exp_fast: function (x: Float64) res: Scaled {
+        if not (x > -708.4 and x < 709.8) {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        // adding 1.5 2^52 + 1023 * 128 rounds to the integer `N + 1023 * 128`
+        // in the low bits: `j` and the biased `k`
+        shifted: Float64 = x * EXP_FAST_SCALE + 6755399441186688.0
+        nf: Float64 = shifted - 6755399441186688.0
+        low: @bit64 = @bit_and_64(shifted.to_bits() as @bit64, 0xFFFFFFFF)
+        j: Int32 = (@bit_and_64(low, 0x7F) as Uint64).to_int32_wrapping()
+        k: Int32 = (@bit_shift_right_u_64(low, 0x7) as Uint64).to_int32_wrapping() - 1023
+        // `nf L1` is exact and `x - nf L1` too (Sterbenz), so `r` is exact
+        // but for the rounding of `nf L2` and the rest of `ln 2 / 128` (below 2^-77)
+        r: Dd = Dd.two_sum(x - nf * EXP_FAST_L1, -(nf * EXP_FAST_L2))
+        s: Float64 = r.hi * r.hi * exp_fast_poly(r.hi) + r.lo
+        a: Float64, b: Float64, l: Float64 = exp_table_entry(j)
+        // `rr` is `r.hi` to a multiple of 2^-35 (27 bits), so `a rr` is exact
+        rr: Float64 = (r.hi + 196608.0) - 196608.0
+        p: Float64 = a * rr
+        h: Dd = Dd.fast_two_sum(a + b, p)
+        lo: Float64 = h.lo + (b * rr + ((a + b) * ((r.hi - rr) + s) + (l + l * r.hi)))
+        res = Scaled.new(Dd.fast_two_sum(h.hi, lo), k)
+    }
+
+    /// `ln x` as a pair for a positive normal `x`, else NaN: with `x = m 2^e`
+    /// and the table's `R` and `T` for `m`'s top seven bits,
+    /// `ln x = e ln 2 + T + ln(1 + z)` for the exact `z = m R - 1`.
+    ln_fast: function (x: Float64) res: Scaled {
+        if not x.is_normal() or x.sign_bit() {
+            res = Scaled.exact(Float64.NAN)
+            return
+        }
+        bits: @bit64 = x.to_bits() as @bit64
+        e: Int32 = (@bit_shift_right_u_64(bits, 0x34) as Uint64).to_int32_wrapping() - 1023
+        j: Int32 = (@bit_and_64(@bit_shift_right_u_64(bits, 0x2D), 0x7F) as Uint64).to_int32_wrapping()
+        m: Float64 = Float64.from_bits(@bit_or_64(@bit_and_64(bits, 0xFFFFFFFFFFFFF), 0x3FF0000000000000) as Uint64)
+        r: Float64, t: Dd = ln_table_entry(j)
+        if j >= LN_FAST_SPLIT {
+            e = e + 1
+        }
+        // `m = mh + ml` with `mh` 27 bits, `ml` 26 and `r` 26 bits, so
+        // both products are exact, and `mh r - 1` too (Sterbenz)
+        mh: Float64 = Float64.from_bits(@bit_and_64(m.to_bits() as @bit64, 0xFFFFFFFFFC000000) as Uint64)
+        z: Dd = Dd.two_sum(mh * r - 1.0, (m - mh) * r)
+        zh: Float64 = z.hi
+        zl: Float64 = z.lo
+        // `zh^2` exactly (Dekker's product without its range checks)
+        c: Float64 = 134217729.0 * zh
+        z1: Float64 = c - (c - zh)
+        z2: Float64 = zh - z1
+        qh: Float64 = zh * zh
+        q: Dd = Dd.new(qh, ((z1 * z1 - qh) + 2.0 * z1 * z2) + z2 * z2)
+        ef: Float64 = e as Float64
+        // `ef` times the 42-bit part is exact; `a` is `e ln 2 + T`
+        a: Dd = Dd.two_sum(ef * LN_2_HIGH42, t.hi)
+        a_lo: Float64 = a.lo + (ef * LN_2_LOW42 + t.lo)
+        s1: Dd = Dd.two_sum(a.hi, zh)
+        s2: Dd = Dd.two_sum(s1.hi, -(q.hi * 0.5))
+        tail: Float64 = zl - q.lo * 0.5 - zh * zl + zh * q.hi * ln_fast_poly(zh)
+        res = Scaled.plain(Dd.fast_two_sum(s2.hi, s1.lo + s2.lo + (a_lo + tail)))
+    }
 }

@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `pow` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `pow.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+-0x1.02cp-205,0x1.4p+2  # 999
+-0x1.058p-206,0x1.4p+2  # 999
+-0x1.0acp-205,0x1.4p+2  # 999
+-0x1.0bp-207,0x1.4p+2  # 999
+-0x1.12cp-205,0x1.4p+2  # 999
+-0x1.158p-206,0x1.4p+2  # 999
+-0x1.16p-208,0x1.4p+2  # 999
+-0x1.1acp-205,0x1.4p+2  # 999
+-0x1.22cp-205,0x1.4p+2  # 999
+-0x1.258p-206,0x1.4p+2  # 999
+-0x1.2acp-205,0x1.4p+2  # 999
+-0x1.2bp-207,0x1.4p+2  # 999
+-0x1.2cp-209,0x1.4p+2  # 999
+-0x1.2p+2,0x1.1p+4  # 999
+-0x1.30a8p-223,0x1p+2  # 999
+-0x1.30b8p-16,0x1p+2  # 999
+-0x1.30d8p+11,0x1p+2  # 999
+-0x1.30f8p+12,0x1p+2  # 999
+-0x1.30f8p-255,0x1p+2  # 999
+-0x1.3168p+13,0x1p+2  # 999
+-0x1.3168p-254,0x1p+2  # 999
+-0x1.32cp-205,0x1.4p+2  # 999
+-0x1.358p-206,0x1.4p+2  # 999
+-0x1.36b8p+181,0x1p+2  # 999
+-0x1.37e8p+14,0x1p+2  # 999
+-0x1.37e8p+254,0x1p+2  # 999
+-0x1.3858p-101,0x1p+2  # 999
+-0x1.3978p+15,0x1p+2  # 999
+-0x1.3978p+20,0x1p+2  # 999
+-0x1.3978p+255,0x1p+2  # 999
+-0x1.3978p-176,0x1p+2  # 999
+-0x1.3acp-205,0x1.4p+2  # 999
+-0x1.42cp-205,0x1.4p+2  # 999
+-0x1.458p-206,0x1.4p+2  # 999
+-0x1.48p+7,0x1.4p+3  # 999
+-0x1.4acp-205,0x1.4p+2  # 999
+-0x1.4bp-207,0x1.4p+2  # 999
+-0x1.4p-12,0x1.7p+4  # 999
+-0x1.52cp-205,0x1.4p+2  # 999
+-0x1.558p-206,0x1.4p+2  # 999

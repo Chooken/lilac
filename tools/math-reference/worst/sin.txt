@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `sin` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `sin.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.ec3d6ca365514p+744  # 57
+0x1.2062589c33fc9p+475  # 56
+0x1.223815c4937d2p+550  # 56
+0x1.8a9c1eb645047p+644  # 56
+0x1.b5f880403cd46p+431  # 56
+0x1.0337bdd3258c9p+462  # 55
+0x1.6b435a0a75abp+251  # 55
+0x1.81d257ec0a3p+866  # 55
+0x1.97cbb6f67549bp+389  # 55
+0x1.aca7f1f005483p+58  # 55
+0x1.b04df79527ffbp+102  # 55
+0x1.cef43d9e21db5p+347  # 55
+0x1.f8d4a7e18b951p+280  # 55
+0x1.f8fb52f889672p+442  # 55
+0x1.0266cf8decddap+506  # 54
+0x1.038f3bd61723cp+893  # 54
+0x1.15a92bbb72a7p+483  # 54
+0x1.1a6d233a69c21p+429  # 54
+0x1.39d5e37c3c3efp+794  # 54
+0x1.4967a7fffe30ap+383  # 54
+0x1.579631cec6c43p+519  # 54
+0x1.57c7372fc36d2p+713  # 54
+0x1.5ef8f4c7873f3p+448  # 54
+0x1.60f7ee2767d92p+613  # 54
+0x1.7d1086d032052p+355  # 54
+0x1.84f0e0f5d056ep+976  # 54
+0x1.896af8d68ce08p+498  # 54
+0x1.95137bd423a42p+300  # 54
+0x1.95ce82592207ap+964  # 54
+0x1.9901b5269aecdp+280  # 54
+0x1.b0b436cc480eap+150  # 54
+0x1.e44178c4d28f5p+135  # 54
+0x1.e93fbafb93da5p+718  # 54
+0x1.eac7188c37319p+753  # 54
+0x1.0b9d211946eafp+644  # 53
+0x1.0d8b29d5179acp+869  # 53
+0x1.1132ae010dbdfp+810  # 53
+0x1.208e2e489027ep+530  # 53
+0x1.219299a058e8ep+995  # 53
+0x1.27e8eed0c0c77p+1014  # 53

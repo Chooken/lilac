@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `log10` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `log10.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.e12d66744ff81p+429  # 70
+0x1.ed8c87c3bf5cfp-49  # 64
+0x1.24b2c846f6cb4p+272  # 63
+0x1.365116686b078p-765  # 63
+0x1.6ddf7a58b47e1p+275  # 63
+0x1.758976044bfd1p+157  # 63
+0x1.83e55c0285c96p-762  # 63
+0x1.c295d530e7d8fp+184  # 63
+0x1.b2981b787b622p+580  # 62
+0x1.b5605895c33bcp-249  # 62
+0x1.f1db8c56d5e76p+342  # 62
+0x1.46f55e411643ep+72  # 61
+0x1.4f11ef1eb8b3fp+816  # 61
+0x1.60e26f5a804abp+568  # 61
+0x1.1b0d7780147d8p+609  # 60
+0x1.1c2021928347fp-861  # 60
+0x1.2039ace2c45bp+315  # 60
+0x1.235004ca2d5b6p+30  # 60
+0x1.2f4058e763e2fp-525  # 60
+0x1.3ae2461fe7afep+168  # 60
+0x1.3ee0d79e07ecap+237  # 60
+0x1.4b8635c0572b8p-635  # 60
+0x1.4cb0bdacc8d82p-627  # 60
+0x1.553d72068f37cp+310  # 60
+0x1.61d0d560199cep+612  # 60
+0x1.6848181b7571cp+318  # 60
+0x1.9e67c3306cf66p-632  # 60
+0x1.aa8cce883305bp+313  # 60
+0x1.b6c79ce2e3107p+115  # 60
+0x1.c25a1e2252ce3p+321  # 60
+0x1.c865c511f259ap-352  # 60
+0x1.cd29149e06f8p+311  # 60
+0x1.dde70b954e85fp-356  # 60
+0x1.def83efbd4256p+813  # 60
+0x1.e726af81d345ap+332  # 60
+0x1.006d26006f72dp-572  # 59
+0x1.038a8ec6034b4p-781  # 59
+0x1.05509bd336fd5p-111  # 59
+0x1.0a24f3ca59a72p-246  # 59
+0x1.1896debec6fa7p-85  # 59

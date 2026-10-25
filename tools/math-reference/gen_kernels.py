@@ -46,6 +46,17 @@ def split(v, parts=2):
     return out
 
 
+def bits_of(v):
+    """The significant bits of the double v."""
+    f = Fraction(v)
+    if f == 0:
+        return 0
+    n = f.numerator
+    while n % 2 == 0:
+        n //= 2
+    return abs(n).bit_length()
+
+
 def dd(v):
     hi, lo = split(v, 2)
     return f"Dd.new({lit(hi)}, {lit(lo)})"
@@ -180,6 +191,17 @@ p1, p2, p3 = split(PI / 2, 3)
 fconst('PI_2_PART_1', p1, "`π / 2` as three doubles: the first part, ...")
 fconst('PI_2_PART_2', p2, "... the second ...")
 fconst('PI_2_PART_3', p3, "... and the third.")
+# Cody-Waite: pi/2 in four 32-bit parts (so n times each is exact for n < 2^21)
+# and a fifth double.
+rest = PI / 2
+for k in range(1, 5):
+    scale = 2 ** (31 + 32 * (k - 1))
+    part = Fraction(int(rest * scale), scale)
+    assert bits_of(part) <= 32
+    fconst(f'PI_2_CW{k}', part, ("`π / 2` in four 32-bit parts and a double, so that `n` times each part is exact for `n < 2^21`: part 1, ..." if k == 1 else f"... part {k} ..."))
+    rest -= part
+fconst('PI_2_CW5', rest, "... and the rest.")
+fconst('TWO_OVER_PI_DOUBLE', 2 / PI, "`2 / π` as one double.")
 
 # ---- exp: e^r - 1 = r * sum r^i / (i+1)! for |r| <= ln2/2 ---------------------
 zmax = 0.3466
@@ -232,6 +254,119 @@ emit("    }")
 emit()
 
 
+def table(type_name, global_name, doc, rows, fields):
+    """Emits a table of `Float64` rows as an object global, row-major."""
+    emit(f"    /// {doc}")
+    emit(f"    {type_name}: object {{")
+    for i in range(len(rows)):
+        for f in fields:
+            emit(f"        {f}{i}: Float64")
+    emit("    }")
+    emit()
+    emit(f"    {global_name}: {type_name} = {type_name} {{")
+    for i, row in enumerate(rows):
+        cells = ", ".join(f"{f}{i} = {lit(v)}" for f, v in zip(fields, row))
+        emit(f"        {cells}" + ("," if i + 1 < len(rows) else ""))
+    emit("    }")
+    emit()
+
+
+# ---- the fast tier (plain doubles): exp by 2^(j/128), ln by 1/c --------------------
+# exp x = 2^k 2^(j/128) e^r, r = x - N ln2/128 with N = 128 k + j, |N| < 2^18:
+# ln2/128 is a 35-bit first part (so N times it is exact) and a second part.
+L2_128 = L2 / 128
+EXP_L1 = Fraction(round(L2_128 * 2 ** 42), 2 ** 42)
+assert bits_of(EXP_L1) <= 35
+fconst('EXP_FAST_SCALE', 128 / L2, "`128 / ln 2`.")
+fconst('EXP_FAST_L1', EXP_L1, "`ln 2 / 128` in 35 bits, so that `N` times it is exact for `|N| < 2^18` ...")
+fconst('EXP_FAST_L2', L2_128 - EXP_L1, "... and the rest of it.")
+# Each 2^(j/128) = h + l is stored as the 26-bit head of h, the rest of h and l,
+# so that the head times a 27-bit number is exact.
+rows = []
+for j in range(128):
+    v = Fraction(R.exp2_(Fraction(j, 128)))
+    h, l = split(v, 2)
+    head = Fraction(math.floor(Fraction(h) * 2 ** 25), 2 ** 25)
+    assert bits_of(head) <= 26
+    rows.append((float(head), float(Fraction(h) - head), l))
+table('ExpTable', 'exp_table', "`2^(j / 128)` for `j` = 0 to 127: the high double's 26-bit head and the rest of it, and the low double.", rows, ['a', 'b', 'l'])
+emit("    /// Entry `j` of the exp table: `2^(j / 128) = a + b + l`, with `a` 26 bits and `a + b` a double.")
+emit("    exp_table_entry: function (j: Int32) (a: Float64, b: Float64, l: Float64) {")
+emit("        view: ref @array(@fbit64, 384) = (ref exp_table) as ref unknown as ref @array(@fbit64, 384)")
+emit("        base: @bit_native = (j * 3).to_uint_wrapping() as @bit_native")
+emit("        raw_a: @fbit64 = @array_at(view, base)")
+emit("        raw_b: @fbit64 = @array_at(view, @i_add_native(base, 0x1))")
+emit("        raw_l: @fbit64 = @array_at(view, @i_add_native(base, 0x2))")
+emit("        a = raw_a as Float64")
+emit("        b = raw_b as Float64")
+emit("        l = raw_l as Float64")
+emit("    }")
+emit()
+# (e^r - 1 - r) / r^2 = 1/2 + r/6 + ... + r^4/720 for |r| <= ln2/256: the next
+# term is below 2^-72 relative.
+emit("    /// `(e^r - 1 - r) / r^2` for `|r| <= ln 2 / 256` in plain `Float64` (to `r^4 / 720`).")
+emit("    exp_fast_poly: function (r: Float64) Float64 =>")
+emit("        " + "(" * 4 + lit(float(Fraction(1, factorial(6)))) + "".join(
+    f" * r + {lit(float(Fraction(1, factorial(i + 2))))})" for i in range(3, -1, -1)))
+emit()
+
+# ln x = e ln2 + ln(m): the top 7 bits of m in [1, 2) pick j; R_j is near 1/m
+# (halved for j >= 53, with e + 1, so that m R_j is near 1 on [sqrt(1/2), sqrt 2)),
+# in 26 bits, so that m R_j is exact as two products of 26-bit halves of m, z =
+# m R_j - 1 is exact as a pair and |z| <= 2^-7, and T_j = -ln(R_j) (- ln 2).
+LN_SPLIT = 53
+
+
+def round26(v):
+    e = 0
+    while v * 2 ** e < 2 ** 25:
+        e += 1
+    return float(Fraction(round(v * 2 ** e), 2 ** e))
+
+
+rows = []
+for j in range(128):
+    c = 1 + Fraction(2 * j + 1, 256)
+    if j < LN_SPLIT:
+        r = 1.0 if j == 0 else round26(1 / c)
+        t = -R.ln_(Fraction(r)) if r != 1.0 else 0
+    else:
+        r = 1.0 if j == 127 else round26(2 / c)
+        t = -R.ln_(Fraction(r)) if r != 1.0 else 0
+        r = r / 2
+    th, tl = split(Fraction(t), 2)
+    rows.append((r, th, tl))
+for r, _, _ in rows:
+    assert bits_of(r) <= 26
+emit(f"    LN_FAST_SPLIT: Int32 => {LN_SPLIT}")
+emit()
+ln2h = Fraction(round(L2 * 2 ** 42), 2 ** 42)
+assert bits_of(ln2h) <= 42
+fconst('LN_2_HIGH42', ln2h, "`ln 2` in 42 bits, so that an exponent times it is exact ...")
+fconst('LN_2_LOW42', L2 - ln2h, "... and the rest of it.")
+table('LnTable', 'ln_table',
+      f"For `m` in `[1 + j/128, 1 + (j+1)/128)`: `R` (26 bits) near `1 / m` (from `j` = {LN_SPLIT}, near `1 / (2 m)`), and `-ln R` (from {LN_SPLIT}, `-ln (2 R)`) as a pair.",
+      rows, ['r', 'h', 'l'])
+emit("    /// Entry `j` of the ln table: `R`, then `-ln R` (or `-ln 2R`) as a `Dd`.")
+emit("    ln_table_entry: function (j: Int32) (r: Float64, t: Dd) {")
+emit("        view: ref @array(@fbit64, 384) = (ref ln_table) as ref unknown as ref @array(@fbit64, 384)")
+emit("        base: @bit_native = (j * 3).to_uint_wrapping() as @bit_native")
+emit("        raw_r: @fbit64 = @array_at(view, base)")
+emit("        raw_h: @fbit64 = @array_at(view, @i_add_native(base, 0x1))")
+emit("        raw_l: @fbit64 = @array_at(view, @i_add_native(base, 0x2))")
+emit("        r = raw_r as Float64")
+emit("        t = Dd.new(raw_h as Float64, raw_l as Float64)")
+emit("    }")
+emit()
+# ln(1 + z) = z - z^2/2 + z^3 P(z), P = 1/3 - z/4 + ... - z^7/10: the next term
+# is below 2^-73 relative for |z| <= 2^-7.
+emit("    /// `(ln(1 + z) - z + z^2 / 2) / z^3` for `|z| <= 2^-7` in plain `Float64` (to `z^7 / 10`).")
+emit("    ln_fast_poly: function (z: Float64) Float64 =>")
+emit("        " + "(" * 7 + lit(float(Fraction(-1, 10))) + "".join(
+    f" * z + {lit(float(Fraction((-1) ** i, i + 3)))})" for i in range(6, -1, -1)))
+emit()
+
+
 # ---- sin and cos: sin t = t + t z Qs(z), cos t = 1 + z Qc(z), z = t^2 --------------
 zmax_trig = 0.6170
 M = degree_for(lambda m: Fraction(1, factorial(2 * m + 3)), zmax_trig, 1)
@@ -265,6 +400,47 @@ emit(f"        view: ref @array(@bit64, {WORDS}) = (ref two_over_pi) as ref unkn
 emit("        res = @array_at(view, index)")
 emit("    }")
 emit()
+
+
+# ---- 384-bit constants for the correctly rounded fallback (float_mp.lilac) ----
+MP_LIMBS = 6
+mp_consts = [('mp_ln_2', L2, "`ln 2`"), ('mp_ln_10', L10, "`ln 10`"),
+             ('mp_pi_2', PI / 2, "`π / 2`"), ('mp_pi', PI, "`π`")]
+mp_words = []
+mp_exps = []
+for name, v, doc in mp_consts:
+    e = 0
+    while v >= 1:
+        v /= 2
+        e += 1
+    while v < Fraction(1, 2):
+        v *= 2
+        e -= 1
+    big = int(v * (1 << (64 * MP_LIMBS)))  # truncated: below 2^-384 relative
+    mp_words += [(big >> (64 * (MP_LIMBS - 1 - i))) & ((1 << 64) - 1) for i in range(MP_LIMBS)]
+    mp_exps.append(e)
+n = len(mp_words)
+emit(f"    /// The limbs of the `Mp` constants, {MP_LIMBS} to a constant, most significant first.")
+emit("    MpWords: object {")
+for i in range(n):
+    emit(f"        w{i}: @bit64")
+emit("    }")
+emit()
+emit("    mp_words: MpWords = MpWords {")
+for i, w in enumerate(mp_words):
+    emit(f"        w{i} = 0x{w:016X}" + ("," if i + 1 < n else ""))
+emit("    }")
+emit()
+emit("    /// Word `index` (0-based) of the `Mp` constants.")
+emit("    mp_word: function (index: Int) res: @bit64 {")
+emit(f"        view: ref @array(@bit64, {n}) = (ref mp_words) as ref unknown as ref @array(@bit64, {n})")
+emit("        res = @array_at(view, index as @bit_native)")
+emit("    }")
+emit()
+for k, (name, v, doc) in enumerate(mp_consts):
+    emit(f"    /// {doc} to 384 bits (truncated).")
+    emit(f"    {name}: function () Mp => mp_constant({k * MP_LIMBS}, {mp_exps[k]})")
+    emit()
 
 
 # ---- atan: atan(w) = w + w z R(z), z = w^2, |w| <= 1/128 ----------------------------

@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `atan` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `atan.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.6298b5896ed3cp+1  # 65
+0x1.22e8d75e2bc7fp-11  # 61
+0x1.ccda26ad0cd1cp+47  # 59
+0x1.3ca8628823bap+27  # 58
+0x1.3e450e3933b22p+7  # 58
+0x1.440a26da37ab5p+34  # 58
+0x1.7c1b13a563ffbp+1  # 58
+0x1.a90614216a467p+33  # 58
+0x1.0ffdecae7b75cp+9  # 57
+0x1.49ff16b9c1e3ep+52  # 57
+0x1.853ae4161433dp+29  # 57
+0x1.962e0f25fdccdp+35  # 57
+0x1.0f6e5d9960397p-2  # 56
+0x1.3c03e95426c52p+12  # 56
+0x1.4ea898d0fc7c8p-12  # 56
+0x1.51434b0341e44p+33  # 56
+0x1.71a8c77cfe778p+12  # 56
+0x1.76a48ca7ab36bp+6  # 56
+0x1.7832b157bce0fp+47  # 56
+0x1.901a9e8f260d1p+25  # 56
+0x1.d5e04a3af22d3p+2  # 56
+0x1.0a402fcc79299p-25  # 55
+0x1.0dc89a3b5501p-7  # 55
+0x1.20538781986c3p+51  # 55
+0x1.24bc9e13c9b57p+4  # 55
+0x1.2b393656b3a8p+6  # 55
+0x1.2b6521d6d60e1p-22  # 55
+0x1.2e972295c64e7p-3  # 55
+0x1.3372444b437aap-17  # 55
+0x1.35e5a3a156341p+8  # 55
+0x1.3b0ad619bf473p+33  # 55
+0x1.3bebec4b14d98p-21  # 55
+0x1.3fa8c2ada63d1p-18  # 55
+0x1.46f7b61809a1cp+37  # 55
+0x1.49cf89a242e37p+7  # 55
+0x1.5df2931859a97p-12  # 55
+0x1.62a086a56924ap-3  # 55
+0x1.79c2767d98151p+40  # 55
+0x1.8422bb2b22fa6p-1  # 55
+0x1.a7c36d1e52c37p+24  # 55

@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `exp2` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `exp2.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+-0x1.0ccp+10  # 999
+0x1.e4596526bf94dp-10  # 61
+0x1.568e8cec4f66cp-29  # 59
+0x1.8fea81fb7512ep-6  # 59
+0x1.e76049073067fp-10  # 59
+-0x1.87f65352ea0d5p-42  # 58
+-0x1.a306a55b8606ap-29  # 58
+-0x1.bc7a709d1a2adp-36  # 58
+0x1.1380388fd8942p-33  # 58
+0x1.93998f2295764p-21  # 58
+-0x1.06922ce606443p-25  # 57
+-0x1.14ff58be0a23fp-52  # 57
+-0x1.3ec814d260d02p-10  # 57
+-0x1.526ce079b05a5p-5  # 57
+-0x1.8177265c6649bp-10  # 57
+-0x1.a4e9ef417b2eep-31  # 57
+0x1.9aa887abfb167p-22  # 57
+-0x1.02c5559799d4p+10  # 56
+-0x1.0a4529bfcfbedp-18  # 56
+-0x1.35dd739305031p-6  # 56
+-0x1.4eb48b3af6ebbp-49  # 56
+-0x1.71547652b82fep-54  # 56
+-0x1.ba84c6ebfb038p-9  # 56
+-0x1.cef4c143b5adfp-1  # 56
+-0x1.d6518ead568f5p-47  # 56
+-0x1.e242801b45d0dp-2  # 56
+-0x1.ec1c7584af30ap-38  # 56
+-0x1.fd0826fc6f09p-27  # 56
+0x1.359c02f7a36c1p-20  # 56
+0x1.6c4175ea0c6e1p-3  # 56
+0x1.71547652b82fep-53  # 56
+0x1.755aa6fa428cdp-9  # 56
+0x1.82c7120ec258ap-15  # 56
+0x1.8859f5e252908p-4  # 56
+0x1.8d040898b73f5p-6  # 56
+0x1.d7715f34137a4p-28  # 56
+0x1.e7a18439372a3p-46  # 56
+0x1.ed937b32a891cp-8  # 56
+0x1.ff3d3c8c84037p-33  # 56
+-0x1.39d54bf148022p-18  # 55

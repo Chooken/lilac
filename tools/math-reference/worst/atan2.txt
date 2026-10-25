@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `atan2` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `atan2.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+-0x1p-1022,0x1p+53  # 2153
+0x1p-1022,0x1p+53  # 2153
+-0x1.272d1a7f62303p-238,0x1p+785  # 1996
+0x1.272d1a7f62303p-238,0x1p+785  # 1996
+-0x1.c567c24bd3c05p-570,0x1p+453  # 1995
+0x1.c567c24bd3c05p-570,0x1p+453  # 1995
+-0x1.fffffffffffffp-356, 0x1p+667  # 1994
+-0x1.fffffffffffffp-356,0x1p+667  # 1994
+-0x1.fffffffffffffp-542, 0x1p+481  # 1994
+-0x1.fffffffffffffp-542,0x1p+481  # 1994
+-0x1.fffffffffffffp-630, 0x1p+393  # 1994
+-0x1.fffffffffffffp-630,0x1p+393  # 1994
+-0x1.fffffffffffffp-664, 0x1p+359  # 1994
+-0x1.fffffffffffffp-664,0x1p+359  # 1994
+-0x1.fffffffffffffp-962, 0x1p+61  # 1994
+-0x1.fffffffffffffp-962,0x1p+61  # 1994
+0x1.fffffffffffffp-356, 0x1p+667  # 1994
+0x1.fffffffffffffp-356,0x1p+667  # 1994
+0x1.fffffffffffffp-542, 0x1p+481  # 1994
+0x1.fffffffffffffp-542,0x1p+481  # 1994
+0x1.fffffffffffffp-630, 0x1p+393  # 1994
+0x1.fffffffffffffp-630,0x1p+393  # 1994
+0x1.fffffffffffffp-664, 0x1p+359  # 1994
+0x1.fffffffffffffp-664,0x1p+359  # 1994
+0x1.fffffffffffffp-962, 0x1p+61  # 1994
+0x1.fffffffffffffp-962,0x1p+61  # 1994
+0x1.07a11ffd843abp+53,0x1.f9982dddc9cccp+52  # 102
+0x7.f7f847d86467p+72,0x1.53feb7b3de47bp+52  # 99
+0x1.2981ce8381491p+52,0x1.4efd17defb8d1p+52  # 98
+0x3.18918fd3eb376p+68,0x2.98eeebee4151ap+52  # 98
+0x4.b4f6692e6bbe8p+68,0xa.29a219008ee2p+48  # 98
+0x1.ea018dddc111dp+71,0x1.88f9e3de5d6d3p+53  # 97
+0x1.5047c4426721bp+76,0x1.9ada1a85962dfp+52  # 96
+0x1.0125b1aa363f3p+53,0x1.793c81fd18e3ep+52  # 95
+0x1.4e015ccaa709ap+52,0x1.cafc4eba977aep+51  # 95
+0x1.67bb337d216b9p+53,0x1.f8d20e4ccf641p+52  # 95
+0x1.af7e4cc85653dp+76,0x1.c4c43bce2aaddp+52  # 95
+0x1.c645cf90f1da1p+83,0x1.2fad1fea7a20ap+53  # 95
+0x1.c6fb9d76e4879p+52,0x1.568092de15e5fp+53  # 95
+0x2.9b6419a51ea6p+88,0xc.718cc1bad579p+48  # 95

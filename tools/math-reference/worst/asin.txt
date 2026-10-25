@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `asin` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `asin.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.f317ce4e1019dp-7  # 55
+0x1.af2a09dd5382fp-11  # 54
+0x1.ff0f3022b2e9dp-16  # 54
+0x1.2ad810f9775dcp-8  # 53
+0x1.3d5b079da6824p-13  # 53
+0x1.6533f127faaa4p-7  # 53
+0x1.71b8724f3322ap-9  # 53
+0x1.a687c9297897fp-10  # 53
+0x1.ba7275b7bfb15p-13  # 53
+0x1.d7c6f0e805b3cp-4  # 53
+0x1.01f6cc9d09ac7p-20  # 52
+0x1.1b0007789b714p-10  # 52
+0x1.4d08eb7c2e55ap-2  # 52
+0x1.699ce7fe25c86p-8  # 52
+0x1.7137449123ef4p-26  # 52
+0x1.7c1ecfd5a0023p-15  # 52
+0x1.7e5f75f042e9p-5  # 52
+0x1.8db9cb7511e9bp-25  # 52
+0x1.a21a8ed12e7a8p-21  # 52
+0x1.a9da968621413p-8  # 52
+0x1.cc492d38ce8ccp-24  # 52
+0x1.cc984ffcda8afp-22  # 52
+0x1.e29462bc78c4fp-2  # 52
+0x1.e3cf476542bccp-25  # 52
+0x1.f678f672a39edp-16  # 52
+0x1.04c8a7dc82941p-13  # 51
+0x1.0e1136a94a8d5p-10  # 51
+0x1.13583bd20b465p-12  # 51
+0x1.1fff22830ca5p-13  # 51
+0x1.3364fae8ee83dp-14  # 51
+0x1.3ad9d6330b7a7p-21  # 51
+0x1.4d2269132e4p-12  # 51
+0x1.59e982b58c757p-7  # 51
+0x1.5c77b71e30f9ap-4  # 51
+0x1.5df14b010af9bp-2  # 51
+0x1.66605beee4b37p-4  # 51
+0x1.6ad83a18b669ap-6  # 51
+0x1.6bb5f73667d76p-2  # 51
+0x1.6f4864bc2125ap-23  # 51
+0x1.6fb9051f39402p-11  # 51

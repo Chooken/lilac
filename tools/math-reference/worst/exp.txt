@@ -1,0 +1,65 @@
+# The hardest-to-round binary64 inputs of `exp` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `exp.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.62e42fefa39efp+9
+0x1.62e42fefa39fp+9
+-0x1.74910d52d3052p+9
+-0x1.74910d52d3051p+9
+-0x1.74910d52d305p+9
+-0x1.74385446d71c3p+9
+-0x1.74385446d71c4p+9
+0x1.2c1e030b5decdp+9  # 55
+0x1.00091a4a0dae5p+2  # 54
+0x1.5a75293a5dcdap-6  # 54
+0x1.c72855f9ad7f3p-30  # 54
+-0x1.40a990279c2cp-6  # 53
+-0x1.8ceabd04cece2p-30  # 53
+0x1.394be51542d1dp+5  # 53
+0x1.43ca246f1b203p-15  # 53
+0x1.5fffffffffffcp-50  # 53
+0x1.69fffffffffcp-46  # 53
+0x1.7de793fdc644ep-31  # 53
+0x1.c517f7c0d6da3p-11  # 53
+-0x1.5c54d069f52a5p-20  # 52
+-0x1.75b3679061124p-25  # 52
+-0x1.ccc732e12fae7p-18  # 52
+0x1.0000000000002p-53  # 52
+0x1.1d237c4e5141bp-11  # 52
+0x1.3ea2d4ff0b26ap+6  # 52
+0x1.4d433aa45b17p-18  # 52
+0x1.4f6c9bbf79eb2p+9  # 52
+0x1.55a484f8e0413p-29  # 52
+0x1.7c41be26a6979p-8  # 52
+0x1.ab37eb9c2cf79p-7  # 52
+0x1.b43b215867ebdp+5  # 52
+0x1.bfffffffffffcp-51  # 52
+0x1.ff3fffffffc03p-43  # 52
+0x1.ffe7fffffe003p-40  # 52
+-0x1.0000000000008p-54  # 51
+-0x1.1256706528f9cp-20  # 51
+-0x1.1800000000005p-49  # 51
+-0x1.2a88c244cf668p-6  # 51
+-0x1.374a889f50c5bp-26  # 51
+-0x1.3894600017daap-35  # 51
+-0x1.4000000000002p-52  # 51
+-0x1.464d81f96496dp-12  # 51
+-0x1.49de723a4523ap-13  # 51
+-0x1.6f4100883b6dcp-29  # 51
+-0x1.797bf9baace92p-11  # 51
+-0x1.7fffffffffffdp-53  # 51
+-0x1.b5157168401e3p-19  # 51

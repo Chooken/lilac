@@ -1,0 +1,463 @@
+// The elementary functions in `Mp` (`float_mp.lilac`): the slow path a
+// method takes when its double-double kernel's result is too close to a
+// rounding boundary to round (`Scaled.sure64`). Each `*_accurate` function
+// takes the argument as a `Float64` (the narrower types widen it, exactly)
+// and returns the value to about 2^-360 relative; it is called only for
+// finite arguments whose result is finite and nonzero, so it needs no
+// special values. Accuracy, not speed, decides each method here.
+
+private {
+    /// Stops a series once a term is this many bits below the sum.
+    SERIES_BITS: Int => 400
+
+    /// Whether `term` no longer changes `sum`.
+    negligible: function (term: ref Mp, sum: ref Mp) Bool =>
+        mp_is_zero(term) or term.exponent < sum.exponent - SERIES_BITS
+
+    /// `e^t - 1` for `|t| < 1`: the Taylor series at `t 2^-10`, then
+    /// `(1 + e)^2 - 1 = 2 e + e^2` ten times.
+    mp_exp_m1_small: function (t: Mp) e: Mp {
+        u: Mp = mp_scale(t, -10)
+        e = u
+        if mp_is_zero(ref e) {
+            return
+        }
+        term: Mp = u
+        n: @bit64 = 0x2
+        loop {
+            term = mp_div_small(mp_mul(term, u), n)
+            if negligible(ref term, ref e) {
+                break
+            }
+            e = mp_add(e, term)
+            n = @i_add_64(n, 0x1)
+        }
+        i: Int = 0
+        loop {
+            if i >= 10 {
+                break
+            }
+            e = mp_add(mp_scale(e, 1), mp_sqr(e))
+            i = i + 1
+        }
+    }
+
+    /// `e^y` for `|y| < 2^16`: `y = k ln 2 + r` with `|r| <= ln 2 / 2`.
+    mp_exp: function (y: Mp) r: Mp {
+        k: Int = (mp_approx(y) * 1.4426950408889634).round_even().to_int_truncated()
+        t: Mp = mp_sub(y, mp_mul(mp_of_int(k), mp_ln_2()))
+        r = mp_scale(mp_add(mp_one(), mp_exp_m1_small(t)), k)
+    }
+
+    /// `ln m` for `m` near 1: `2 atanh(s)` with `s = (m - 1) / (m + 1)`.
+    mp_ln_near_one: function (m: Mp) l: Mp {
+        one: Mp = mp_one()
+        s: Mp = mp_div(mp_sub(m, one), mp_add(m, one))
+        l = mp_atanh_series(s)
+        l = mp_scale(l, 1)
+    }
+
+    /// `atanh(s) = s + s^3 / 3 + s^5 / 5 + ...` for `|s| < 1/5`.
+    mp_atanh_series: function (s: Mp) sum: Mp {
+        sum = s
+        if mp_is_zero(ref sum) {
+            return
+        }
+        s2: Mp = mp_sqr(s)
+        power: Mp = s
+        n: @bit64 = 0x3
+        loop {
+            power = mp_mul(power, s2)
+            term: Mp = mp_div_small(power, n)
+            if negligible(ref term, ref sum) {
+                break
+            }
+            sum = mp_add(sum, term)
+            n = @i_add_64(n, 0x2)
+        }
+    }
+
+    /// `ln a` for `a > 0`: `a = 2^e m` with `m` in `[sqrt(1/2), sqrt(2))`.
+    mp_ln: function (a: Mp) l: Mp {
+        e: Int = a.exponent
+        m: Mp = a
+        m.exponent = 0
+        // 0.70710678 as the top limb: below it, use 2m and e - 1.
+        if @i_less_than_u_64(mp_limb(ref m, 0), 0xB504F333F9DE6484) {
+            m.exponent = 1
+            e = e - 1
+        }
+        l = mp_ln_near_one(m)
+        if e != 0 as Int {
+            l = mp_add(mp_mul(mp_of_int(e), mp_ln_2()), l)
+        }
+    }
+
+    /// `ln(1 + u)` for `u > -1`, accurate for small `u`.
+    mp_ln_1p: function (u: Mp) l: Mp {
+        if u.exponent < (-1 as Int) {
+            // |u| < 1/4: 2 atanh(u / (2 + u)).
+            s: Mp = mp_div(u, mp_add(mp_of_int(2), u))
+            l = mp_scale(mp_atanh_series(s), 1)
+            return
+        }
+        l = mp_ln(mp_add(mp_one(), u))
+    }
+
+    exp_accurate: function (x: Float64) Mp => mp_exp(mp_of_float(x))
+
+    exp2_accurate: function (x: Float64) Mp => mp_exp(mp_mul(mp_of_float(x), mp_ln_2()))
+
+    exp10_accurate: function (x: Float64) Mp => mp_exp(mp_mul(mp_of_float(x), mp_ln_10()))
+
+    exp_m1_accurate: function (x: Float64) r: Mp {
+        y: Mp = mp_of_float(x)
+        if x.abs() < 0.5 {
+            r = mp_exp_m1_small(y)
+        } else {
+            r = mp_sub(mp_exp(y), mp_one())
+        }
+    }
+
+    ln_accurate: function (x: Float64) Mp => mp_ln(mp_of_float(x))
+
+    log2_accurate: function (x: Float64) Mp => mp_div(mp_ln(mp_of_float(x)), mp_ln_2())
+
+    log10_accurate: function (x: Float64) Mp => mp_div(mp_ln(mp_of_float(x)), mp_ln_10())
+
+    ln_1p_accurate: function (x: Float64) Mp => mp_ln_1p(mp_of_float(x))
+
+    log_base_accurate: function (x: Float64, base: Float64) Mp =>
+        mp_div(mp_ln(mp_of_float(x)), mp_ln(mp_of_float(base)))
+
+    // ---- trigonometry ----------------------------------------------------------
+
+    /// An argument as a quadrant `n` (0 to 3) and an angle `|t| <= pi / 4`
+    /// with `x = n pi / 2 + t` modulo `2 pi`.
+    MpAngle: object {
+        quadrant: Int
+        angle: Mp
+    }
+
+    /// `|x|` reduced by Payne-Hanek: `|x| = M 2^E` times nine words of
+    /// `2 / pi` from the first one that can matter (the words before give
+    /// multiples of 4), which leaves at least 575 bits of fraction.
+    mp_reduce: function (x: Float64) res: MpAngle {
+        a: Float64 = x.abs()
+        if a < 0.7853981633974483 {
+            res = MpAngle { quadrant = 0, angle = mp_of_float(a) }
+            return
+        }
+        bits: @bit64 = a.to_bits() as @bit64
+        m: @bit64 = @bit_or_64(@bit_and_64(bits, 0xFFFFFFFFFFFFF), 0x10000000000000)
+        big_e: Int = int_of(@bit_shift_right_u_64(bits, 0x34)) - 1075
+        s: Int = 0
+        if big_e >= 2 {
+            s = (big_e - 2) / 64
+        }
+        w: Wide = wide_zero()
+        i: Int = 0
+        loop {
+            if i >= 9 {
+                break
+            }
+            word: @bit64 = two_over_pi_word((s + i) as @bit_native)
+            wide_add_at(ref w, i + 1, @i_mul_64(m, word))
+            wide_add_at(ref w, i, @i_multiply_high_u_64(m, word))
+            i = i + 1
+        }
+        // `w` (640 bits) has `64 (s + 9) - E` fraction bits: bring the two
+        // integer bits above them to the top.
+        wide_shift_left(ref w, 62 + big_e - 64 * s)
+        quadrant: Int = int_of(@bit_shift_right_u_64(wide_get(ref w, 0), 0x3E))
+        wide_shift_left(ref w, 2)
+        negative: Bool = @bit_and_64(wide_get(ref w, 0), 0x8000000000000000) != 0x0
+        if negative {
+            // f - 1 = -(1 - f): the two's complement of the fraction.
+            quadrant = quadrant + 1
+            j: Int = 0
+            loop {
+                if j >= WIDE_LIMBS {
+                    break
+                }
+                wide_set(ref w, j, @bit_not_64(wide_get(ref w, j)))
+                j = j + 1
+            }
+            wide_add_at(ref w, WIDE_LIMBS - 1, 0x1)
+        }
+        f: Mp = mp_from_wide(ref w, 0, negative)
+        res = MpAngle { quadrant = quadrant - (quadrant / 4) * 4, angle = mp_mul(f, mp_pi_2()) }
+    }
+
+    /// `x pi` reduced exactly: `|x| = n / 2 + u` with `|u| <= 1/4`.
+    mp_reduce_pi: function (x: Float64) res: MpAngle {
+        a: Float64 = x.abs()
+        t: Float64 = a % 2.0
+        q: Float64 = (t * 2.0).floor()
+        u: Float64 = t - q * 0.5
+        if u > 0.25 {
+            q = q + 1.0
+            u = u - 0.5
+        }
+        n: Int = q.to_int_truncated()
+        res = MpAngle { quadrant = n - (n / 4) * 4, angle = mp_mul(mp_of_float(u), mp_pi()) }
+    }
+
+    /// `sin t` for `|t| <= pi / 4`.
+    mp_sin_series: function (t: Mp) sum: Mp {
+        sum = t
+        if mp_is_zero(ref sum) {
+            return
+        }
+        t2: Mp = mp_neg(mp_sqr(t))
+        term: Mp = t
+        n: @bit64 = 0x2
+        loop {
+            term = mp_div_small(mp_mul(term, t2), @i_mul_64(n, @i_add_64(n, 0x1)))
+            if negligible(ref term, ref sum) {
+                break
+            }
+            sum = mp_add(sum, term)
+            n = @i_add_64(n, 0x2)
+        }
+    }
+
+    /// `cos t` for `|t| <= pi / 4`.
+    mp_cos_series: function (t: Mp) sum: Mp {
+        sum = mp_one()
+        x: Mp = t
+        if mp_is_zero(ref x) {
+            return
+        }
+        t2: Mp = mp_neg(mp_sqr(t))
+        term: Mp = sum
+        n: @bit64 = 0x1
+        loop {
+            term = mp_div_small(mp_mul(term, t2), @i_mul_64(n, @i_add_64(n, 0x1)))
+            if negligible(ref term, ref sum) {
+                break
+            }
+            sum = mp_add(sum, term)
+            n = @i_add_64(n, 0x2)
+        }
+    }
+
+    /// The sine of `n pi / 2 + t`.
+    mp_sin_of: function (r: MpAngle) s: Mp {
+        q: Int = r.quadrant
+        if q == 0 as Int or q == 2 as Int {
+            s = mp_sin_series(r.angle)
+        } else {
+            s = mp_cos_series(r.angle)
+        }
+        if q >= 2 {
+            s = mp_neg(s)
+        }
+    }
+
+    /// The cosine of `n pi / 2 + t`.
+    mp_cos_of: function (r: MpAngle) c: Mp {
+        q: Int = r.quadrant
+        if q == 0 as Int or q == 2 as Int {
+            c = mp_cos_series(r.angle)
+        } else {
+            c = mp_sin_series(r.angle)
+        }
+        if q == 1 as Int or q == 2 as Int {
+            c = mp_neg(c)
+        }
+    }
+
+    /// The tangent of `n pi / 2 + t`.
+    mp_tan_of: function (r: MpAngle) t: Mp {
+        s: Mp = mp_sin_series(r.angle)
+        c: Mp = mp_cos_series(r.angle)
+        q: Int = r.quadrant
+        if q == 0 as Int or q == 2 as Int {
+            t = mp_div(s, c)
+        } else {
+            t = mp_neg(mp_div(c, s))
+        }
+    }
+
+    /// `v`, negated when `x` is negative.
+    mp_odd: function (v: Mp, x: Float64) Mp => if x.sign_bit() then mp_neg(v) else v
+
+    sin_accurate: function (x: Float64) Mp => mp_odd(mp_sin_of(mp_reduce(x)), x)
+
+    cos_accurate: function (x: Float64) Mp => mp_cos_of(mp_reduce(x))
+
+    tan_accurate: function (x: Float64) Mp => mp_odd(mp_tan_of(mp_reduce(x)), x)
+
+    sin_pi_accurate: function (x: Float64) Mp => mp_odd(mp_sin_of(mp_reduce_pi(x)), x)
+
+    cos_pi_accurate: function (x: Float64) Mp => mp_cos_of(mp_reduce_pi(x))
+
+    tan_pi_accurate: function (x: Float64) Mp => mp_odd(mp_tan_of(mp_reduce_pi(x)), x)
+
+    // ---- inverse trigonometry ------------------------------------------------------
+
+    /// `atan u`: `pi / 2 - atan(1 / u)` past 1, then three halvings
+    /// `u / (1 + sqrt(1 + u^2))` and the Taylor series.
+    mp_atan: function (u: Mp) a: Mp {
+        a = u
+        if mp_is_zero(ref a) {
+            return
+        }
+        v: Mp = mp_abs(u)
+        one: Mp = mp_one()
+        big: Bool = mp_compare_abs(ref v, ref one) > 0
+        if big {
+            v = mp_div(one, v)
+        }
+        i: Int = 0
+        loop {
+            if i >= 3 {
+                break
+            }
+            v = mp_div(v, mp_add(one, mp_sqrt(mp_add(one, mp_sqr(v)))))
+            i = i + 1
+        }
+        v2: Mp = mp_neg(mp_sqr(v))
+        sum: Mp = v
+        power: Mp = v
+        n: @bit64 = 0x3
+        loop {
+            power = mp_mul(power, v2)
+            term: Mp = mp_div_small(power, n)
+            if negligible(ref term, ref sum) {
+                break
+            }
+            sum = mp_add(sum, term)
+            n = @i_add_64(n, 0x2)
+        }
+        a = mp_scale(sum, 3)
+        if big {
+            a = mp_sub(mp_pi_2(), a)
+        }
+        if u.negative {
+            a = mp_neg(a)
+        }
+    }
+
+    atan_accurate: function (x: Float64) Mp => mp_atan(mp_of_float(x))
+
+    asin_accurate: function (x: Float64) r: Mp {
+        if x.abs().equals(1.0) {
+            r = mp_odd(mp_pi_2(), x)
+            return
+        }
+        one: Mp = mp_one()
+        v: Mp = mp_of_float(x)
+        r = mp_atan(mp_div(v, mp_sqrt(mp_mul(mp_sub(one, v), mp_add(one, v)))))
+    }
+
+    acos_accurate: function (x: Float64) r: Mp {
+        if x.equals(-1.0) {
+            r = mp_pi()
+            return
+        }
+        one: Mp = mp_one()
+        v: Mp = mp_of_float(x)
+        r = mp_scale(mp_atan(mp_sqrt(mp_div(mp_sub(one, v), mp_add(one, v)))), 1)
+    }
+
+    /// `atan2(y, x)` for finite `y` and `x`, not both zero.
+    atan2_accurate: function (y: Float64, x: Float64) r: Mp {
+        if x.is_zero() {
+            r = mp_odd(mp_pi_2(), y)
+            return
+        }
+        q: Mp = mp_div(mp_of_float(y), mp_of_float(x))
+        if q.exponent < -100 as Int {
+            // `atan q = q (1 - q^2/3 + ...)` lies within 2^-200 relative below
+            // `q`, where no rounding boundary is unless `q` is a midpoint
+            // (a subnormal result can be one); `mp_round` would take a value
+            // that close for the midpoint, so step further, past its window.
+            r = mp_sub(q, mp_scale(q, -200))
+        } else {
+            r = mp_atan(q)
+        }
+        if x < 0.0 {
+            r = if y.sign_bit() then mp_sub(r, mp_pi()) else mp_add(r, mp_pi())
+        }
+    }
+
+    // ---- hyperbolic functions -------------------------------------------------------
+
+    sinh_accurate: function (x: Float64) r: Mp {
+        v: Mp = mp_of_float(x)
+        if x.abs() < 0.5 {
+            r = mp_scale(mp_sub(mp_exp_m1_small(v), mp_exp_m1_small(mp_neg(v))), -1)
+            return
+        }
+        e: Mp = mp_exp(v)
+        r = mp_scale(mp_sub(e, mp_div(mp_one(), e)), -1)
+    }
+
+    cosh_accurate: function (x: Float64) r: Mp {
+        e: Mp = mp_exp(mp_of_float(x))
+        r = mp_scale(mp_add(e, mp_div(mp_one(), e)), -1)
+    }
+
+    tanh_accurate: function (x: Float64) r: Mp {
+        two_x: Mp = mp_of_float(x.abs() * 2.0)
+        if x.abs() < 0.25 {
+            e: Mp = mp_exp_m1_small(two_x)
+            r = mp_div(e, mp_add(e, mp_of_int(2)))
+        } else {
+            e: Mp = mp_exp(two_x)
+            r = mp_div(mp_sub(e, mp_one()), mp_add(e, mp_one()))
+        }
+        r = mp_odd(r, x)
+    }
+
+    asinh_accurate: function (x: Float64) r: Mp {
+        one: Mp = mp_one()
+        v: Mp = mp_abs(mp_of_float(x))
+        v2: Mp = mp_sqr(v)
+        r = mp_ln_1p(mp_add(v, mp_div(v2, mp_add(one, mp_sqrt(mp_add(one, v2))))))
+        r = mp_odd(r, x)
+    }
+
+    acosh_accurate: function (x: Float64) r: Mp {
+        one: Mp = mp_one()
+        v: Mp = mp_of_float(x)
+        below: Mp = mp_sub(v, one)
+        r = mp_ln_1p(mp_add(below, mp_sqrt(mp_mul(below, mp_add(v, one)))))
+    }
+
+    atanh_accurate: function (x: Float64) r: Mp {
+        v: Mp = mp_of_float(x)
+        r = mp_scale(mp_ln_1p(mp_div(mp_scale(v, 1), mp_sub(mp_one(), v))), -1)
+    }
+
+    // ---- powers and roots -------------------------------------------------------------
+
+    /// `x^y` for a finite nonzero result: `e^(y ln |x|)`, negative for a
+    /// negative `x` and an odd integer `y`.
+    pow_accurate: function (x: Float64, y: Float64) r: Mp {
+        r = mp_exp(mp_mul(mp_of_float(y), mp_ln(mp_of_float(x.abs()))))
+        if x < 0.0 and (y * 0.5).floor() != y * 0.5 {
+            r = mp_neg(r)
+        }
+    }
+
+    cbrt_accurate: function (x: Float64) Mp =>
+        mp_odd(mp_exp(mp_div_small(mp_ln(mp_of_float(x.abs())), 0x3)), x)
+
+    hypot_accurate: function (x: Float64, y: Float64) Mp =>
+        mp_sqrt(mp_add(mp_sqr(mp_of_float(x)), mp_sqr(mp_of_float(y))))
+
+    /// The `n`-th root, `n` nonzero: `e^(ln |x| / n)`, negative for a
+    /// negative `x` (`n` is odd then).
+    root_accurate: function (x: Float64, n: Int32) r: Mp {
+        k: Int = n
+        l: Mp = mp_ln(mp_of_float(x.abs()))
+        if k < 0 {
+            l = mp_neg(l)
+            k = 0 - k
+        }
+        r = mp_odd(mp_exp(mp_div_small(l, bits_of(k))), x)
+    }
+}

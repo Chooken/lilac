@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `cosh` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `cosh.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.ea5f2f2e4b0c5p+1  # 59
+0x1.da5df035e5e8dp-22  # 58
+0x1.743d5609348acp+4  # 57
+0x1.a7880e4eee076p-13  # 57
+0x1.dea0b0c844078p-11  # 57
+0x1p-26  # 57
+0x1.03923f2b47c07p-1  # 56
+0x1.0cf01d3f9f5e4p-11  # 56
+0x1.90b8278768adcp-21  # 56
+0x1.9a3b9a61b3839p-9  # 56
+0x1.b44dba31c9521p-10  # 56
+0x1.07074ccbc86adp-21  # 55
+0x1.10d6a14c0d526p-9  # 55
+0x1.12d0f92fb5032p-19  # 55
+0x1.2c1e030b5decdp+9  # 55
+0x1.52268c6359f0ep-1  # 55
+0x1.61fe4e18e28e2p-16  # 55
+0x1.03a2e96d68f7ep-15  # 54
+0x1.0e0ac6ef9dcbcp-12  # 54
+0x1.1c11f1687d68fp+7  # 54
+0x1.2de32c662873dp-23  # 54
+0x1.2ff1e16810fe7p-4  # 54
+0x1.33debf093874dp-21  # 54
+0x1.46722c49086c9p+4  # 54
+0x1.5b3d94b9d595ep-22  # 54
+0x1.754855384219dp-10  # 54
+0x1.7b50c8f562f3bp+4  # 54
+0x1.7d56dbf1d49bfp-9  # 54
+0x1.80becd6226ce2p-1  # 54
+0x1.8ccb1c12e351ep-18  # 54
+0x1.b4ae17e3720efp-8  # 54
+0x1.bb67ae8584caap-26  # 54
+0x1.cd0662cd3fde7p-21  # 54
+0x1.f70104945433ap-18  # 54
+0x1.f7f2cb0065186p-19  # 54
+0x1.013065f3561b2p+4  # 53
+0x1.0625e9242e3a8p-2  # 53
+0x1.09cfdcd8ed006p-23  # 53
+0x1.0df44402fa21p-17  # 53
+0x1.12a98149f07cfp-14  # 53

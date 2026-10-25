@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `ln` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `log.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.6b3d29c0f9e6ep+543  # 62
+0x1.9476e304cd7c7p-384  # 62
+0x1.d6a413a59c7eap+502  # 62
+0x1.1f19ae6db054ep+193  # 61
+0x1.5996e62e5753fp+186  # 61
+0x1.bbdf7dd7ac127p+331  # 61
+0x1.c573e7d6a51cap-512  # 61
+0x1.e9d2ef9b57262p-701  # 61
+0x1.123add2cfe736p+359  # 60
+0x1.31143c7c0b1e6p+962  # 60
+0x1.58bba4db12da9p+151  # 60
+0x1.5c2e78e590c4p+823  # 60
+0x1.6fb77644d2449p-969  # 60
+0x1.b4870d2098262p+477  # 60
+0x1.c0a65f9234893p-842  # 60
+0x1.c561b55246db6p+718  # 60
+0x1.d3da559aa99f5p+63  # 60
+0x1.d4a93d69f93ebp+463  # 60
+0x1.0521018d5cde3p-399  # 59
+0x1.0852b64518f8cp-992  # 59
+0x1.12e24c5146e47p+172  # 59
+0x1.19aa3b9c3a117p+424  # 59
+0x1.2895cf0fcc84bp-285  # 59
+0x1.50d57691544d7p+244  # 59
+0x1.53e26bdfeaad1p-454  # 59
+0x1.5a6c5e0dc444ep-208  # 59
+0x1.6a087e93288fep-938  # 59
+0x1.93e17ed15431ap-283  # 59
+0x1.cc70b99337b47p-442  # 59
+0x1.e65df55368954p+862  # 59
+0x1.fcdb4d6db2715p+1013  # 59
+0x1.01ab6d1b4ef3dp+224  # 58
+0x1.0205b1074764ap-315  # 58
+0x1.10cdb4aa1770bp-9  # 58
+0x1.1be7575f49c6bp+191  # 58
+0x1.21abccd99b2b6p-208  # 58
+0x1.27febcf1290a5p+567  # 58
+0x1.40944aeae59c4p-614  # 58
+0x1.47319eb62df64p+999  # 58
+0x1.49f24f35d3f37p+344  # 58

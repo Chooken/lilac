@@ -634,41 +634,75 @@ sub int_file {
 # The elementary functions (math plan phase 5): each method calls a kernel
 # in lib/Standard's float_*.lilac files, which returns a `Scaled` double-double
 # that is rounded once to this type.
-# name, kernel, doc, ties
+# name, kernel, doc
 my @math_functions = (
-    ['exp', 'exp_kernel', '`e^self`. Overflows to `+inf` and underflows to `+0.0`; `exp(-inf)` is `0.0`; a NaN gives NaN.', 0],
-    ['exp2', 'exp2_kernel', '`2^self`. Overflows to `+inf` and underflows to `+0.0`; exact for integer `self`.', 0],
-    ['exp10', 'exp10_kernel', '`10^self`. Overflows to `+inf` and underflows to `+0.0`; exact when `10^self` is representable.', 0],
-    ['exp_m1', 'expm1_kernel', '`e^self - 1`, accurate for `self` near zero. `exp_m1(-inf)` is `-1.0`; overflows to `+inf`; `-0.0` stays `-0.0`.', 0],
-    ['ln', 'ln_kernel', 'The natural logarithm. `ln(+-0.0)` is `-inf`, `ln(1.0)` is `+0.0`, `ln(+inf)` is `+inf`, and a negative value or NaN gives NaN.', 0],
-    ['log2', 'log2_kernel', 'The base-2 logarithm (exact for powers of two). `log2(+-0.0)` is `-inf`; a negative value or NaN gives NaN.', 0],
-    ['log10', 'log10_kernel', 'The base-10 logarithm. `log10(+-0.0)` is `-inf`; a negative value or NaN gives NaN.', 0],
-    ['ln_1p', 'ln_1p_kernel', '`ln(1 + self)`, accurate for `self` near zero. `ln_1p(-1.0)` is `-inf`, below `-1.0` it is NaN, and `-0.0` stays `-0.0`.', 0],
-    ['erf', 'erf_kernel', 'The error function `2/sqrt(pi) * integral of e^-t^2 from 0 to self`, in `[-1, 1]`; `erf(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.', 0],
-    ['erfc', 'erfc_kernel', 'The complementary error function `1 - erf(self)`, in `[0, 2]`, accurate where it is tiny; `erfc(+inf)` is `0.0` and `erfc(-inf)` is `2.0`.', 0],
-    ['gamma', 'gamma_kernel', 'The gamma function (`gamma(n + 1) = n!`). NaN at the negative integers and `-inf`; `gamma(+-0.0)` is `+-inf`; overflows to `+inf` past 171.62.', 0],
-    ['ln_gamma', 'lgamma_kernel', 'The natural logarithm of the absolute value of the gamma function; `+inf` at zero and the negative integers, and `ln_gamma(1.0)` and `ln_gamma(2.0)` are `+0.0`. Series around 1 and 2 keep it accurate there; at the zeros between the negative integers the absolute error stays below 2^-95, so the relative error grows to about 2^-45 for an argument within one ulp of a zero.', 0],
-    ['sinh', 'sinh_kernel', 'The hyperbolic sine. Overflows to `+-inf`; `-0.0` stays `-0.0`.', 0],
-    ['cosh', 'cosh_kernel', 'The hyperbolic cosine. Overflows to `+inf`; `cosh(+-inf)` is `+inf`.', 0],
-    ['tanh', 'tanh_kernel', 'The hyperbolic tangent, in `[-1, 1]`; `tanh(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.', 0],
-    ['asinh', 'asinh_kernel', 'The inverse hyperbolic sine; `asinh(+-inf)` is `+-inf` and `-0.0` stays `-0.0`.', 0],
-    ['acosh', 'acosh_kernel', 'The inverse hyperbolic cosine, for `self >= 1.0`; `acosh(1.0)` is `+0.0`, below `1.0` it is NaN.', 0],
-    ['atanh', 'atanh_kernel', 'The inverse hyperbolic tangent, for `|self| <= 1.0`; `atanh(+-1.0)` is `+-inf`, beyond it NaN.', 0],
-    ['atan', 'atan_kernel', 'The arctangent, in `[-pi/2, pi/2]`. `atan(+-inf)` is `+-pi/2`; `-0.0` stays `-0.0`.', 0],
-    ['asin', 'asin_kernel', 'The arcsine, in `[-pi/2, pi/2]`. NaN outside `[-1, 1]`; `-0.0` stays `-0.0`.', 0],
-    ['acos', 'acos_kernel', 'The arccosine, in `[0, pi]`. NaN outside `[-1, 1]`; `acos(1.0)` is `+0.0`.', 0],
-    ['sin', 'sin_kernel', 'The sine of an angle in radians; any finite argument is reduced exactly (`(1e300).sin()` is right). `sin(+-0.0)` keeps its sign; an infinity or NaN gives NaN.', 0],
-    ['cos', 'cos_kernel', 'The cosine of an angle in radians; any finite argument is reduced exactly. An infinity or NaN gives NaN.', 0],
-    ['tan', 'tan_kernel', 'The tangent of an angle in radians; any finite argument is reduced exactly. `tan(+-0.0)` keeps its sign; an infinity or NaN gives NaN.', 0],
-    ['sin_pi', 'sin_pi_kernel', '`sin(pi * self)`, with the argument reduced exactly: `sin_pi(n)` is a zero with the sign of `self`, `sin_pi(0.5)` is `1.0`. An infinity or NaN gives NaN.', 0],
-    ['cos_pi', 'cos_pi_kernel', '`cos(pi * self)`, with the argument reduced exactly: `cos_pi(0.5)` is `+0.0`, `cos_pi(1.0)` is `-1.0`. An infinity or NaN gives NaN.', 0],
-    ['tan_pi', 'tan_pi_kernel', '`tan(pi * self)`: `tan_pi(n)` is a zero with the sign of `self`, and at the half-integers (the poles) it is an infinity with the sign of `self`. An infinity or NaN gives NaN.', 0],
+    ['exp', 'exp_kernel', '`e^self`. Overflows to `+inf` and underflows to `+0.0`; `exp(-inf)` is `0.0`; a NaN gives NaN.'],
+    ['exp2', 'exp2_kernel', '`2^self`. Overflows to `+inf` and underflows to `+0.0`; exact for integer `self`.'],
+    ['exp10', 'exp10_kernel', '`10^self`. Overflows to `+inf` and underflows to `+0.0`; exact when `10^self` is representable.'],
+    ['exp_m1', 'expm1_kernel', '`e^self - 1`, accurate for `self` near zero. `exp_m1(-inf)` is `-1.0`; overflows to `+inf`; `-0.0` stays `-0.0`.'],
+    ['ln', 'ln_kernel', 'The natural logarithm. `ln(+-0.0)` is `-inf`, `ln(1.0)` is `+0.0`, `ln(+inf)` is `+inf`, and a negative value or NaN gives NaN.'],
+    ['log2', 'log2_kernel', 'The base-2 logarithm (exact for powers of two). `log2(+-0.0)` is `-inf`; a negative value or NaN gives NaN.'],
+    ['log10', 'log10_kernel', 'The base-10 logarithm. `log10(+-0.0)` is `-inf`; a negative value or NaN gives NaN.'],
+    ['ln_1p', 'ln_1p_kernel', '`ln(1 + self)`, accurate for `self` near zero. `ln_1p(-1.0)` is `-inf`, below `-1.0` it is NaN, and `-0.0` stays `-0.0`.'],
+    ['erf', 'erf_kernel', 'The error function `2/sqrt(pi) * integral of e^-t^2 from 0 to self`, in `[-1, 1]`; `erf(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.'],
+    ['erfc', 'erfc_kernel', 'The complementary error function `1 - erf(self)`, in `[0, 2]`, accurate where it is tiny; `erfc(+inf)` is `0.0` and `erfc(-inf)` is `2.0`.'],
+    ['gamma', 'gamma_kernel', 'The gamma function (`gamma(n + 1) = n!`). NaN at the negative integers and `-inf`; `gamma(+-0.0)` is `+-inf`; overflows to `+inf` past 171.62.'],
+    ['ln_gamma', 'lgamma_kernel', 'The natural logarithm of the absolute value of the gamma function; `+inf` at zero and the negative integers, and `ln_gamma(1.0)` and `ln_gamma(2.0)` are `+0.0`. Series around 1 and 2 keep it accurate there; at the zeros between the negative integers the absolute error stays below 2^-95, so the relative error grows to about 2^-45 for an argument within one ulp of a zero.'],
+    ['sinh', 'sinh_kernel', 'The hyperbolic sine. Overflows to `+-inf`; `-0.0` stays `-0.0`.'],
+    ['cosh', 'cosh_kernel', 'The hyperbolic cosine. Overflows to `+inf`; `cosh(+-inf)` is `+inf`.'],
+    ['tanh', 'tanh_kernel', 'The hyperbolic tangent, in `[-1, 1]`; `tanh(+-inf)` is `+-1.0` and `-0.0` stays `-0.0`.'],
+    ['asinh', 'asinh_kernel', 'The inverse hyperbolic sine; `asinh(+-inf)` is `+-inf` and `-0.0` stays `-0.0`.'],
+    ['acosh', 'acosh_kernel', 'The inverse hyperbolic cosine, for `self >= 1.0`; `acosh(1.0)` is `+0.0`, below `1.0` it is NaN.'],
+    ['atanh', 'atanh_kernel', 'The inverse hyperbolic tangent, for `|self| <= 1.0`; `atanh(+-1.0)` is `+-inf`, beyond it NaN.'],
+    ['atan', 'atan_kernel', 'The arctangent, in `[-pi/2, pi/2]`. `atan(+-inf)` is `+-pi/2`; `-0.0` stays `-0.0`.'],
+    ['asin', 'asin_kernel', 'The arcsine, in `[-pi/2, pi/2]`. NaN outside `[-1, 1]`; `-0.0` stays `-0.0`.'],
+    ['acos', 'acos_kernel', 'The arccosine, in `[0, pi]`. NaN outside `[-1, 1]`; `acos(1.0)` is `+0.0`.'],
+    ['sin', 'sin_kernel', 'The sine of an angle in radians; any finite argument is reduced exactly (`(1e300).sin()` is right). `sin(+-0.0)` keeps its sign; an infinity or NaN gives NaN.'],
+    ['cos', 'cos_kernel', 'The cosine of an angle in radians; any finite argument is reduced exactly. An infinity or NaN gives NaN.'],
+    ['tan', 'tan_kernel', 'The tangent of an angle in radians; any finite argument is reduced exactly. `tan(+-0.0)` keeps its sign; an infinity or NaN gives NaN.'],
+    ['sin_pi', 'sin_pi_kernel', '`sin(pi * self)`, with the argument reduced exactly: `sin_pi(n)` is a zero with the sign of `self`, `sin_pi(0.5)` is `1.0`. An infinity or NaN gives NaN.'],
+    ['cos_pi', 'cos_pi_kernel', '`cos(pi * self)`, with the argument reduced exactly: `cos_pi(0.5)` is `+0.0`, `cos_pi(1.0)` is `-1.0`. An infinity or NaN gives NaN.'],
+    ['tan_pi', 'tan_pi_kernel', '`tan(pi * self)`: `tan_pi(n)` is a zero with the sign of `self`, and at the half-integers (the poles) it is an infinity with the sign of `self`. An infinity or NaN gives NaN.'],
 );
 
+# `$correct`: the function has a correctly rounded fallback (`%accurate` below).
 sub accuracy_text {
-    my ($name, $bits) = @_;
-    return 'Within 0.5 ulp plus 2^-60 ulp: correctly rounded unless the exact value lies within 2^-60 ulp of a rounding boundary (the kernel error is below 2^-90 relative).' if $bits != 64;
-    return 'Within 0.5 ulp plus 2^-37 ulp: correctly rounded unless the exact value lies within 2^-37 ulp of a rounding boundary (the kernel error is below 2^-90 relative); exact results are exact.';
+    my ($name, $bits, $correct) = @_;
+    return 'Correctly rounded (to nearest, ties to even): the kernel\'s result (error below 2^-90 relative) is rounded when every value within 2^-70 relative of it rounds alike, and otherwise a 384-bit evaluation decides, which takes a value within 2^-240 relative of a midpoint for the midpoint (the hardest cases known, other than exact midpoints, come no closer than 2^-150; `atan2` steps past the window itself when its quotient is a subnormal midpoint).' if $correct;
+    return 'Within 1 ulp, and almost always correctly rounded: the kernel\'s result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-60 ulp of a rounding boundary.' if $bits != 64;
+    return 'Within 1 ulp, and almost always correctly rounded: the kernel\'s result (error below 2^-90 relative) is rounded once, with no correctly rounded fallback, so it is off by one ulp only when the exact value lies within 2^-37 ulp of a rounding boundary; exact results are exact.';
+}
+
+# The functions with a correctly rounded fallback (`float_accurate.lilac`):
+# the method rounds the kernel's pair when `Scaled.sure*` says the rounding
+# is certain, and evaluates the `Mp` function otherwise.
+my %accurate = map { $_ => "${_}_accurate" } qw(
+    exp exp2 exp10 exp_m1 ln log2 log10 ln_1p sinh cosh tanh asinh acosh atanh
+    atan asin acos sin cos tan sin_pi cos_pi tan_pi
+);
+
+# A method that rounds `$fast` (a `Scaled`) when that is sure, else `$slow` (an `Mp`).
+#
+# The `Float64` functions in `%quick` first try a fast tier in plain doubles
+# (a `Scaled` function of the same argument): its pair is rounded when `quick64`
+# says that is sure, and `quick64` is NaN otherwise.
+my %quick = (exp => 'exp_fast', ln => 'ln_fast');
+
+sub correct_method {
+    my ($m, $params, $name, $bits, $fast, $slow, $quick) = @_;
+    my $text = "    $m: function ($params) r: $name {\n";
+    if (defined $quick) {
+        $text .= "        r = quick64($quick)\n";
+        $text .= "        if r.is_nan() {\n";
+        $text .= "            s: Scaled = $fast\n";
+        $text .= "            r = if s.sure$bits() then s.round$bits() else mp_round$bits($slow)\n";
+        $text .= "        }\n";
+    } else {
+        $text .= "        s: Scaled = $fast\n";
+        $text .= "        r = if s.sure$bits() then s.round$bits() else mp_round$bits($slow)\n";
+    }
+    $text .= "    }\n\n";
+    return $text;
 }
 
 sub math_methods {
@@ -677,63 +711,56 @@ sub math_methods {
     my $arg = $bits == 64 ? 'self' : 'self as Float64';
     my $text = '';
     for my $f (@math_functions) {
-        my ($m, $kernel, $doc, $ties) = @$f;
-        my $suffix = $ties && $bits == 64 ? 'round64_ties' : $round;
+        my ($m, $kernel, $doc) = @$f;
         $text .= "    /// $doc\n";
         $text .= "    ///\n";
-        $text .= "    /// " . accuracy_text($name, $bits) . "\n";
-        $text .= "    $m: function (self: $name) $name => $kernel($arg).$suffix()\n\n";
+        my $accuracy = accuracy_text($name, $bits, exists $accurate{$m});
+        $accuracy .= ' Near the zeros between the negative integers only the absolute error is that small (see above).' if $m eq 'ln_gamma';
+        $text .= "    /// $accuracy\n";
+        if (exists $accurate{$m}) {
+            my $quick = $bits == 64 && exists $quick{$m} ? "$quick{$m}($arg)" : undef;
+            $text .= correct_method($m, "self: $name", $name, $bits, "$kernel($arg)", "$accurate{$m}($arg)", $quick);
+        } else {
+            $text .= "    $m: function (self: $name) $name => $kernel($arg).$round()\n\n";
+        }
     }
     my $base = $bits == 64 ? 'base' : 'base as Float64';
+    my $other = $bits == 64 ? 'other' : 'other as Float64';
+    my $acc = accuracy_text($name, $bits, 1);
     $text .= "    /// The logarithm of `self` to `base`, `ln(self) / ln(base)`. NaN when\n";
     $text .= "    /// `self` is negative or `base` is not positive or is `1.0`.\n";
     $text .= "    ///\n";
-    $text .= "    /// " . accuracy_text($name, $bits) . "\n";
-    $text .= "    log: function (self: $name, base: $name) $name => log_base_kernel($arg, $base).$round()\n\n";
-    $text .= "    /// The sine and cosine of an angle in radians, as `(sine, cosine)`; each is
-";
-    $text .= "    /// exactly what `sin` and `cos` return.
-    ///
-";
-    $text .= "    /// " . accuracy_text($name, $bits) . "
-";
-    $text .= "    sin_cos: function (self: $name) (sine: $name, cosine: $name) {
-";
-    $text .= "        s: Scaled, c: Scaled = sin_cos_kernel($arg)
-";
-    $text .= "        sine = s.$round()
-        cosine = c.$round()
-    }
-
-";
-    my $other = $bits == 64 ? 'other' : 'other as Float64';
-    my $ties = $bits == 64 ? 'round64_ties' : $round;
-    my $acc = accuracy_text($name, $bits);
-    $text .= "    /// The angle of the point `(other, self)` (`self` is y, `other` is x), in
-";
-    $text .= "    /// `[-pi, pi]`, with C's `atan2` special values: `atan2(+-0.0, -0.0)` is `+-pi`,
-";
-    $text .= "    /// `atan2(+-0.0, +0.0)` is `+-0.0`, and infinities give multiples of `pi/4`.
-    ///
-    /// $acc
-";
-    $text .= "    atan2: function (self: $name, other: $name) $name => atan2_kernel($arg, $other).$round()
-
-";
+    $text .= "    /// $acc\n";
+    $text .= correct_method('log', "self: $name, base: $name", $name, $bits, "log_base_kernel($arg, $base)", "log_base_accurate($arg, $base)");
+    $text .= "    /// The sine and cosine of an angle in radians, as `(sine, cosine)`; each is\n";
+    $text .= "    /// exactly what `sin` and `cos` return.\n";
+    $text .= "    ///\n";
+    $text .= "    /// $acc\n";
+    $text .= "    sin_cos: function (self: $name) (sine: $name, cosine: $name) {\n";
+    $text .= "        s: Scaled, c: Scaled = sin_cos_kernel($arg)\n";
+    $text .= "        sine = if s.sure$bits() then s.$round() else mp_round$bits(sin_accurate($arg))\n";
+    $text .= "        cosine = if c.sure$bits() then c.$round() else mp_round$bits(cos_accurate($arg))\n";
+    $text .= "    }\n\n";
+    $text .= "    /// The angle of the point `(other, self)` (`self` is y, `other` is x), in\n";
+    $text .= "    /// `[-pi, pi]`, with C's `atan2` special values: `atan2(+-0.0, -0.0)` is `+-pi`,\n";
+    $text .= "    /// `atan2(+-0.0, +0.0)` is `+-0.0`, and infinities give multiples of `pi/4`.\n";
+    $text .= "    ///\n";
+    $text .= "    /// $acc\n";
+    $text .= correct_method('atan2', "self: $name, other: $name", $name, $bits, "atan2_kernel($arg, $other)", "atan2_accurate($arg, $other)");
     $text .= "    /// `self` raised to the power `other`, with C's special values: `pow(x, +-0.0)` and\n";
     $text .= "    /// `pow(1.0, y)` are `1.0` even for NaN; a negative base with a non-integer\n";
     $text .= "    /// exponent is NaN; `pow(+-0.0, y)` is an infinity for negative `y`; `pow(-1.0, +-inf)` is `1.0`.\n";
     $text .= "    /// Exact when the result is representable (`pow(3.0, 2.0)`).\n    ///\n    /// $acc\n";
-    $text .= "    pow: function (self: $name, other: $name) $name => pow_kernel($arg, $other).$ties()\n\n";
+    $text .= correct_method('pow', "self: $name, other: $name", $name, $bits, "pow_kernel($arg, $other)", "pow_accurate($arg, $other)");
     $text .= "    /// `self` raised to the integer power `n` (`pow` with an exact exponent).\n    ///\n    /// $acc\n";
-    $text .= "    pow_int: function (self: $name, n: Int32) $name => pow_kernel($arg, n as Float64).$ties()\n\n";
+    $text .= correct_method('pow_int', "self: $name, n: Int32", $name, $bits, "pow_kernel($arg, n as Float64)", "pow_accurate($arg, n as Float64)");
     $text .= "    /// The cube root (defined for negative values; exact for cubes).\n    ///\n    /// $acc\n";
-    $text .= "    cbrt: function (self: $name) $name => cbrt_kernel($arg).$round()\n\n";
+    $text .= correct_method('cbrt', "self: $name", $name, $bits, "cbrt_kernel($arg)", "cbrt_accurate($arg)");
     $text .= "    /// `sqrt(self^2 + other^2)` without intermediate overflow; an infinity wins over NaN.\n    ///\n    /// $acc\n";
-    $text .= "    hypot: function (self: $name, other: $name) $name => hypot_kernel($arg, $other).$ties()\n\n";
+    $text .= correct_method('hypot', "self: $name, other: $name", $name, $bits, "hypot_kernel($arg, $other)", "hypot_accurate($arg, $other)");
     $text .= "    /// The `n`-th root of `self`: negative values have odd roots only, `n = 0` is NaN,\n";
     $text .= "    /// and a negative `n` is the reciprocal root.\n    ///\n    /// $acc\n";
-    $text .= "    root: function (self: $name, n: Int32) $name => root_kernel($arg, n).$round()\n\n";
+    $text .= correct_method('root', "self: $name, n: Int32", $name, $bits, "root_kernel($arg, n)", "root_accurate($arg, n)");
     return $text;
 }
 

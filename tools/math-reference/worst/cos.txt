@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `cos` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `cos.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.b7fe89bf86037p+917  # 64
+0x1.11b9afd70178bp+217  # 61
+0x1.43cb5b36952c7p+199  # 61
+0x1.7dc1464f9caep+308  # 61
+0x1.909efb3155718p+351  # 58
+0x1.febcb94b4e109p+217  # 58
+0x1.15611472a2a8fp+469  # 57
+0x1.58379fda995f4p+31  # 57
+0x1.652d04a80d775p+885  # 57
+0x1.b221f1f0a6fep+950  # 57
+0x1.be5987d223dfep+74  # 57
+0x1.04188dbfa67dbp+735  # 56
+0x1.0aae75439d0d6p+83  # 56
+0x1.10addf726ef4ap+428  # 56
+0x1.1a76e13dcec61p+873  # 56
+0x1.d5af8e12f854dp+999  # 56
+0x1.102a008c1e199p+208  # 55
+0x1.14f1b196738d8p+449  # 55
+0x1.18ac163614a77p+573  # 55
+0x1.273b1fcf6ab2bp+179  # 55
+0x1.27f3bb92ca667p+975  # 55
+0x1.309ec4bafebdcp+872  # 55
+0x1.4a4379be83255p+408  # 55
+0x1.54c23de18eae4p+704  # 55
+0x1.5a3054f4dc361p+830  # 55
+0x1.63a881faad5efp+631  # 55
+0x1.78176b26fbba1p+554  # 55
+0x1.80ebe6fb34376p+706  # 55
+0x1.9a43f798974cep+362  # 55
+0x1.9ab6bcfd047ebp+718  # 55
+0x1.a5172d151a6adp+325  # 55
+0x1.ce554d7a91733p+386  # 55
+0x1.e42ff5238c01p+800  # 55
+0x1.fb11100032706p+383  # 55
+0x1.00ee04e6a2feap+14  # 54
+0x1.03f4a3cf014aap+26  # 54
+0x1.1640b7ecede57p+286  # 54
+0x1.1bd7ed8f974f8p+263  # 54
+0x1.2bad241708ad7p+513  # 54
+0x1.324a11ae4a7fp+525  # 54

@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `tan` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `tan.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.b7cde914b040fp+552  # 60
+0x1.8e9a80105ce2fp+964  # 58
+0x1.ce8544f149635p+672  # 58
+0x1.02d10b4f44c6bp+671  # 57
+0x1.b70235565c7e3p+504  # 57
+0x1.040cfc35b000dp+869  # 56
+0x1.5b75aba3c761ap+909  # 56
+0x1.5da80b23dd86ap+589  # 56
+0x1.946aa2b1d0597p+477  # 56
+0x1.958e63b18cd6ap+410  # 56
+0x1.c3ea634d9987dp+813  # 56
+0x1.24d7d10ec04ecp+907  # 55
+0x1.685efa61765f4p+719  # 55
+0x1.8806c7c8fe55bp+659  # 55
+0x1.a21f8a36609dep+560  # 55
+0x1.b01d903bfa0dbp+380  # 55
+0x1.b35dbd469c646p+38  # 55
+0x1.ffe254562a753p+413  # 55
+0x1.044d65237146cp+48  # 54
+0x1.08f16e08acc92p+546  # 54
+0x1.0c5cdae36da2bp+309  # 54
+0x1.153e828acf744p+486  # 54
+0x1.1eb14265ab533p+822  # 54
+0x1.269907e12c437p+1016  # 54
+0x1.370325671fadp+364  # 54
+0x1.3c81fb68a4f79p+952  # 54
+0x1.40eee65f35843p+420  # 54
+0x1.4a85b7f8bc703p+665  # 54
+0x1.4c8280f0c277cp+361  # 54
+0x1.6d8c905576c39p+90  # 54
+0x1.6e0c3943f04b1p+266  # 54
+0x1.7a7c29da2e8b8p+450  # 54
+0x1.8008aa4368c25p+371  # 54
+0x1.87d68157c1755p+497  # 54
+0x1.920e85d53393dp+372  # 54
+0x1.aab45fcf6927ep+203  # 54
+0x1.b132472808bcep+511  # 54
+0x1.b22dbdd1784d9p+822  # 54
+0x1.b954eacf8273p+694  # 54
+0x1.c01e6028086fap+56  # 54

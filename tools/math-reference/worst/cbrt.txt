@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `cbrt` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `cbrt.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.9b78223aa307cp+1  # 57
+0x1.a202bfc89ddffp-1  # 56
+0x1.00357fdfa5412p+0  # 52
+0x1.05b93f3e0caf9p+0  # 52
+0x1.e24ad800f33a2p+0  # 52
+0x1.4027ebbb30916p+0  # 51
+0x1.513b22fc37587p+0  # 51
+0x1.577a288016fdap+1  # 51
+0x1.64f6d9ecb0fa4p-1  # 51
+0x1.8a73e89c82677p+1  # 51
+0x1.a3a8de5543964p+0  # 51
+0x1.b7abfd282ff33p+1  # 51
+0x1.c22b300602884p+0  # 51
+0x1.e2a152695b9c4p+0  # 51
+0x1.e3d8bd45f5f9fp-1  # 51
+0x1.e6ec8e3a6150bp+0  # 51
+0x1.f1e46556eeffep+0  # 51
+0x1.0a9bbd11b3a24p-1  # 50
+0x1.20b9ad6f402a8p+0  # 50
+0x1.2a74b1e9539c4p-1  # 50
+0x1.34f49459cca56p+1  # 50
+0x1.3d7ecf468bd26p-1  # 50
+0x1.565de16629b46p-1  # 50
+0x1.59987a7e76a8ep-1  # 50
+0x1.59bb741969d22p-1  # 50
+0x1.5c2bde0654654p+1  # 50
+0x1.5f2470d0a7588p+1  # 50
+0x1.7ae6cbc0421b2p-1  # 50
+0x1.7c2a8af7d25b3p+0  # 50
+0x1.914571cdbb1dap+1  # 50
+0x1.a8d5037e34bebp+1  # 50
+0x1.adfcf906e1c5cp+1  # 50
+0x1.b28b3c1f7d20ep+1  # 50
+0x1.b5bf4ceee4988p+0  # 50
+0x1.b767b543b0956p+1  # 50
+0x1.bb6ed102eaeb8p+1  # 50
+0x1.bd1766106ccb2p+1  # 50
+0x1.cf9023ac66768p-1  # 50
+0x1.d1b32c62fe6a8p+1  # 50
+0x1.d3beb8267d012p+0  # 50

@@ -227,17 +227,92 @@ private {
 
         round64: function (self: Scaled) Float64 => finish64(self.v, self.k)
 
-        /// For results that can be exactly half way between two doubles.
-        round64_ties: function (self: Scaled) Float64 => finish64_ties(self.v, self.k)
-
         round32: function (self: Scaled) Float32 => finish32(self.v, self.k)
 
         round16: function (self: Scaled) Float16 => finish16(self.v, self.k)
+
+        /// Whether `round64` is the correct rounding: every value within
+        /// 2^-70 relative of the pair (2^20 times the kernels' error bound)
+        /// rounds to the same `Float64`. A pair below 2^-960 is never sure,
+        /// since its low part has lost bits.
+        sure64: function (self: Scaled) sure: Bool {
+            sure = true
+            h: Float64 = self.v.hi
+            if h.is_zero() or not h.is_finite() {
+                return
+            }
+            if h.abs() < 1.0261342003245941e-289 {
+                sure = false
+                return
+            }
+            e: Float64 = h.abs() * 8.470329472543003e-22
+            low: Dd = Dd.fast_two_sum(h, self.v.lo - e)
+            high: Dd = Dd.fast_two_sum(h, self.v.lo + e)
+            sure = finish64(low, self.k).to_bits() == finish64(high, self.k).to_bits()
+        }
+
+        /// Whether `round32` is the correct rounding (as `sure64`).
+        sure32: function (self: Scaled) sure: Bool {
+            sure = true
+            h: Float64 = self.v.hi
+            if h.is_zero() or not h.is_finite() {
+                return
+            }
+            if h.abs() < 1.0261342003245941e-289 {
+                sure = false
+                return
+            }
+            e: Float64 = h.abs() * 8.470329472543003e-22
+            low: Dd = Dd.fast_two_sum(h, self.v.lo - e)
+            high: Dd = Dd.fast_two_sum(h, self.v.lo + e)
+            sure = finish32(low, self.k).to_bits() == finish32(high, self.k).to_bits()
+        }
+
+        /// Whether `round16` is the correct rounding (as `sure64`).
+        sure16: function (self: Scaled) sure: Bool {
+            sure = true
+            h: Float64 = self.v.hi
+            if h.is_zero() or not h.is_finite() {
+                return
+            }
+            if h.abs() < 1.0261342003245941e-289 {
+                sure = false
+                return
+            }
+            e: Float64 = h.abs() * 8.470329472543003e-22
+            low: Dd = Dd.fast_two_sum(h, self.v.lo - e)
+            high: Dd = Dd.fast_two_sum(h, self.v.lo + e)
+            sure = finish16(low, self.k).to_bits() == finish16(high, self.k).to_bits()
+        }
     }
 
     /// `2^n` for `n` in `-1022..=1023`.
     pow2: function (n: Int32) Float64 =>
         Float64.from_bits(@bit_shift_left_64((n + 1023).to_uint64_wrapping() as @bit64, 0x34) as Uint64)
+
+    /// The fast tier's rounding test: `(s.v.hi + s.v.lo) 2^s.k` rounded once,
+    /// when every value within 2^-63 relative of it rounds the same (a fast
+    /// tier's error is below 2^-66) and the result is normal or `s` a zero,
+    /// else NaN (as it is for a NaN `s.v.hi`).
+    quick64: function (s: Scaled) r: Float64 {
+        h: Float64 = s.v.hi
+        e: Float64 = h.abs() * 1.0842021724855044e-19
+        a: Float64 = h + (s.v.lo - e)
+        b: Float64 = h + (s.v.lo + e)
+        bits: @bit64 = a.to_bits() as @bit64
+        field: Int32 = (@bit_and_64(@bit_shift_right_u_64(bits, 0x34), 0x7FF) as Uint64).to_int32_wrapping() + s.k
+        if bits != (b.to_bits() as @bit64) {
+            r = Float64.NAN
+        } else if field >= 1 as Int32 and field <= 2046 as Int32 {
+            // the exponent field moves by `k`, staying in the normal range
+            step: @bit64 = @bit_shift_left_64((s.k as Int64).to_uint64_wrapping() as @bit64, 0x34)
+            r = Float64.from_bits(@i_add_64(bits, step) as Uint64)
+        } else if a.is_zero() and s.k == 0 as Int32 {
+            r = a
+        } else {
+            r = Float64.NAN
+        }
+    }
 
     /// The nearest integer to `x` (ties to even) as an `Int32`; `x` must be within `Int32`.
     nearest: function (x: Float64) Int32 => x.round_even().to_int32_truncated()
@@ -314,28 +389,6 @@ private {
         if negative {
             r = -r
         }
-    }
-
-    /// Like `finish64`, for a value that may be exactly half way between two
-    /// doubles (`hypot`, `pow`, `root` of exact operands): a pair within
-    /// 2^-42 ulp of that midpoint is the midpoint and rounds to even.
-    finish64_ties: function (d: Dd, k: Int32) r: Float64 {
-        h: Float64 = d.hi
-        if h.is_finite() and not h.is_zero() and k == 0 as Int32 and not d.lo.equals(0.0) {
-            half: Float64 = h.ulp() * 0.5
-            gap: Float64 = d.lo.abs() - half
-            if gap.abs() <= half * 3.637978807091713e-12 {
-                // `h + lo` is the midpoint: pick the even neighbour.
-                other: Float64 = if d.lo > 0.0 then h.next_up() else h.next_down()
-                if @bit_and_64(h.to_bits() as @bit64, 0x1) == 0x0 {
-                    r = h
-                } else {
-                    r = other
-                }
-                return
-            }
-        }
-        r = finish64(d, k)
     }
 
     /// `(d.hi + d.lo) * 2^k` as a `Float32`, rounded once to nearest.

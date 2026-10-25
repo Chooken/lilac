@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `tan_pi` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `tanpi.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+0x1.9e2371e233d1bp-34  # 58
+0x1.f725a49735be2p-32  # 58
+0x1.7b544ccbafe6ap-18  # 57
+0x1.bb98d9ed6c209p-39  # 57
+0x1.5b79e364c2d17p-22  # 56
+0x1.e41bd90b5b6e7p-38  # 56
+0x1.ed835e8ecc245p-23  # 56
+0x1.05eb8ed3b129cp-30  # 55
+0x1.1f97816fd72a2p-49  # 55
+0x1.212fbc3b90674p-36  # 55
+0x1.45435c15060dcp-54  # 55
+0x1.4d855c912a204p-39  # 55
+0x1.5d89dc03193cdp-10  # 55
+0x1.5fc576e941e09p-13  # 55
+0x1.9bf62cd2a2438p-28  # 55
+0x1.a572fa6b3d117p-12  # 55
+0x1.a96d0004e5b8bp-21  # 55
+0x1.bad771c786f82p-25  # 55
+0x1.c7bbf935d56e6p-20  # 55
+0x1.db74ba716abb6p-11  # 55
+0x1.f3f3111a9fd82p-17  # 55
+0x1.059caff335f6ep-40  # 54
+0x1.09e091620d107p-25  # 54
+0x1.1673192fc2c52p-50  # 54
+0x1.1e38ee7c71b98p-4  # 54
+0x1.2dbd832610b8fp-23  # 54
+0x1.3673a0cceef01p-35  # 54
+0x1.45435c15060dcp-55  # 54
+0x1.4ae1587dc8709p-9  # 54
+0x1.51606b7deb39p-17  # 54
+0x1.5498f33fafefp-51  # 54
+0x1.54ae0fa9f24b9p-7  # 54
+0x1.5739bf6ac898cp-10  # 54
+0x1.5b8e5df5702a9p-42  # 54
+0x1.66fc3b0054f8fp-36  # 54
+0x1.77f3b707ad7b6p-38  # 54
+0x1.84f2a733d8ecbp-19  # 54
+0x1.8ba4c3146411ap-47  # 54
+0x1.90f99a08db0f8p-35  # 54
+0x1.92e16add17026p-37  # 54

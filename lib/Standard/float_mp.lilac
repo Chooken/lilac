@@ -1,0 +1,578 @@
+// The correctly rounded fallback of the elementary functions (math plan
+// phase 5).
+//
+// A double-double kernel is within 2^-90 relative of the exact value, which
+// decides the rounding unless the value lies that close to a rounding
+// boundary. `Scaled.sure64` (and `sure32`, `sure16`) tests the kernel's pair
+// with a margin of 2^-70; when the test fails (about one argument in 2^17)
+// the function is evaluated again here, in `Mp`: a 384-bit significand, so
+// the result is within about 2^-360 relative, then rounded by `mp_round`.
+// The hardest-to-round doubles known (Lefèvre and Muller's searches,
+// CORE-MATH's worst cases) agree with a rounding boundary to fewer than 160
+// bits past the last kept one, so 240 equal bits past the rounding bit mean
+// the exact value is a boundary (`pow(x, y)` at a midpoint, `hypot(3, 4)`),
+// and `mp_round` rounds it as one. Everything is integer arithmetic on
+// 64-bit limbs, so it gives the same bits on every target.
+
+private {
+    /// Limbs in an `Mp`.
+    MP_LIMBS: Int => 6
+
+    /// Limbs in a `Wide`, an intermediate with room for a product and a carry.
+    WIDE_LIMBS: Int => 14
+
+    Limbs: alias @array(@bit64, 6)
+
+    Wide: alias @array(@bit64, 14)
+
+    /// `(-1)^negative 0.l0 l1 .. l5 * 2^exponent`, the limbs most significant
+    /// first: limb 0's top bit is set unless the value is zero.
+    Mp: object {
+        negative: Bool
+        exponent: Int
+        limbs: Limbs
+    }
+
+    bits_of: function (n: Int) @bit64 => n.to_uint64_wrapping() as @bit64
+
+    int_of: function (b: @bit64) Int => (b as Uint64).to_int_wrapping()
+
+    mp_zero: function () a: Mp {
+        a = Mp { negative = false, exponent = 0, limbs = @array(@bit64, 6) {} }
+    }
+
+    mp_is_zero: function (a: ref Mp) Bool => @array_at(ref a.limbs, 0x0) == 0x0
+
+    mp_limb: function (a: ref Mp, i: Int) @bit64 => @array_at(ref a.limbs, i as @bit_native)
+
+    /// The constant whose limbs start at `mp_word(first)`, times `2^exponent`.
+    mp_constant: function (first: Int, exponent: Int) a: Mp {
+        a = mp_zero()
+        a.exponent = exponent
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            slot: ref @bit64 = @array_at(ref a.limbs, i as @bit_native)
+            slot = mp_word(first + i)
+            i = i + 1
+        }
+    }
+
+    mp_neg: function (a: Mp) r: Mp {
+        r = a
+        r.negative = not a.negative
+    }
+
+    mp_abs: function (a: Mp) r: Mp {
+        r = a
+        r.negative = false
+    }
+
+    /// `a * 2^n`.
+    mp_scale: function (a: Mp, n: Int) r: Mp {
+        r = a
+        if not mp_is_zero(ref r) {
+            r.exponent = a.exponent + n
+        }
+    }
+
+    // ---- wide intermediates ----------------------------------------------
+
+    wide_zero: function () w: Wide {
+        w = @array(@bit64, 14) {}
+    }
+
+    /// Limb `i` of `w`, zero outside it.
+    wide_get: function (w: ref Wide, i: Int) r: @bit64 {
+        r = 0x0
+        if i >= 0 and i < WIDE_LIMBS {
+            r = @array_at(w, i as @bit_native)
+        }
+    }
+
+    wide_set: function (w: ref Wide, i: Int, v: @bit64) nothing {
+        slot: ref @bit64 = @array_at(w, i as @bit_native)
+        slot = v
+    }
+
+    /// Adds `v` to limb `i`, carrying towards limb 0.
+    wide_add_at: function (w: ref Wide, i: Int, v: @bit64) nothing {
+        j: Int = i
+        carry: @bit64 = v
+        loop {
+            if carry == 0x0 or j < 0 {
+                break
+            }
+            slot: ref @bit64 = @array_at(w, j as @bit_native)
+            old: @bit64 = slot
+            sum: @bit64 = @i_add_64(old, carry)
+            slot = sum
+            carry = if @i_less_than_u_64(sum, carry) then 0x1 else 0x0
+            j = j - 1
+        }
+    }
+
+    /// `w += v`.
+    wide_add: function (w: ref Wide, v: ref Wide) nothing {
+        i: Int = WIDE_LIMBS - 1
+        carry: @bit64 = 0x0
+        loop {
+            if i < 0 {
+                break
+            }
+            a: @bit64 = wide_get(w, i)
+            b: @bit64 = wide_get(v, i)
+            s: @bit64 = @i_add_64(a, b)
+            c1: Bool = @i_less_than_u_64(s, a)
+            t: @bit64 = @i_add_64(s, carry)
+            c2: Bool = @i_less_than_u_64(t, s)
+            wide_set(w, i, t)
+            carry = if c1 or c2 then 0x1 else 0x0
+            i = i - 1
+        }
+    }
+
+    /// `w -= v`, for `w >= v`.
+    wide_sub: function (w: ref Wide, v: ref Wide) nothing {
+        i: Int = WIDE_LIMBS - 1
+        borrow: @bit64 = 0x0
+        loop {
+            if i < 0 {
+                break
+            }
+            a: @bit64 = wide_get(w, i)
+            b: @bit64 = wide_get(v, i)
+            d: @bit64 = @i_sub_64(a, b)
+            b1: Bool = @i_less_than_u_64(a, b)
+            t: @bit64 = @i_sub_64(d, borrow)
+            b2: Bool = @i_less_than_u_64(d, borrow)
+            wide_set(w, i, t)
+            borrow = if b1 or b2 then 0x1 else 0x0
+            i = i - 1
+        }
+    }
+
+    /// Shifts `w` right (towards the last limb) by `bits`, dropping what falls off.
+    wide_shift_right: function (w: ref Wide, bits: Int) nothing {
+        if bits <= 0 {
+            return
+        }
+        q: Int = bits / 64
+        r: Int = bits - q * 64
+        rb: @bit64 = bits_of(r)
+        i: Int = WIDE_LIMBS - 1
+        loop {
+            if i < 0 {
+                break
+            }
+            here: @bit64 = wide_get(w, i - q)
+            v: @bit64 = here
+            if r != 0 as Int {
+                above: @bit64 = wide_get(w, i - q - 1)
+                v = @bit_or_64(@bit_shift_right_u_64(here, rb), @bit_shift_left_64(above, @i_sub_64(0x40, rb)))
+            }
+            wide_set(w, i, v)
+            i = i - 1
+        }
+    }
+
+    /// Shifts `w` left (towards limb 0) by `bits`, dropping what falls off.
+    wide_shift_left: function (w: ref Wide, bits: Int) nothing {
+        if bits <= 0 {
+            return
+        }
+        q: Int = bits / 64
+        r: Int = bits - q * 64
+        rb: @bit64 = bits_of(r)
+        i: Int = 0
+        loop {
+            if i >= WIDE_LIMBS {
+                break
+            }
+            here: @bit64 = wide_get(w, i + q)
+            v: @bit64 = here
+            if r != 0 as Int {
+                below: @bit64 = wide_get(w, i + q + 1)
+                v = @bit_or_64(@bit_shift_left_64(here, rb), @bit_shift_right_u_64(below, @i_sub_64(0x40, rb)))
+            }
+            wide_set(w, i, v)
+            i = i + 1
+        }
+    }
+
+    /// The leading zero bits of `w` (all of them when it is zero).
+    wide_leading_zeros: function (w: ref Wide) n: Int {
+        i: Int = 0
+        n = WIDE_LIMBS * 64
+        loop {
+            if i >= WIDE_LIMBS {
+                break
+            }
+            v: @bit64 = wide_get(w, i)
+            if v != 0x0 {
+                n = i * 64 + int_of(@bit_leading_zeros_64(v))
+                break
+            }
+            i = i + 1
+        }
+    }
+
+    /// `(-1)^negative 0.w * 2^exponent`, normalized and truncated to an `Mp`.
+    mp_from_wide: function (w: ref Wide, exponent: Int, negative: Bool) a: Mp {
+        a = mp_zero()
+        lz: Int = wide_leading_zeros(w)
+        if lz >= WIDE_LIMBS * 64 {
+            return
+        }
+        wide_shift_left(w, lz)
+        a.negative = negative
+        a.exponent = exponent - lz
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            slot: ref @bit64 = @array_at(ref a.limbs, i as @bit_native)
+            slot = wide_get(w, i)
+            i = i + 1
+        }
+    }
+
+    /// Puts the limbs of `a` in `w` from limb `at`.
+    mp_to_wide: function (a: ref Mp, w: ref Wide, at: Int) nothing {
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            wide_set(w, at + i, mp_limb(a, i))
+            i = i + 1
+        }
+    }
+
+    // ---- arithmetic ---------------------------------------------------------
+
+    /// `|a|` against `|b|`: -1, 0 or 1.
+    mp_compare_abs: function (a: ref Mp, b: ref Mp) c: Int {
+        az: Bool = mp_is_zero(a)
+        bz: Bool = mp_is_zero(b)
+        c = 0
+        if az or bz {
+            c = if az and bz then 0 else if az then -1 else 1
+            return
+        }
+        if a.exponent != b.exponent {
+            c = if a.exponent < b.exponent then -1 else 1
+            return
+        }
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            x: @bit64 = mp_limb(a, i)
+            y: @bit64 = mp_limb(b, i)
+            if x != y {
+                c = if @i_less_than_u_64(x, y) then -1 else 1
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    mp_add: function (a: Mp, b: Mp) r: Mp {
+        x: Mp = a
+        y: Mp = b
+        if mp_is_zero(ref y) {
+            r = x
+            return
+        }
+        if mp_is_zero(ref x) {
+            r = y
+            return
+        }
+        if mp_compare_abs(ref a, ref b) < 0 {
+            x = b
+            y = a
+        }
+        d: Int = x.exponent - y.exponent
+        if d > 64 * (WIDE_LIMBS - 2) {
+            r = x
+            return
+        }
+        wx: Wide = wide_zero()
+        wy: Wide = wide_zero()
+        mp_to_wide(ref x, ref wx, 1)
+        mp_to_wide(ref y, ref wy, 1)
+        wide_shift_right(ref wy, d)
+        if x.negative == y.negative {
+            wide_add(ref wx, ref wy)
+        } else {
+            wide_sub(ref wx, ref wy)
+        }
+        r = mp_from_wide(ref wx, x.exponent + 64, x.negative)
+    }
+
+    mp_sub: function (a: Mp, b: Mp) r: Mp {
+        r = mp_add(a, mp_neg(b))
+    }
+
+    mp_mul: function (a: Mp, b: Mp) r: Mp {
+        x: Mp = a
+        y: Mp = b
+        if mp_is_zero(ref x) or mp_is_zero(ref y) {
+            r = mp_zero()
+            return
+        }
+        w: Wide = wide_zero()
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            u: @bit64 = mp_limb(ref x, i)
+            j: Int = 0
+            loop {
+                if j >= MP_LIMBS {
+                    break
+                }
+                v: @bit64 = mp_limb(ref y, j)
+                wide_add_at(ref w, i + j + 1, @i_mul_64(u, v))
+                wide_add_at(ref w, i + j, @i_multiply_high_u_64(u, v))
+                j = j + 1
+            }
+            i = i + 1
+        }
+        r = mp_from_wide(ref w, x.exponent + y.exponent, x.negative != y.negative)
+    }
+
+    mp_sqr: function (a: Mp) r: Mp {
+        r = mp_mul(a, a)
+    }
+
+    /// `a * k` for a small integer `k`.
+    mp_mul_small: function (a: Mp, k: @bit64) r: Mp {
+        x: Mp = a
+        w: Wide = wide_zero()
+        i: Int = 0
+        loop {
+            if i >= MP_LIMBS {
+                break
+            }
+            u: @bit64 = mp_limb(ref x, i)
+            wide_add_at(ref w, i + 1, @i_mul_64(u, k))
+            wide_add_at(ref w, i, @i_multiply_high_u_64(u, k))
+            i = i + 1
+        }
+        r = mp_from_wide(ref w, x.exponent + 64, x.negative)
+    }
+
+    /// `a / k` for an integer `0 < k < 2^32`.
+    mp_div_small: function (a: Mp, k: @bit64) r: Mp {
+        x: Mp = a
+        w: Wide = wide_zero()
+        rem: @bit64 = 0x0
+        h: Int = 0
+        loop {
+            if h >= 2 * (MP_LIMBS + 1) {
+                break
+            }
+            digit: @bit64 = 0x0
+            if h < 2 * MP_LIMBS {
+                limb: @bit64 = mp_limb(ref x, h / 2)
+                digit = if h - (h / 2) * 2 == 0 as Int then @bit_shift_right_u_64(limb, 0x20) else @bit_and_64(limb, 0xFFFFFFFF)
+            }
+            current: @bit64 = @bit_or_64(@bit_shift_left_64(rem, 0x20), digit)
+            q: @bit64 = @i_div_u_64(current, k)
+            rem = @i_sub_64(current, @i_mul_64(q, k))
+            at: Int = h / 2
+            old: @bit64 = wide_get(ref w, at)
+            if h - at * 2 == 0 as Int {
+                wide_set(ref w, at, @bit_or_64(old, @bit_shift_left_64(q, 0x20)))
+            } else {
+                wide_set(ref w, at, @bit_or_64(old, q))
+            }
+            h = h + 1
+        }
+        r = mp_from_wide(ref w, x.exponent, x.negative)
+    }
+
+    /// The double `x` exactly.
+    mp_of_float: function (x: Float64) a: Mp {
+        a = mp_zero()
+        if x.is_zero() {
+            return
+        }
+        bits: @bit64 = x.to_bits() as @bit64
+        biased: Int = int_of(@bit_and_64(@bit_shift_right_u_64(bits, 0x34), 0x7FF))
+        m: @bit64 = @bit_and_64(bits, 0xFFFFFFFFFFFFF)
+        if biased != 0 as Int {
+            m = @bit_or_64(m, 0x10000000000000)
+        } else {
+            biased = 1
+        }
+        lz: Int = int_of(@bit_leading_zeros_64(m))
+        slot: ref @bit64 = @array_at(ref a.limbs, 0x0)
+        slot = @bit_shift_left_64(m, bits_of(lz))
+        a.exponent = 64 + biased - 1075 - lz
+        a.negative = x.sign_bit()
+    }
+
+    /// The integer `n` exactly.
+    mp_of_int: function (n: Int) a: Mp {
+        a = mp_zero()
+        if n == 0 as Int {
+            return
+        }
+        m: @bit64 = bits_of(n)
+        if n < 0 {
+            m = @i_sub_64(0x0, m)
+        }
+        lz: Int = int_of(@bit_leading_zeros_64(m))
+        slot: ref @bit64 = @array_at(ref a.limbs, 0x0)
+        slot = @bit_shift_left_64(m, bits_of(lz))
+        a.exponent = 64 - lz
+        a.negative = n < 0
+    }
+
+    /// `a` to about 53 bits, as `0.5 <= |f| < 1` (the exponent left out).
+    mp_head: function (a: Mp) f: Float64 {
+        x: Mp = a
+        top: @bit64 = @bit_shift_right_u_64(mp_limb(ref x, 0), 0xB)
+        f = (top as Uint64).to_float64_rounded() * 1.1102230246251565e-16
+        if x.negative {
+            f = -f
+        }
+    }
+
+    /// `a` to about 53 bits, for `a` within `Float64`'s range.
+    mp_approx: function (a: Mp) Float64 => mp_head(a).scale_by_power_of_two(a.exponent.to_int32_wrapping())
+
+    mp_one: function () Mp => mp_of_int(1)
+
+    /// `a / b` for a nonzero `b`.
+    mp_div: function (a: Mp, b: Mp) q: Mp {
+        x: Mp = a
+        if mp_is_zero(ref x) {
+            q = mp_zero()
+            return
+        }
+        mb: Mp = b
+        mb.negative = false
+        mb.exponent = 0
+        ma: Mp = a
+        ma.negative = false
+        ma.exponent = 0
+        one: Mp = mp_one()
+        // Newton's iteration for 1 / mb: 53, 106, 212, then 384 bits.
+        r: Mp = mp_of_float(1.0 / mp_head(mb))
+        i: Int = 0
+        loop {
+            if i >= 3 {
+                break
+            }
+            r = mp_add(r, mp_mul(r, mp_sub(one, mp_mul(mb, r))))
+            i = i + 1
+        }
+        q = mp_mul(ma, r)
+        q = mp_add(q, mp_mul(r, mp_sub(ma, mp_mul(mb, q))))
+        q = mp_scale(q, a.exponent - b.exponent)
+        q.negative = a.negative != b.negative
+    }
+
+    /// The square root of `a >= 0`.
+    mp_sqrt: function (a: Mp) s: Mp {
+        x: Mp = a
+        if mp_is_zero(ref x) {
+            s = mp_zero()
+            return
+        }
+        e: Int = a.exponent
+        m: Mp = a
+        m.negative = false
+        m.exponent = 0
+        if e - (e / 2) * 2 != 0 as Int {
+            m.exponent = -1
+            e = e + 1
+        }
+        one: Mp = mp_one()
+        // Newton's iteration for 1 / sqrt(m).
+        y: Mp = mp_of_float(1.0 / mp_approx(m).sqrt())
+        i: Int = 0
+        loop {
+            if i >= 3 {
+                break
+            }
+            t: Mp = mp_sub(one, mp_mul(m, mp_sqr(y)))
+            y = mp_add(y, mp_scale(mp_mul(y, t), -1))
+            i = i + 1
+        }
+        s = mp_mul(m, y)
+        s = mp_add(s, mp_scale(mp_mul(y, mp_sub(m, mp_sqr(s))), -1))
+        s = mp_scale(s, e / 2)
+    }
+
+    // ---- rounding ------------------------------------------------------------
+
+    /// `a` rounded to nearest (ties to even) in the binary format with
+    /// `p`-bit significands whose smallest normal is `2^emin`, as the
+    /// `Float64` of that value (overflowing to an infinity). 240 bits past
+    /// the rounding bit that are all zeros or all ones mean `a` is a
+    /// representable value or a midpoint plus `Mp`'s error.
+    mp_round: function (a: Mp, p: Int, emin: Int) r: Float64 {
+        x: Mp = a
+        r = 0.0
+        if mp_is_zero(ref x) {
+            if x.negative {
+                r = -r
+            }
+            return
+        }
+        u: Int = x.exponent - 1
+        n: Int = p
+        if u < emin {
+            n = p - (emin - u)
+        }
+        if n < 0 {
+            if x.negative {
+                r = -r
+            }
+            return
+        }
+        w: Wide = wide_zero()
+        mp_to_wide(ref x, ref w, 0)
+        k: @bit64 = 0x0
+        if n > 0 {
+            k = @bit_shift_right_u_64(wide_get(ref w, 0), bits_of(64 - n))
+        }
+        wide_shift_left(ref w, n)
+        round: Bool = @bit_and_64(wide_get(ref w, 0), 0x8000000000000000) != 0x0
+        wide_shift_left(ref w, 1)
+        w0: @bit64 = wide_get(ref w, 0)
+        w1: @bit64 = wide_get(ref w, 1)
+        w2: @bit64 = wide_get(ref w, 2)
+        w3: @bit64 = @bit_shift_right_u_64(wide_get(ref w, 3), 0x10)
+        zeros: Bool = w0 == 0x0 and w1 == 0x0 and w2 == 0x0 and w3 == 0x0
+        all: @bit64 = 0xFFFFFFFFFFFFFFFF
+        ones: Bool = w0 == all and w1 == all and w2 == all and w3 == 0xFFFFFFFFFFFF
+        up: Bool = round
+        if (round and zeros) or (not round and ones) {
+            up = @bit_and_64(k, 0x1) != 0x0
+        }
+        if up {
+            k = @i_add_64(k, 0x1)
+        }
+        r = (k as Uint64).to_float64_rounded().scale_by_power_of_two((x.exponent - n).to_int32_wrapping())
+        if x.negative {
+            r = -r
+        }
+    }
+
+    mp_round64: function (a: Mp) Float64 => mp_round(a, 53, -1022)
+
+    mp_round32: function (a: Mp) Float32 => mp_round(a, 24, -126).to_float32_rounded()
+
+    mp_round16: function (a: Mp) Float16 => mp_round(a, 11, -14).to_float16_rounded()
+}

@@ -1,0 +1,58 @@
+# The hardest-to-round binary64 inputs of `ln_1p` known, chosen by
+# tools/math-reference/pick_worst.py from CORE-MATH's `log1p.wc`
+# (https://core-math.gitlabpages.inria.fr/), used under its MIT licence:
+#
+# Copyright (c) the CORE-MATH authors.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# One input per line (`x` or `x,y`, hexadecimal floats), hardest first after
+# the overflow and underflow edges; a comment `h` says the exact result is
+# 2^-h ulp from the nearest midpoint.
+-0x1.7fffffffffffdp-50  # 101
+0x1.5000000000093p-44  # 84
+0x1.f80000000052bp-42  # 76
+-0x1.2bffffffff8adp-40  # 73
+0x1.440000000088bp-40  # 72
+0x1.8c00000000cc3p-40  # 71
+0x1.a400000000e5bp-40  # 71
+-0x1.ebfffffffec4dp-40  # 70
+-0x1.01fffffffea55p-38  # 68
+0x1.3200000001e7bp-38  # 67
+0x1.6e00000002b9bp-38  # 66
+-0x1.b5fffffffc18dp-38  # 65
+0x1.920000000349bp-38  # 65
+-0x1.f1fffffffaf45p-38  # 64
+0x1.fe000000054abp-38  # 64
+0x1.fd15daa6ce332p+732  # 63
+0x1.6b3d29c0f9e6ep+543  # 62
+0x1.b7f71a488641ap+340  # 62
+0x1.d6a413a59c7eap+502  # 62
+-0x1.2efffffff8875p-36  # 61
+-0x1.34fffffff83adp-36  # 61
+0x1.170000000655bp-36  # 61
+0x1.2f0000000778bp-36  # 61
+0x1.5c2e78e590c4p+823  # 60
+0x1.5f0000000a06bp-36  # 60
+0x1.6ab13075e3f2dp+457  # 60
+0x1.6b0000000ab93p-36  # 60
+0x1.710000000b14bp-36  # 60
+0x1.7ffff402ffcfdp-30  # 60
+0x1.b4870d2098262p+477  # 60
+0x1.d4a93d69f93ebp+463  # 60
+0x1.f2382637c71c2p+460  # 60
+-0x1.b2fffffff099dp-36  # 59
+-0x1.b8fffffff02c5p-36  # 59
+0x1.44a2f58075274p+350  # 59
+0x1.5b46700fda328p+678  # 59
+0x1.770000000b71bp-36  # 59
+0x1.777a4f7107178p+528  # 59
+0x1.7d0000000bd03p-36  # 59
+0x1.890000000c91bp-36  # 59
