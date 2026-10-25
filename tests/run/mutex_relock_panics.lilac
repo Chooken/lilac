@@ -1,0 +1,17 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: deadlock: this thread already holds the lock
+// expect-stderr:   at Standard.Sync.RawMutex.check_not_owner (Standard/Sync/raw_mutex.lilac:158:21)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug `Sync.Mutex` panics when a thread locks it a second time,
+// which would otherwise wait forever.
+
+using Standard
+using Standard.Sync as Sync
+
+counter: Sync.Mutex[Int]
+
+main: function () nothing {
+    first: Sync.MutexGuard[Int] = counter.lock()
+    second: Sync.MutexGuard[Int] = counter.lock()
+}

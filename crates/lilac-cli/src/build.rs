@@ -302,7 +302,11 @@ fn link_command(
         )?;
         let program = place(program);
         let cross = (session.target != session.host).then_some(triple.as_str());
-        let args = link::libc_args(&paths.obj, &paths.exe, cross, &settings.link_args);
+        let libs = session
+            .target
+            .link_info()
+            .map_or(&[][..], |info| info.libc_libs);
+        let args = link::libc_args(&paths.obj, &paths.exe, cross, libs, &settings.link_args);
         let name = program
             .file_stem()
             .map_or_else(|| "cc".to_owned(), |n| n.to_string_lossy().into_owned());

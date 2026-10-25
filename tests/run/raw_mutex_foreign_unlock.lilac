@@ -1,0 +1,29 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: unlocked a lock this thread does not hold
+// expect-stderr:   at Standard.Sync.RawMutex.unlock (Standard/Sync/raw_mutex.lilac:68:17)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug `Sync.RawMutex` panics when a thread unlocks a lock another
+// thread holds.
+
+using Standard
+using Standard.Process
+using Standard.Os as Os
+using Standard.Sync as Sync
+
+lock: Sync.RawMutex
+
+release: function (argument: ref unknown) nothing {
+    lock.unlock()
+}
+
+main: function () nothing {
+    lock.lock()
+    thread: Os.Thread = Os.spawn(ref release, ref lock as ref unknown).get() else {
+        exit(0x1)
+        return
+    }
+    match Os.join(thread) {
+        .Some => exit(0x2)
+    }
+}

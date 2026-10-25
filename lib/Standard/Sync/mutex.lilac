@@ -1,0 +1,132 @@
+/// A value shared between threads, reached one thread at a time: `lock`
+/// waits until no other thread holds the mutex and hands back a
+/// `MutexGuard`, the only way to the value, which unlocks when it drops.
+///
+/// ```lilac
+/// total: Sync.Mutex[Int] = Sync.Mutex[Int].new(0)
+///
+/// add: function (amount: Int) nothing {
+///     guard: Sync.MutexGuard[Int] = total.lock()
+///     guard.value() += amount
+/// }   // unlocked here, or at any `return` or `break` before it
+/// ```
+///
+/// A `Mutex` moves and cannot be copied (a copy would be a second lock
+/// over a second value). To share one, make it a global, pass a `ref` to
+/// one that outlives the threads, or hold it in a `Shared`. A zeroed
+/// `Mutex` is unlocked and holds a zeroed value, and `new` is a constant,
+/// so either makes a global with no setup.
+///
+/// Waiting threads sleep in the kernel; a free mutex costs one atomic
+/// operation to lock and one to unlock. Debug builds panic when a thread
+/// locks a mutex it already holds (it would wait forever) and when a
+/// mutex is dropped while locked. The mutex is not fair, and it is not
+/// poisoned: a panic ends the program, so no thread sees a value a panic
+/// left half-changed.
+Mutex[T]: structure {
+
+    private {
+        raw: RawMutex
+        data: T
+    }
+
+    /// An unlocked mutex holding `value`.
+    new: function (value: T) Mutex[T] => Mutex[T] { raw = RawMutex.UNLOCKED, data = value }
+
+    /// Waits until no other thread holds the mutex, then holds it until
+    /// the guard drops.
+    lock: function (self) guard: MutexGuard[T] {
+        self.raw.lock()
+        guard = MutexGuard[T] { mutex = self }
+    }
+
+    /// Holds the mutex if no thread does, without waiting; fails when it
+    /// is held (by this thread too).
+    try_lock: function (self) guard: MutexGuard[T] else nothing {
+        if self.raw.try_lock() {
+            guard = MutexGuard[T] { mutex = self }
+            return
+        }
+        fail
+    }
+
+    /// Like `lock`, but fails once about `nanos` nanoseconds have passed
+    /// without getting the mutex.
+    lock_timeout: function (self, nanos: @bit64) guard: MutexGuard[T] else nothing {
+        if self.raw.lock_timeout(nanos) {
+            guard = MutexGuard[T] { mutex = self }
+            return
+        }
+        fail
+    }
+
+    /// The value, with no lock taken: only for a mutex no other thread can
+    /// reach yet (or any more), such as while it is being set up.
+    get_unlocked: function (self) value: ref T {
+        value = ref self.data
+    }
+
+    /// The value, moved out; the mutex is gone.
+    into_inner: function (self: Mutex[T]) value: T {
+        @discard(self)
+        value = @move(self.data)
+    }
+
+    @on_drop: function (self) nothing {
+        if @builtin.Build.mode == .Debug {
+            if self.raw.is_locked() {
+                @panic("dropped a mutex while it is locked")
+            }
+        }
+    }
+}
+
+/// A held `Mutex`: the way to its value while the mutex is locked. It
+/// unlocks the mutex when it drops (at the end of its scope, or at a
+/// `return`, `break` or `continue` that leaves it), or early through
+/// `unlock`. A guard moves and cannot be copied, so the mutex unlocks
+/// exactly once; it must drop on the thread that locked it.
+///
+/// A `ref` taken from `value` must not be used once the guard is gone.
+MutexGuard[T]: structure {
+
+    private {
+        mutex: ref Mutex[T]
+    }
+
+    /// The guarded value. Writes through it change the mutex's value.
+    value: function (self) value: ref T {
+        value = ref self.mutex.data
+    }
+
+    /// Unlocks the mutex now, before the guard's scope ends. Once `value`
+    /// has lent out a `ref`, the guard moves only when told:
+    /// `@move(guard).unlock()`.
+    unlock: function (self: MutexGuard[T]) nothing {
+        // Dropping the guard here unlocks it.
+    }
+
+    /// Unlocks the mutex, sleeps until a notify of `condvar` (or
+    /// spuriously), then locks it again and hands back the guard; see
+    /// `Condvar`.
+    wait: function (self: MutexGuard[T], condvar: ref Condvar) guard: MutexGuard[T] {
+        // The mutex stays this thread's across the wait, so the guard
+        // carries over rather than dropping (and unlocking twice).
+        @discard(self)
+        condvar.wait_raw(ref self.mutex.raw)
+        guard = MutexGuard[T] { mutex = self.mutex }
+    }
+
+    /// Like `wait`, but returns once about `nanos` nanoseconds have
+    /// passed: `timed_out` says whether they have. The guard holds the
+    /// mutex either way.
+    wait_timeout: function (self: MutexGuard[T], condvar: ref Condvar, nanos: @bit64) (guard: MutexGuard[T], timed_out: Bool) {
+        @discard(self)
+        timed_out = condvar.wait_raw_timeout(ref self.mutex.raw, nanos)
+        guard = MutexGuard[T] { mutex = self.mutex }
+    }
+
+    @on_drop: function (self) nothing {
+        self.mutex.raw.unlock()
+    }
+}

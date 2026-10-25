@@ -1,0 +1,17 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: dropped a mutex while it is locked
+// expect-stderr:   at Standard.Sync.Mutex[Standard.Int].@on_drop (Standard/Sync/mutex.lilac:78:17)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug `Sync.Mutex` panics when it is dropped while a guard still
+// holds it: here the guard is kept in a global, which never drops.
+
+using Standard
+using Standard.Sync as Sync
+
+kept: Optional[Sync.MutexGuard[Int]]
+
+main: function () nothing {
+    local: Sync.Mutex[Int] = Sync.Mutex[Int].new(1)
+    kept = .Some(local.lock())
+}

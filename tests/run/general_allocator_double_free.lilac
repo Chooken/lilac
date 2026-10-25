@@ -1,7 +1,7 @@
 // build-arg: --stack-traces=off
 // expect-exit: 101
 // expect-stderr: panic: Freed memory that was already freed.
-// expect-stderr:   at Standard.Heap.GeneralAllocator.free_small (Standard/Heap/general_allocator.lilac:354:21)
+// expect-stderr:   at Standard.Heap.GeneralAllocator.free_small (Standard/Heap/general_allocator.lilac:334:21)
 // expect-stderr:   (stack trace disabled; build with --stack-traces=on)
 // A Debug `GeneralAllocator` panics on a second free of a slot.
 

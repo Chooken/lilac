@@ -467,7 +467,12 @@ impl Target {
                 exe_suffix: ".exe",
                 obj_suffix: ".obj",
                 entry_symbol: ".lilac.native_entry",
-                system_libs: &["kernel32.lib", "bcryptprimitives.lib"],
+                system_libs: &[
+                    "kernel32.lib",
+                    "bcryptprimitives.lib",
+                    "synchronization.lib",
+                ],
+                libc_libs: &["synchronization"],
                 dynamic_linker: None,
             },
             Os::Linux => LinkInfo {
@@ -476,6 +481,7 @@ impl Target {
                 obj_suffix: ".o",
                 entry_symbol: ".lilac.native_entry",
                 system_libs: &[],
+                libc_libs: &[],
                 dynamic_linker: Some(if self.arch == Arch::X86_64 {
                     "/lib64/ld-linux-x86-64.so.2"
                 } else {
@@ -488,6 +494,7 @@ impl Target {
                 obj_suffix: ".o",
                 entry_symbol: ".lilac.native_entry",
                 system_libs: &["libSystem.tbd"],
+                libc_libs: &[],
                 dynamic_linker: None,
             },
             Os::None | Os::Unknown => return None,
@@ -708,6 +715,10 @@ pub struct LinkInfo {
     /// The system stubs a native link adds, found in the sysroot's
     /// `<triple>/` folder.
     pub system_libs: &'static [&'static str],
+    /// The libraries a `--libc` link adds (`-l` to the C compiler
+    /// driver) that its C library does not bring: on Windows,
+    /// `synchronization` (`WaitOnAddress`).
+    pub libc_libs: &'static [&'static str],
     /// The program loader an ELF executable names when it links a shared
     /// library (a static executable needs none). glibc's path.
     pub dynamic_linker: Option<&'static str>,
@@ -899,7 +910,11 @@ mod tests {
         assert_eq!((windows.exe_suffix, windows.obj_suffix), (".exe", ".obj"));
         assert_eq!(
             windows.system_libs,
-            ["kernel32.lib", "bcryptprimitives.lib"]
+            [
+                "kernel32.lib",
+                "bcryptprimitives.lib",
+                "synchronization.lib"
+            ]
         );
 
         let linux = info("x86_64-unknown-linux-gnu").expect("linux links");

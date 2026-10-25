@@ -4,11 +4,13 @@
 C toolchain or SDK. `scripts/package.sh` copies each `<triple>/` folder into
 the install's `lib/lilac/`; the tests assemble a development sysroot from it.
 
-## Windows: `kernel32.lib`, `bcryptprimitives.lib`
+## Windows: `kernel32.lib`, `bcryptprimitives.lib`, `synchronization.lib`
 
 Import libraries for the functions `Standard.Os.Windows` declares, built
-from `windows/<dll>.def` (`ProcessPrng` is in `bcryptprimitives.dll`, the
-rest in `kernel32.dll`). After editing a `.def`, regenerate both of its
+from `windows/<dll>.def` (`ProcessPrng` is in `bcryptprimitives.dll`,
+`WaitOnAddress` and `WakeByAddress*` in the API set
+`api-ms-win-core-synch-l1-2-0.dll`, which `synchronization.lib` names as
+the SDK's does, the rest in `kernel32.dll`). After editing a `.def`, regenerate both of its
 libraries with the LLVM tree's `llvm-lib`:
 
 ```

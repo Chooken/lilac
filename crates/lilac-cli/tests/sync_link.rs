@@ -1,0 +1,105 @@
+//! `Standard.Sync` links on every native target: its locks wait in the
+//! kernel through `Standard.Os`'s wait layer (`futex` on Linux,
+//! `WaitOnAddress` from `synchronization.lib` on Windows, `__ulock_wait2`
+//! from `libSystem` on macOS) and spin with `@spin_hint` (a `pause` or
+//! `yield` instruction, or nothing), so a missing stub or an unlowered
+//! hint shows up as a failed link.
+//!
+//! The program uses every lock, wait and wake once and is built for each
+//! native target at `debug` and `release`, cross-linked with the
+//! development sysroot's `lld`. The run tests (`tests/run/mutex_*`,
+//! `condvar_queue`) run it on the host.
+
+mod support;
+
+use std::path::Path;
+use std::process::Command;
+
+/// The native targets: every `Target::link_info` pair.
+const TARGETS: [&str; 6] = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+];
+
+const PROGRAM: &str = "\
+using Standard
+using Standard.Io
+using Standard.Os as Os
+using Standard.Sync as Sync
+
+counter: Sync.Mutex[Int] = Sync.Mutex[Int].new(1)
+raw: Sync.RawMutex
+ready: Sync.Condvar
+word: @bit32
+
+main: function () nothing {
+    guard: Sync.MutexGuard[Int] = counter.lock()
+    guard.value() += 1
+    again: Sync.MutexGuard[Int], timed_out: Bool = @move(guard).wait_timeout(ref ready, 0x1)
+    again = @move(again).wait(ref ready)
+    @move(again).unlock()
+    if counter.try_lock() -> held: Sync.MutexGuard[Int] {
+        held.value() += 1
+    }
+    if counter.lock_timeout(0x1) -> held: Sync.MutexGuard[Int] {
+        held.value() += 1
+    }
+    raw.lock()
+    if ready.wait_raw_timeout(ref raw, 0x1) {
+        ready.notify_one()
+    }
+    raw.unlock()
+    if raw.try_lock() {
+        raw.unlock()
+    }
+    ready.notify_all()
+    Os.wait_on_address_timeout(ref word, 0x1, 0x1)
+    Os.wake_one(ref word)
+    Os.wake_all(ref word)
+    @spin_hint()
+    print_line($\"{counter.lock().value()}\")
+}
+";
+
+#[test]
+fn sync_links_natively() {
+    let Some(sysroot) = support::sysroot() else {
+        eprintln!("skipping: no lld");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("lilac-sync-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("creates scratch dir");
+    std::fs::write(dir.join("sync.lilac"), PROGRAM).expect("writes the program");
+    let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
+    let mut failures = Vec::new();
+    for triple in TARGETS {
+        for mode in ["debug", "release"] {
+            let out = Command::new(env!("CARGO_BIN_EXE_lilac"))
+                .args(["build", "-q"])
+                .arg(format!("--lib=Standard={}", standard.display()))
+                .arg(format!("--target={triple}"))
+                .arg(format!("--mode={mode}"))
+                .arg("-o")
+                .arg(dir.join(format!("{triple}-{mode}")))
+                .arg("sync.lilac")
+                .current_dir(&dir)
+                .env("LILAC_SYSROOT", &sysroot)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("runs lilac");
+            if !out.status.success() {
+                failures.push(format!(
+                    "{triple} ({mode}):\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

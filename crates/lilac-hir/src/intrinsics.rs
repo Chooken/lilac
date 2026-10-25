@@ -498,6 +498,9 @@ pub enum Intrinsic {
     LinuxThreadClone,
     /// `@trap()`: stops the program at once with a trap instruction.
     Trap,
+    /// `@spin_hint()`: tells the processor the thread is spinning on a
+    /// value (x86 `pause`, Arm `yield`); nothing elsewhere.
+    SpinHint,
     /// `@byte_buffer_ptr(buffer)`.
     ByteBufferPtr,
     /// `@byte_buffer_len(buffer)`.
@@ -645,7 +648,7 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 37] = [
+    const PLAIN: [(&'static str, Self); 38] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -667,6 +670,7 @@ impl Intrinsic {
         ("@linux_syscall", Self::LinuxSyscall),
         ("@linux_thread_clone", Self::LinuxThreadClone),
         ("@trap", Self::Trap),
+        ("@spin_hint", Self::SpinHint),
         ("@byte_buffer_ptr", Self::ByteBufferPtr),
         ("@byte_buffer_len", Self::ByteBufferLen),
         ("@byte_buffer_from", Self::ByteBufferFrom),
@@ -939,7 +943,7 @@ impl Intrinsic {
             ),
             Self::Read => sig(&[("address", RefParam("T"))], Some(Slot::Param("T"))),
             Self::Drop => sig(&[("address", RefParam("T"))], None),
-            Self::Trap | Self::Fence(_) => sig(&[], None),
+            Self::Trap | Self::SpinHint | Self::Fence(_) => sig(&[], None),
             Self::Atomic(op, _, width) => {
                 let ty = width.builtin();
                 let address = ("address", Ref(ty));
@@ -1118,6 +1122,9 @@ impl Intrinsic {
                 "Linux `clone` of a thread that calls the C function `entry(argument)` on `stack`, then exits. With `CLONE_SETTLS`, its thread-local storage is built in the zeroed `tls_area` of `tls_size` bytes. Only on Linux x86-64 and aarch64 (`E035` elsewhere)."
             }
             Self::Trap => "Stops the program at once with a trap instruction.",
+            Self::SpinHint => {
+                "Tells the processor this thread is waiting in a spin loop (x86 `pause`, Arm `yield`), which saves power and frees a shared core; does nothing on other targets. Use one in each turn of a loop that rereads a value another thread will change."
+            }
             Self::ByteBufferPtr => "Where the buffer's bytes start.",
             Self::ByteBufferLen => "How many bytes the buffer holds.",
             Self::ByteBufferFrom => "A buffer over the `length` bytes at `pointer`.",
@@ -1322,6 +1329,7 @@ impl Intrinsic {
             Self::LinuxSyscall => "@linux_syscall",
             Self::LinuxThreadClone => "@linux_thread_clone",
             Self::Trap => "@lilac_abort",
+            Self::SpinHint => "@spin_hint",
 
             _ => return None,
         })

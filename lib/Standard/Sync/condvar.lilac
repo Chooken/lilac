@@ -1,0 +1,67 @@
+using Standard.Os as Os
+
+/// A place for threads to wait until another thread changes something a
+/// `Mutex` guards. A waiter holds the mutex, checks its condition, and
+/// waits (`MutexGuard.wait`) while it does not hold yet; the wait unlocks
+/// the mutex while it sleeps and locks it again before it returns. A
+/// thread that changes the condition does so holding the mutex, then
+/// calls `notify_one` or `notify_all`.
+///
+/// ```lilac
+/// guard: Sync.MutexGuard[List[Int]] = jobs.lock()
+/// loop if guard.value().is_empty() {
+///     guard = @move(guard).wait(ref ready)
+/// } else break
+/// ```
+///
+/// A wait may also return with nothing changed (spuriously), so always
+/// wait in a loop over the condition. One `Condvar` may serve any number
+/// of mutexes, but a waiter and its notifier must use the same one. A
+/// zeroed `Condvar` is ready to use, and nothing tears it down.
+Condvar: structure {
+
+    private {
+        /// Bumped by every notify, so a waiter that read it before
+        /// unlocking does not sleep through a notify after.
+        sequence: @bit32
+    }
+
+    /// A condition variable with no waiters (the zero value).
+    NEW: Condvar => Condvar { sequence = 0x0 }
+
+    /// Unlocks `mutex`, which the calling thread holds, sleeps until a
+    /// notify (or spuriously), then locks it again. `MutexGuard.wait` is
+    /// this for a `Mutex`.
+    wait_raw: function (self, mutex: ref RawMutex) nothing {
+        sequence: @bit32 = @atomic_load_relaxed_32(ref self.sequence)
+        mutex.unlock()
+        Os.wait_on_address(ref self.sequence, sequence)
+        mutex.lock()
+    }
+
+    /// Like `wait_raw`, but returns once about `nanos` nanoseconds have
+    /// passed: `timed_out` says whether they have. `mutex` is held again
+    /// either way.
+    wait_raw_timeout: function (self, mutex: ref RawMutex, nanos: @bit64) timed_out: Bool {
+        start: @bit64 = Os.monotonic_nanos()
+        sequence: @bit32 = @atomic_load_relaxed_32(ref self.sequence)
+        mutex.unlock()
+        Os.wait_on_address_timeout(ref self.sequence, sequence, nanos)
+        timed_out = @i_greater_than_or_equal_u_64(@i_sub_64(Os.monotonic_nanos(), start), nanos)
+        mutex.lock()
+    }
+
+    /// Wakes one thread waiting here, if any.
+    notify_one: function (self) nothing {
+        // Relaxed: the mutex orders the change being announced, and the
+        // kernel's check of the word orders the wake against the sleep.
+        @atomic_add_relaxed_32(ref self.sequence, 0x1)
+        Os.wake_one(ref self.sequence)
+    }
+
+    /// Wakes every thread waiting here.
+    notify_all: function (self) nothing {
+        @atomic_add_relaxed_32(ref self.sequence, 0x1)
+        Os.wake_all(ref self.sequence)
+    }
+}

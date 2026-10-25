@@ -6,7 +6,8 @@
 //! target-specific leaves: `@ptr_add` (a `getelementptr`), `@memcpy`
 //! (`llvm.memcpy`), `@memmove`/`@memset` (`llvm.memmove`/`llvm.memset`),
 //! `@memcmp` (C's `memcmp`),
-//! `@lilac_abort` (`llvm.trap` + `unreachable`), `@linux_syscall` (the Linux
+//! `@lilac_abort` (`llvm.trap` + `unreachable`), `@spin_hint` (`pause` or
+//! `yield`), `@linux_syscall` (the Linux
 //! system-call instruction, as inline assembly), `@trace_head` (the
 //! address of the shadow-stack head global) and `@panic_depth` (the address
 //! of the panic depth). Each uses the value ABI from
@@ -52,6 +53,9 @@ pub(crate) fn emit_runtime(lower: &Lower<'_, '_>) {
     }
     if used.contains("@linux_syscall") {
         syscall(lower);
+    }
+    if used.contains("@spin_hint") {
+        spin_hint(lower);
     }
     if used.contains("@trace_head") {
         trace_head(lower);
@@ -258,6 +262,35 @@ fn abort(lower: &Lower<'_, '_>) {
     let builder = entry(lower, function);
     checked(builder.build_call(trap, &[], ""), "trap call");
     checked(builder.build_unreachable(), "abort unreachable");
+}
+
+/// `@spin_hint()`: the spin-loop hint, always inline: `pause` on x86,
+/// `yield` on 64-bit Arm, and nothing elsewhere (32-bit Arm's `yield` needs
+/// `ARMv6K` and RISC-V's `pause` an extension the baseline does not assume).
+fn spin_hint(lower: &Lower<'_, '_>) {
+    let (declare, call) = match lower.arch() {
+        Some(Arch::X86 | Arch::X86_64) => (
+            "declare void @llvm.x86.sse2.pause()
+",
+            "  call void @llvm.x86.sse2.pause()
+",
+        ),
+        Some(Arch::Aarch64) => (
+            "declare void @llvm.aarch64.hint(i32)
+",
+            "  call void @llvm.aarch64.hint(i32 1)
+",
+        ),
+        _ => ("", ""),
+    };
+    let text = format!(
+        "{declare}define void @.lilac.spin_hint() alwaysinline nounwind {{
+         entry:
+         {call}  ret void
+         }}
+"
+    );
+    append_ir(lower.module(), ".lilac.spin_hint", &text);
 }
 
 /// `@linux_syscall(n, a0..a5) -> iNative`: the Linux system-call instruction, with

@@ -1,0 +1,194 @@
+using Standard.Os as Os
+
+/// A lock with no data: at most one thread holds it at a time, and the
+/// others wait in the kernel, not spinning. Prefer `Mutex[T]`, which owns
+/// what it guards and unlocks itself; `RawMutex` is for building other
+/// structures (an allocator, a queue).
+///
+/// Zero is unlocked, so a zeroed `RawMutex` (a global, a field) needs no
+/// setup and nothing tears it down. Taking a free lock is one atomic
+/// operation and giving it up is one more; only a lock that others wait
+/// on makes a system call to wake one.
+///
+/// A thread unlocks the lock it locked; Debug builds check that, and
+/// panic when a thread locks a lock it already holds (which would wait
+/// forever). The lock is not fair: a thread that just unlocked may take
+/// it again before a waiter wakes.
+RawMutex: structure {
+
+    private {
+        /// `unlocked`, `locked`, or `contended`: locked, and some thread
+        /// may be waiting.
+        state: @bit32
+        /// Debug only: the holder's thread id (its low 32 bits), `0` when
+        /// none.
+        owner: @bit32
+    }
+
+    /// A free lock (the zero value).
+    UNLOCKED: RawMutex => RawMutex { state = 0x0, owner = 0x0 }
+
+    /// Waits until no other thread holds the lock, then holds it.
+    lock: function (self) nothing {
+        me: @bit32 = self.check_not_owner()
+        if @atomic_compare_swap_acquire_32(ref self.state, unlocked, locked) != unlocked {
+            self.lock_contended()
+        }
+        self.set_owner(me)
+    }
+
+    /// Holds the lock if no thread does, without waiting. `false` when it
+    /// is held (by this thread too).
+    try_lock: function (self) acquired: Bool {
+        acquired = false
+        if @atomic_compare_swap_acquire_32(ref self.state, unlocked, locked) == unlocked {
+            self.set_owner(thread_id())
+            acquired = true
+        }
+    }
+
+    /// Like `lock`, but gives up once about `nanos` nanoseconds have
+    /// passed: `false` when it did not get the lock.
+    lock_timeout: function (self, nanos: @bit64) acquired: Bool {
+        me: @bit32 = self.check_not_owner()
+        acquired = true
+        if @atomic_compare_swap_acquire_32(ref self.state, unlocked, locked) != unlocked {
+            acquired = self.lock_contended_until(deadline_after(nanos))
+        }
+        if acquired {
+            self.set_owner(me)
+        }
+    }
+
+    /// Gives up the lock, waking a waiting thread if there is one. The
+    /// calling thread must hold it.
+    unlock: function (self) nothing {
+        if @builtin.Build.mode == .Debug {
+            if @atomic_load_relaxed_32(ref self.owner) != thread_id() {
+                @panic("unlocked a lock this thread does not hold")
+            }
+            @atomic_store_relaxed_32(ref self.owner, 0x0)
+        }
+        if @atomic_swap_release_32(ref self.state, unlocked) == contended {
+            Os.wake_one(ref self.state)
+        }
+    }
+
+    /// Whether some thread holds the lock right now. Only a hint: it may
+    /// change before the caller looks at the answer.
+    is_locked: function (self) locked: Bool {
+        locked = @atomic_load_relaxed_32(ref self.state) != unlocked
+    }
+
+    private {
+
+        /// The slow half of `lock`: spin briefly, then sleep on the state
+        /// until it is free.
+        lock_contended: function (self) nothing {
+            state: @bit32 = self.spin()
+            if state == unlocked {
+                state = @atomic_compare_swap_acquire_32(ref self.state, unlocked, locked)
+                if state == unlocked {
+                    return
+                }
+            }
+            loop {
+                // Taking the lock as `contended` keeps the mark that
+                // someone may wait, so the unlock wakes them.
+                if state != contended {
+                    if @atomic_swap_acquire_32(ref self.state, contended) == unlocked {
+                        return
+                    }
+                }
+                Os.wait_on_address(ref self.state, contended)
+                state = self.spin()
+            }
+        }
+
+        /// `lock_contended` with a deadline on `Os.monotonic_nanos`.
+        lock_contended_until: function (self, deadline: @bit64) acquired: Bool {
+            acquired = true
+            state: @bit32 = self.spin()
+            if state == unlocked {
+                state = @atomic_compare_swap_acquire_32(ref self.state, unlocked, locked)
+                if state == unlocked {
+                    return
+                }
+            }
+            loop {
+                if state != contended {
+                    if @atomic_swap_acquire_32(ref self.state, contended) == unlocked {
+                        return
+                    }
+                }
+                now: @bit64 = Os.monotonic_nanos()
+                if @i_greater_than_or_equal_u_64(now, deadline) {
+                    // Leaving the state `contended` costs at most one
+                    // spare wake.
+                    acquired = false
+                    return
+                }
+                Os.wait_on_address_timeout(ref self.state, contended, @i_sub_64(deadline, now))
+                state = self.spin()
+            }
+        }
+
+        /// Spins while the lock is held with nobody waiting (its holder is
+        /// likely about to give it up), at most `spin_limit` times, and
+        /// returns the state it last read.
+        spin: function (self) state: @bit32 {
+            count: @bit32 = 0x0
+            loop {
+                state = @atomic_load_relaxed_32(ref self.state)
+                if state != locked or count == spin_limit {
+                    return
+                }
+                @spin_hint()
+                count = @i_add_32(count, 0x1)
+            }
+        }
+
+        /// Debug only: panics when the calling thread already holds the
+        /// lock, and returns its id (`0` in Release).
+        check_not_owner: function (self) me: @bit32 {
+            me = 0x0
+            if @builtin.Build.mode == .Debug {
+                me = thread_id()
+                if @atomic_load_relaxed_32(ref self.owner) == me {
+                    @panic("deadlock: this thread already holds the lock")
+                }
+            }
+        }
+
+        /// Debug only: records `me` as the holder.
+        set_owner: function (self, me: @bit32) nothing {
+            if @builtin.Build.mode == .Debug {
+                @atomic_store_relaxed_32(ref self.owner, me)
+            }
+        }
+    }
+}
+
+private {
+    unlocked: @bit32 => 0x0
+    locked: @bit32 => 0x1
+    contended: @bit32 => 0x2
+
+    /// How many times `lock` rereads a held lock before it sleeps.
+    spin_limit: @bit32 => 0x64
+
+    /// `Os.monotonic_nanos` `nanos` from now, saturating (so a huge
+    /// timeout waits practically forever, never wraps into the past).
+    deadline_after: function (nanos: @bit64) deadline: @bit64 {
+        now: @bit64 = Os.monotonic_nanos()
+        deadline = @i_add_64(now, nanos)
+        if @i_less_than_u_64(deadline, now) {
+            deadline = 0xFFFFFFFFFFFFFFFF
+        }
+    }
+
+    /// The calling thread's id, low 32 bits (Debug checks only).
+    thread_id: function () id: @bit32 {
+        id = @truncate(Os.current_thread_id())
+    }
+}

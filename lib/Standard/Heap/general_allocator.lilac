@@ -1,4 +1,5 @@
 using Standard.Os as Os
+using Standard.Sync as Sync
 
 /// A general-purpose allocator: any size at any alignment, each
 /// allocation freed on its own. Thread-safe (one lock around every call).
@@ -33,8 +34,8 @@ GeneralAllocator: structure {
         // Bytes of live allocations, as requested, and bytes mapped.
         used: Int
         mapped: Int
-        // 0 when no call is running, 1 while one is.
-        lock: @bit32
+        // Held by every call.
+        mutex: Sync.RawMutex
     }
 
     ALLOCATOR_TABLE: ref AllocatorTable[GeneralAllocator] => ref general_allocator_table
@@ -51,23 +52,23 @@ GeneralAllocator: structure {
             large = .None
             used = 0
             mapped = class_table_size()
-            lock = 0x0
+            mutex = Sync.RawMutex.UNLOCKED
         }
     }
 
     /// Bytes of live allocations, as requested.
     get_used: function (self) used: Int {
-        self.acquire()
+        self.mutex.lock()
         used = self.used
-        self.release()
+        self.mutex.unlock()
     }
 
     /// Bytes mapped: every slab, used or not, the size classes' table, and
     /// every large allocation with its header and padding.
     get_capacity: function (self) mapped: Int {
-        self.acquire()
+        self.mutex.lock()
         mapped = self.mapped
-        self.release()
+        self.mutex.unlock()
     }
 
     /// This allocator as an `Allocator`. It must stay in place while the
@@ -138,9 +139,9 @@ GeneralAllocator: structure {
             allocation = empty_allocation(alignment)
             return
         }
-        self.acquire()
+        self.mutex.lock()
         allocation = self.allocate_unlocked(size, alignment)
-        self.release()
+        self.mutex.unlock()
     }
 
     /// `memory` (`old_size` bytes at `alignment` from this allocator)
@@ -161,9 +162,9 @@ GeneralAllocator: structure {
             allocation = empty_allocation(alignment)
             return
         }
-        self.acquire()
+        self.mutex.lock()
         allocation = self.reallocate_unlocked(memory, old_size, new_size, alignment)
-        self.release()
+        self.mutex.unlock()
     }
 
     /// Gives back `memory`, `size` bytes at `alignment` from this
@@ -173,9 +174,9 @@ GeneralAllocator: structure {
         if size == 0 as Int {
             return
         }
-        self.acquire()
+        self.mutex.lock()
         self.free_unlocked(memory, size, alignment)
-        self.release()
+        self.mutex.unlock()
     }
 
     /// Unmaps every slab, the size classes' table and every large
@@ -205,27 +206,6 @@ GeneralAllocator: structure {
     }
 
     private {
-
-        /// Waits until no other call is running, then holds the lock.
-        acquire: function (self) nothing {
-            loop {
-                if @atomic_compare_swap_acquire_32(ref self.lock, 0x0, 0x1) == 0x0 {
-                    break
-                }
-                // Wait for it to look free before trying again, so a
-                // waiting thread reads the lock instead of writing it.
-                loop {
-                    if @atomic_load_relaxed_32(ref self.lock) == 0x0 {
-                        break
-                    }
-                    Os.yield_thread()
-                }
-            }
-        }
-
-        release: function (self) nothing {
-            @atomic_store_release_32(ref self.lock, 0x0)
-        }
 
         allocate_unlocked: function (self, size: Int, alignment: Int) allocation: ref unknown {
             class: Int = class_of(size, alignment)

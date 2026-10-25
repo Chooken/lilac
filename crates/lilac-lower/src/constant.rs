@@ -363,8 +363,9 @@ impl<'a> Lower<'a> {
     /// A global initializer's value, like [`Self::constant_or_panic`]. Its
     /// struct and variant literals are constant even when their types
     /// have hooks: building a value runs no hook, and a global is never
-    /// dropped, so nothing is skipped (`Optional[Arena] = .None`). What
-    /// they are built from follows `eval`.
+    /// dropped, so nothing is skipped (`Optional[Arena] = .None`), and so
+    /// are the bodies of the constants and `=>` functions that build them.
+    /// What they are built from follows `eval`.
     pub(crate) fn global_constant(
         &mut self,
         expr: &HirExpr,
@@ -393,20 +394,46 @@ impl<'a> Lower<'a> {
             // hooked type (`GeneralAllocator.EMPTY`) is as constant as its
             // literal.
             HirExprKind::Const(def) if !expr.ty.is_ref => {
-                if eval.stack.contains(def) {
-                    return None;
-                }
                 let hir = self.hir;
-                let body = hir.consts.get(def)?;
-                eval.stack.push(*def);
-                eval.frames.push(HashMap::new());
-                let value = self.eval_built(eval, body);
-                eval.frames.pop();
-                eval.stack.pop();
-                value
+                self.expand_built(eval, *def, HashMap::new(), hir.consts.get(def)?)
+            }
+            // So does a `=>` function's (`Mutex[T].new(value)`), from
+            // arguments that are plain constants: a hooked one would move
+            // or copy into the body, which runs hooks.
+            HirExprKind::Call {
+                callee: HirCallee::Func(key),
+                args,
+                ..
+            } if !expr.ty.is_ref => {
+                let callee: &'a HirFunc = self.funcs.get(key).copied()?;
+                let body = inline_body(callee)?;
+                let mut frame = HashMap::new();
+                for (param, arg) in callee.params.iter().zip(args) {
+                    frame.insert(*param, self.eval(eval, arg)?);
+                }
+                self.expand_built(eval, key.def, frame, body)
             }
             _ => self.eval(eval, expr),
         }
+    }
+
+    /// [`Self::expand`] for a body built in place ([`Self::eval_built`]).
+    fn expand_built(
+        &mut self,
+        eval: &mut Eval,
+        def: DefId,
+        frame: HashMap<LocalId, Value>,
+        body: &HirExpr,
+    ) -> Option<Value> {
+        if eval.stack.contains(&def) {
+            return None;
+        }
+        eval.stack.push(def);
+        eval.frames.push(frame);
+        let value = self.eval_built(eval, body);
+        eval.frames.pop();
+        eval.stack.pop();
+        value
     }
 
     /// The panic a call to the `=>` function `key` reaches whatever its

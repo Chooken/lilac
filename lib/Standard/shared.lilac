@@ -7,8 +7,9 @@ using Standard.Heap as Heap
 ///
 /// Copies may be made and dropped on any thread. The value itself is not
 /// guarded: to change it from more than one thread, make its parts atomics
-/// (`Sync.AtomicInt`) or guard it with a lock. Two values that hold `Shared`s of each other keep each other alive
-/// forever; make one of the links a `Weak`.
+/// (`Sync.AtomicInt`) or guard it with a lock (`Sync.Mutex`). Two values
+/// that hold `Shared`s of each other keep each other alive forever; make
+/// one of the links a `Weak`.
 Shared[T]: structure {
 
     private {

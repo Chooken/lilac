@@ -20,6 +20,14 @@ SleepConditionVariableSRW: extern function (ConditionVariable: ref unknown, SRWL
 WakeConditionVariable: extern function (ConditionVariable: ref unknown) nothing
 WakeAllConditionVariable: extern function (ConditionVariable: ref unknown) nothing
 
+// Waiting on memory (Windows 8 and later, `synchronization.lib`): sleeps
+// while the `AddressSize` bytes at `Address` equal those at
+// `CompareAddress`, until woken or `dwMilliseconds` pass (`INFINITE`:
+// never). It may also return spuriously.
+WaitOnAddress: extern function (Address: ref unknown, CompareAddress: ref unknown, AddressSize: @bit_native, dwMilliseconds: @bit32) ok: @bit32
+WakeByAddressSingle: extern function (Address: ref unknown) nothing
+WakeByAddressAll: extern function (Address: ref unknown) nothing
+
 /// Random bytes from the system generator (`bcryptprimitives.dll`, Windows
 /// 10 and later); it cannot fail.
 ProcessPrng: extern function (pbData: ref unknown, cbData: @bit_native) ok: @bit32

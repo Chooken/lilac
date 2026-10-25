@@ -81,7 +81,7 @@ fn windows_externs_are_in_the_import_libraries() {
         "add to toolchain/windows/*.def and regenerate the .lib files \
          (toolchain/README.md): {missing:?}"
     );
-    for def in ["kernel32", "bcryptprimitives"] {
+    for def in ["kernel32", "bcryptprimitives", "synchronization"] {
         for triple in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
             let lib = repo()
                 .join("toolchain")

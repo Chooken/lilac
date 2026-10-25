@@ -1,0 +1,124 @@
+// Waiting on memory: a thread sleeps while a word holds a value, until
+// another thread changes it and wakes it. The primitive under every lock
+// (`Standard.Sync`): Linux's `futex`, Windows's `WaitOnAddress` and
+// macOS's `__ulock_wait2`. A target with no OS has no other thread to
+// wait for, so a wait there returns at once.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+using Standard.Os.MacOs as MacOs
+
+/// Sleeps while `word` holds `expected`, until a `wake_one` or `wake_all`
+/// of it. It may also return early (spuriously, or on a signal), so the
+/// caller always reads `word` again and decides whether to wait more.
+wait_on_address: function (word: ref @bit32, expected: @bit32) nothing {
+    wait_word(word, expected, 0x0, false)
+}
+
+/// Like `wait_on_address`, but returns once about `nanos` nanoseconds
+/// have passed. The caller keeps its own deadline: an early return does
+/// not say how much time is left.
+wait_on_address_timeout: function (word: ref @bit32, expected: @bit32, nanos: @bit64) nothing {
+    wait_word(word, expected, nanos, true)
+}
+
+/// Wakes at most one thread waiting on `word`.
+wake_one: function (word: ref @bit32) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            Windows.WakeByAddressSingle(word as ref unknown)
+        }
+        .Linux => {
+            Linux.futex(word as ref unknown, Linux.FUTEX_WAKE_PRIVATE, 0x1, null(), null(), 0x0)
+        }
+        .MacOs => {
+            MacOs.__ulock_wake(@bit_or_32(MacOs.UL_COMPARE_AND_WAIT, MacOs.ULF_NO_ERRNO), word as ref unknown, 0x0)
+        }
+    }
+}
+
+/// Wakes every thread waiting on `word`.
+wake_all: function (word: ref @bit32) nothing {
+    match @builtin.Target.os {
+        .Windows => {
+            Windows.WakeByAddressAll(word as ref unknown)
+        }
+        .Linux => {
+            Linux.futex(word as ref unknown, Linux.FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, null(), null(), 0x0)
+        }
+        .MacOs => {
+            operation: @bit32 = @bit_or_32(@bit_or_32(MacOs.UL_COMPARE_AND_WAIT, MacOs.ULF_NO_ERRNO), MacOs.ULF_WAKE_ALL)
+            MacOs.__ulock_wake(operation, word as ref unknown, 0x0)
+        }
+    }
+}
+
+/// The calling thread's id: nonzero, and no two running threads share
+/// one. A target with no OS has one thread, `1`.
+current_thread_id: function () id: @bit64 {
+    match @builtin.Target.os {
+        .Windows => {
+            id = @extend_zero(Windows.GetCurrentThreadId())
+        }
+        .Linux => {
+            id = @extend_zero(Linux.gettid())
+        }
+        .MacOs => {
+            id = 0x0
+            MacOs.pthread_threadid_np(0x0, ref id)
+        }
+    } else {
+        id = 0x1
+    }
+}
+
+private {
+    /// One wait, forever unless `timed`. Every failure (a changed word, a
+    /// signal, a timeout) is an early return the caller handles.
+    wait_word: function (word: ref @bit32, expected: @bit32, nanos: @bit64, timed: Bool) nothing {
+        match @builtin.Target.os {
+            .Windows => {
+                millis: @bit32 = Windows.INFINITE
+                if timed {
+                    millis = windows_millis(nanos)
+                }
+                Windows.WaitOnAddress(word as ref unknown, ref expected as ref unknown, 0x4, millis)
+            }
+            .Linux => {
+                if timed {
+                    // A relative timeout, on the monotonic clock.
+                    timeout: Linux.Timespec {
+                        tv_sec = @i_div_u_64(nanos, 0x3B9ACA00)
+                        tv_nsec = @i_mod_u_64(nanos, 0x3B9ACA00)
+                    }
+                    Linux.futex(word as ref unknown, Linux.FUTEX_WAIT_PRIVATE, expected, ref timeout as ref unknown, null(), 0x0)
+                } else {
+                    Linux.futex(word as ref unknown, Linux.FUTEX_WAIT_PRIVATE, expected, null(), null(), 0x0)
+                }
+            }
+            .MacOs => {
+                // `0` waits forever, so a timed wait waits at least 1 ns.
+                timeout: @bit64 = 0x0
+                if timed {
+                    timeout = nanos
+                    if timeout == 0x0 {
+                        timeout = 0x1
+                    }
+                }
+                MacOs.__ulock_wait2(@bit_or_32(MacOs.UL_COMPARE_AND_WAIT, MacOs.ULF_NO_ERRNO), word as ref unknown, @extend_zero(expected), timeout, 0x0)
+            }
+        }
+    }
+
+    /// `nanos` in whole milliseconds, rounded up, below `INFINITE`.
+    windows_millis: function (nanos: @bit64) millis: @bit32 {
+        whole: @bit64 = @i_div_u_64(nanos, 0xF4240)
+        if @i_mod_u_64(nanos, 0xF4240) != 0x0 {
+            whole = @i_add_64(whole, 0x1)
+        }
+        if @i_greater_than_u_64(whole, 0xFFFFFFFE) {
+            whole = 0xFFFFFFFE
+        }
+        millis = @truncate(whole)
+    }
+}

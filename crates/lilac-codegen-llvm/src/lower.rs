@@ -2155,6 +2155,7 @@ fn builtin_symbol(name: &str) -> &str {
         "@memcmp" => "memcmp",
         "@ptr_add" => ".lilac.ptr_add",
         "@lilac_abort" => ".lilac.abort",
+        "@spin_hint" => ".lilac.spin_hint",
         "@linux_syscall" => ".lilac.linux_syscall",
         "@trace_head" => ".lilac.trace_head",
         "@panic_depth" => ".lilac.panic_depth",

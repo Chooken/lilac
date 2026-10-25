@@ -1,7 +1,7 @@
 // build-arg: --stack-traces=off
 // expect-exit: 101
 // expect-stderr: panic: Memory was written after it was freed.
-// expect-stderr:   at Standard.Heap.check_poison (Standard/Heap/general_allocator.lilac:669:17)
+// expect-stderr:   at Standard.Heap.check_poison (Standard/Heap/general_allocator.lilac:649:17)
 // expect-stderr:   (stack trace disabled; build with --stack-traces=on)
 // A Debug `GeneralAllocator` finds a write to a freed slot when it hands the slot out again.
 

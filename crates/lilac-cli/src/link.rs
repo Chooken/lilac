@@ -138,17 +138,20 @@ fn is_shared_library(arg: &str) -> bool {
 }
 
 /// The arguments for a `--libc` link through a C compiler driver. `cross` is
-/// the target triple when it differs from the host.
+/// the target triple when it differs from the host; `libs` are the
+/// target's `LinkInfo::libc_libs`, passed as `-l`.
 pub fn libc_args(
     obj: &Path,
     exe: &Path,
     cross: Option<&str>,
+    libs: &[&str],
     link_args: &[String],
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![obj.into(), "-o".into(), exe.into()];
     if let Some(triple) = cross {
         args.push(format!("--target={triple}").into());
     }
+    args.extend(libs.iter().map(|lib| OsString::from(format!("-l{lib}"))));
     args.extend(link_args.iter().map(OsString::from));
     args
 }
@@ -269,6 +272,7 @@ mod tests {
         let stubs = Path::new("sys").join("x86_64-pc-windows-msvc");
         let kernel32 = stubs.join("kernel32.lib");
         let bcrypt = stubs.join("bcryptprimitives.lib");
+        let synchronization = stubs.join("synchronization.lib");
         assert_eq!(
             strings(&args),
             [
@@ -277,6 +281,7 @@ mod tests {
                 "o.obj",
                 &kernel32.display().to_string(),
                 &bcrypt.display().to_string(),
+                &synchronization.display().to_string(),
                 "/entry:.lilac.native_entry",
                 "/subsystem:console",
                 "/nodefaultlib",
@@ -381,12 +386,24 @@ mod tests {
 
     #[test]
     fn libc_command_host_and_cross() {
-        let host = libc_args(Path::new("o.obj"), Path::new("o.exe"), None, &[]);
+        let host = libc_args(Path::new("o.obj"), Path::new("o.exe"), None, &[], &[]);
         assert_eq!(strings(&host), ["o.obj", "-o", "o.exe"]);
+        let windows = libc_args(
+            Path::new("o.obj"),
+            Path::new("o.exe"),
+            None,
+            &["synchronization"],
+            &[],
+        );
+        assert_eq!(
+            strings(&windows),
+            ["o.obj", "-o", "o.exe", "-lsynchronization"]
+        );
         let cross = libc_args(
             Path::new("o.o"),
             Path::new("o"),
             Some("x86_64-unknown-linux-gnu"),
+            &[],
             &["-lm".to_owned()],
         );
         assert_eq!(

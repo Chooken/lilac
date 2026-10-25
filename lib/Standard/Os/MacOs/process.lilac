@@ -25,9 +25,20 @@ pthread_create: extern function (thread: ref @bit_native, attr: ref unknown, sta
 pthread_join: extern function (thread: @bit_native, value_ptr: ref unknown) result: @bit32
 pthread_detach: extern function (thread: @bit_native) result: @bit32
 pthread_self: extern function () thread: @bit_native
+/// The system-wide id of `thread` (`0`: the calling thread), unique for
+/// the life of the system.
+pthread_threadid_np: extern function (thread: @bit_native, thread_id: ref @bit64) result: @bit32
 sched_yield: extern function () result: @bit32
 
 // `os_unfair_lock`: one zero-initialized `@bit32`.
 os_unfair_lock_lock: extern function (lock: ref unknown) nothing
 os_unfair_lock_trylock: extern function (lock: ref unknown) acquired: @bit8
 os_unfair_lock_unlock: extern function (lock: ref unknown) nothing
+
+// Waiting on memory (`<sys/ulock.h>`, libSystem since macOS 10.12, `2`
+// since 11): with `UL_COMPARE_AND_WAIT`, sleeps while the `@bit32` at
+// `addr` is `value`, until woken or `timeout` nanoseconds pass (`0`:
+// never). The interface is private but stable: libc++'s `atomic::wait`
+// is built on it. With `ULF_NO_ERRNO` a failure is a negative errno.
+__ulock_wait2: extern function (operation: @bit32, addr: ref unknown, value: @bit64, timeout: @bit64, value2: @bit64) result: @bit32
+__ulock_wake: extern function (operation: @bit32, addr: ref unknown, wake_value: @bit64) result: @bit32

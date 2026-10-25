@@ -135,3 +135,8 @@ ENOTEMPTY: @bit32 => 0x42
 ENOLCK: @bit32 => 0x4D
 ENOSYS: @bit32 => 0x4E
 EOPNOTSUPP: @bit32 => 0x66
+
+// `__ulock_wait2`/`__ulock_wake` operations and flags.
+UL_COMPARE_AND_WAIT: @bit32 => 0x1
+ULF_WAKE_ALL: @bit32 => 0x100
+ULF_NO_ERRNO: @bit32 => 0x1000000
