@@ -15,6 +15,10 @@ pub(crate) struct Pending {
     /// Whether it is about a type containing a generic parameter, which a
     /// template check cannot decide, so it drops it.
     pub dependent: bool,
+    /// Whether some generic arguments could make it pass: only then is a
+    /// template's error an instance's requirement, never the body's own
+    /// (`Checker::template_errors`). Never set when `dependent` is not.
+    pub varies: bool,
 }
 
 /// The checker's diagnostic sink.
@@ -40,6 +44,7 @@ impl<'a> Sink<'a> {
             diagnostic,
             requirement: None,
             dependent: false,
+            varies: false,
         })
     }
 

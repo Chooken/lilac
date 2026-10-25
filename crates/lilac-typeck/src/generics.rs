@@ -5,11 +5,13 @@
 //! An instance body is checked like any other; its diagnostics are captured
 //! and, when any is a recorded [`Requirement`], folded into one `E042` at the
 //! use that requested the instance. Requirements are recorded when emitted, so
-//! nothing here parses diagnostic text.
+//! nothing here parses diagnostic text. A requirement the generic's template
+//! fails too, about no parameter, is the body's own error, reported as it is
+//! ([`Checker::emit_failures`]).
 
 use std::collections::{HashMap, HashSet};
 
-use lilac_error::{codes, Diagnostic, ErrorGuaranteed, TraceFrame};
+use lilac_error::{codes, Diagnostic, ErrorGuaranteed, Level, TraceFrame};
 use lilac_hir::FuncKey;
 use lilac_resolve::DefId;
 use lilac_span::Span;
@@ -17,6 +19,38 @@ use lilac_ty::{TypeId, TypeKind, TypeRef, DISPLAY_LIMIT};
 
 use crate::sink::{has_error, Pending};
 use crate::{Checker, Requirement, MAX_INSTANCES, MAX_RECURSION};
+
+/// A failed generic instance's requirements, waiting for the end of the
+/// check ([`Checker::emit_failures`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Failure {
+    pub key: FuncKey,
+    requirements: Vec<(Diagnostic, Requirement)>,
+    /// The sites that requested the instance, taken once the worklist that
+    /// checked it drained ([`Checker::close_failures`]), so a template
+    /// checked later adds none.
+    callers: Option<Vec<TraceFrame>>,
+}
+
+impl Failure {
+    /// One of the errors the failure holds, which an `E042` or its own
+    /// report will cover.
+    pub(crate) fn held(&self) -> Option<&Diagnostic> {
+        self.requirements.first().map(|(diagnostic, _)| diagnostic)
+    }
+}
+
+/// What matches an error of an instance body with its template's: its code
+/// and primary span.
+pub(crate) fn error_site(diagnostic: &Diagnostic) -> (&'static str, Span) {
+    let span = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .or_else(|| diagnostic.labels.first())
+        .map_or_else(Span::dummy, |label| label.span);
+    (diagnostic.code, span)
+}
 
 impl Checker<'_> {
     /// Source name of a function for diagnostics: `name`, or `Owner.name`.
@@ -70,20 +104,6 @@ impl Checker<'_> {
         keys
     }
 
-    /// The trace of a failure at `span` in instance `key`: every site that
-    /// requested it, through requesting generic instances, down to the
-    /// non-generic functions (user code) that started each chain.
-    pub(crate) fn instance_trace(&self, key: &FuncKey, span: Span) -> TraceFrame {
-        let mut expanded = HashSet::from([key.clone()]);
-        TraceFrame {
-            func: self.instance_display(key),
-            span,
-            address: false,
-            repeat: false,
-            callers: self.origin_frames(key, &mut expanded),
-        }
-    }
-
     /// One frame per recorded origin of `key`, a generic requester expanded
     /// once (later frames of it are repeats).
     fn origin_frames(&self, key: &FuncKey, expanded: &mut HashSet<FuncKey>) -> Vec<TraceFrame> {
@@ -120,16 +140,56 @@ impl Checker<'_> {
             .collect()
     }
 
-    /// Emits the held `E042`s, each traced through every origin recorded so
-    /// far.
+    /// Takes the callers of each failure the worklist produced: every site
+    /// that requested its instance, also ones requested after the failing
+    /// body was checked.
+    pub(crate) fn close_failures(&mut self) {
+        let mut failures = std::mem::take(&mut self.failures);
+        for failure in &mut failures {
+            if failure.callers.is_none() {
+                let mut expanded = HashSet::from([failure.key.clone()]);
+                failure.callers = Some(self.origin_frames(&failure.key, &mut expanded));
+            }
+        }
+        self.failures = failures;
+    }
+
+    /// Reports the failures: a requirement the generic's template fails too,
+    /// about no parameter (`template_errors`), is an error of the body,
+    /// reported as the template does; the rest fold into one `E042` per instance, traced
+    /// through every site that requested it.
     pub(crate) fn emit_failures(&mut self) {
-        for (key, diagnostic) in std::mem::take(&mut self.failures) {
-            let span = diagnostic
-                .labels
-                .iter()
-                .find(|label| label.primary)
-                .map_or_else(Span::dummy, |label| label.span);
-            let trace = self.instance_trace(&key, span);
+        self.close_failures();
+        for failure in std::mem::take(&mut self.failures) {
+            let mut folded = Vec::new();
+            for (diagnostic, requirement) in failure.requirements {
+                let own = self
+                    .template_errors
+                    .get(&failure.key.def)
+                    .and_then(|own| own.get(&error_site(&diagnostic)))
+                    .cloned();
+                match own {
+                    // In the template's words (`T`, not one argument), so
+                    // every instance reports it once.
+                    Some(own) => {
+                        self.diags.emit(own);
+                    }
+                    None => folded.push((diagnostic, requirement)),
+                }
+            }
+            if folded.is_empty() || !self.reported.insert(failure.key.clone()) {
+                continue;
+            }
+            let Some(diagnostic) = self.requirement_failure(&failure.key, &folded) else {
+                continue;
+            };
+            let trace = TraceFrame {
+                func: self.instance_display(&failure.key),
+                span: error_site(&diagnostic).1,
+                address: false,
+                repeat: false,
+                callers: failure.callers.unwrap_or_default(),
+            };
             self.diags.emit(diagnostic.trace(trace));
         }
     }
@@ -306,11 +366,10 @@ impl Checker<'_> {
         }
     }
 
-    /// Folds the requirement failures `held` while checking `key`'s body
-    /// into one `E042` at the use that first requested `key`, held until the
-    /// worklist drains ([`Self::emit_failures`]). The other diagnostics are
-    /// reported unchanged.
-    #[allow(clippy::too_many_lines)]
+    /// Keeps the requirement failures `held` while checking `key`'s body
+    /// for [`Self::emit_failures`], which folds them into one `E042` at the
+    /// use that first requested `key`. The other diagnostics are reported
+    /// unchanged.
     fn instance_failure(&mut self, key: &FuncKey, held: Vec<Pending>) {
         let mut requirements = Vec::new();
         for pending in held {
@@ -321,17 +380,28 @@ impl Checker<'_> {
                 }
             }
         }
-        if requirements.is_empty() || !self.reported.insert(key.clone()) {
-            return;
+        if !requirements.is_empty() {
+            self.failures.push(Failure {
+                key: key.clone(),
+                requirements,
+                callers: None,
+            });
         }
-        let Some(use_span) = self
+    }
+
+    /// The `E042` for instance `key` failing `requirements`, at the use that
+    /// first requested it.
+    #[allow(clippy::too_many_lines)]
+    fn requirement_failure(
+        &self,
+        key: &FuncKey,
+        requirements: &[(Diagnostic, Requirement)],
+    ) -> Option<Diagnostic> {
+        let use_span = self
             .instances
             .get(key)
             .and_then(|instance| instance.origin.as_ref())
-            .map(|(_, span)| *span)
-        else {
-            return;
-        };
+            .map(|(_, span)| *span)?;
         let name = self.function_name(key.def);
         let params = self.scope_of(key.def).join(", ");
         let arg_list: Vec<String> = key.args.iter().map(|arg| self.show(*arg)).collect();
@@ -378,13 +448,13 @@ impl Checker<'_> {
                 false,
                 format!("required by `{name}[{params}]` here"),
             );
-            for (captured, requirement) in &requirements {
+            for (captured, requirement) in requirements {
                 if let Some(span) = primary_label(captured) {
                     diagnostic = diagnostic.label(span, false, phrase(captured, requirement));
                 }
             }
         }
-        for (captured, _) in &requirements {
+        for (captured, _) in requirements {
             for note in &captured.notes {
                 // Two failures of one kind share their note.
                 if !diagnostic.notes.contains(note) {
@@ -392,17 +462,27 @@ impl Checker<'_> {
                 }
             }
         }
-        for help in self.requirement_helps(&requirements) {
+        for help in self.requirement_helps(requirements) {
             diagnostic = diagnostic.help(help);
         }
-        self.failures.push((key.clone(), diagnostic));
+        Some(diagnostic)
     }
 
     /// The diagnostics of a template instance (arguments containing
     /// parameters): those about a parameter's type are dropped and the rest
     /// reported as they are, never folded into `E042`, since no argument
-    /// failed, when [`Self::reports_template`].
+    /// failed, when [`Self::reports_template`]. The template instance of a
+    /// generic keeps where its errors about no parameter are
+    /// (`template_errors`), which its instances report as they are.
     fn template_failure(&mut self, key: &FuncKey, held: Vec<Pending>) {
+        if key.args == self.template_args(key.def) {
+            let own = held
+                .iter()
+                .filter(|pending| !pending.varies && pending.diagnostic.level == Level::Error)
+                .map(|pending| (error_site(&pending.diagnostic), pending.diagnostic.clone()))
+                .collect();
+            self.template_errors.insert(key.def, own);
+        }
         if !self.reports_template(key) {
             return;
         }

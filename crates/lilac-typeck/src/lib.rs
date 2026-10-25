@@ -86,6 +86,7 @@ pub fn check(res: &Resolved, types: &mut Types, diags: &mut Diags, options: Opti
     let mut checker = Checker::new(res, types, diags, options);
     checker.run();
     let templates = checker.check_templates();
+    checker.emit_failures();
     let sigs = checker.sigs.clone();
     Checked {
         hir: std::mem::take(&mut checker.out),
@@ -124,6 +125,7 @@ pub fn check_selectors(
     checker.collect_hooks();
     checker.check_consts();
     checker.drain_queue();
+    checker.emit_failures();
     let ty = TypeRef::value(Builtin::Bit32.id());
     let mut values = Vec::with_capacity(selectors.len());
     for (file, expr) in selectors {
@@ -139,6 +141,7 @@ pub fn check_selectors(
             c.coerce(hir, ty, expr.span())
         });
         checker.drain_queue();
+        checker.emit_failures();
         // A tag or member still being typed leaves the selector undecided
         // (the parser reported it).
         let decided = checker.diags.error_count() == before && checker.empty_names == empty_before;
@@ -326,9 +329,14 @@ pub(crate) struct Checker<'a> {
     /// Every site that requested each instance: the requesting instance
     /// (`None` outside a function body) and the use. `E042` traces them.
     pub origins: HashMap<FuncKey, Vec<(Option<FuncKey>, Span)>>,
-    /// `E042`s waiting for the worklist to drain, so their traces list every
-    /// origin, also ones requested after the failing body was checked.
-    pub failures: Vec<(FuncKey, Diagnostic)>,
+    /// Failed generic instances, reported once every template that can
+    /// tell their own errors from their requirements has been checked
+    /// ([`Self::emit_failures`]).
+    pub failures: Vec<generics::Failure>,
+    /// Each checked template's errors about no parameter, by code and
+    /// primary span: an instance failing one has an error of its own, not
+    /// of its arguments.
+    pub template_errors: HashMap<DefId, HashMap<(&'static str, Span), Diagnostic>>,
     /// [`Options::require_entry`].
     pub require_entry: bool,
     /// Set when the `@entry` body being checked names a missing root item
@@ -424,6 +432,7 @@ impl<'a> Checker<'a> {
             reported: HashSet::new(),
             origins: HashMap::new(),
             failures: Vec::new(),
+            template_errors: HashMap::new(),
             copyable: HashMap::new(),
             droppable: HashMap::new(),
             copy_hooked: HashMap::new(),
@@ -479,7 +488,7 @@ impl Checker<'_> {
             self.front = 0;
             self.check_instance(&key);
         }
-        self.emit_failures();
+        self.close_failures();
     }
 
     /// Whether [`Options::cancel`] is set: the check stops, incomplete.
@@ -536,6 +545,7 @@ impl Checker<'_> {
             let _ = self.request(FuncKey { def: id, args }, span);
             self.drain_queue();
         }
+        self.check_failed_templates();
         self.out.layouts.retain(|ty, _| layouts.contains(ty));
         let templates = self.out.funcs.split_off(funcs);
         for func in &templates {
@@ -544,6 +554,34 @@ impl Checker<'_> {
             }
         }
         templates
+    }
+
+    /// Checks the template of each generic with a failed instance, so
+    /// [`Self::emit_failures`] can tell the body's own errors (ones its
+    /// template has too, about no parameter) from its arguments'. A template
+    /// may fail another instance, whose generic is then checked in turn.
+    fn check_failed_templates(&mut self) {
+        let mut tried = HashSet::new();
+        loop {
+            let defs: Vec<DefId> = self
+                .failures
+                .iter()
+                .map(|failure| failure.key.def)
+                .filter(|def| !self.template_errors.contains_key(def) && tried.insert(*def))
+                .collect();
+            if defs.is_empty() || self.cancelled() {
+                return;
+            }
+            for def in defs {
+                let args = self.template_args(def);
+                if args.is_empty() {
+                    continue;
+                }
+                let span = self.res.def(def).span;
+                let _ = self.request(FuncKey { def, args }, span);
+                self.drain_queue();
+            }
+        }
     }
 
     /// Whether template instance `key` reports its errors: it is the
@@ -854,10 +892,12 @@ impl Checker<'_> {
         involved: &[TypeId],
     ) -> ErrorGuaranteed {
         let dependent = self.involves_param(involved);
+        let varies = dependent && self.could_vary(&requirement, involved);
         self.diags.push(Pending {
             diagnostic,
             requirement: Some(requirement),
             dependent,
+            varies,
         })
     }
 
@@ -874,11 +914,108 @@ impl Checker<'_> {
             diagnostic,
             requirement: None,
             dependent,
+            varies: dependent,
         })
     }
 
     fn involves_param(&self, involved: &[TypeId]) -> bool {
         involved.iter().any(|ty| self.types.contains_param(*ty))
+    }
+
+    /// Whether some generic arguments could make the failed `requirement`
+    /// about `involved` types pass. A mismatch passes only when the two
+    /// types can become one, and a conversion also when either is a bare
+    /// parameter (any type, any `@conversion`) or a registered
+    /// `@conversion` could fit both. `Memory[T]` is never `Slice[T]`,
+    /// whatever `T` is. Any other requirement may.
+    fn could_vary(&self, requirement: &Requirement, involved: &[TypeId]) -> bool {
+        let [a, b] = involved else {
+            return true;
+        };
+        match requirement {
+            Requirement::Mismatch { .. } => self.could_match(*a, *b),
+            Requirement::Conversion { .. } => {
+                let is_param = |ty: TypeId| matches!(self.types.kind(ty), TypeKind::Param { .. });
+                is_param(*a)
+                    || is_param(*b)
+                    || self.could_match(*a, *b)
+                    || self
+                        .conversion_pairs()
+                        .into_iter()
+                        .any(|(from, to)| self.could_match(from, *a) && self.could_match(to, *b))
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `a` and `b` can be the same type once their generic
+    /// parameters are substituted (each parameter matched on its own, so
+    /// this may say yes too often, never too rarely).
+    fn could_match(&self, a: TypeId, b: TypeId) -> bool {
+        self.could_match_in(a, b, &mut HashSet::new())
+    }
+
+    /// [`Self::could_match`], remembering pairs already found to match, so
+    /// a type nested `n` deep is walked once per distinct pair.
+    fn could_match_in(
+        &self,
+        a: TypeId,
+        b: TypeId,
+        matched: &mut HashSet<(TypeId, TypeId)>,
+    ) -> bool {
+        if a == b || matched.contains(&(a, b)) {
+            return true;
+        }
+        let refs = |x: &[TypeRef], y: &[TypeRef], matched: &mut HashSet<(TypeId, TypeId)>| {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|(x, y)| {
+                    let param =
+                        |ty: TypeRef| matches!(self.types.kind(ty.id), TypeKind::Param { .. });
+                    (x.is_ref == y.is_ref || param(*x) || param(*y))
+                        && self.could_match_in(x.id, y.id, matched)
+                })
+        };
+        let fits = match (self.types.kind(a), self.types.kind(b)) {
+            (TypeKind::Param { .. }, _) | (_, TypeKind::Param { .. }) => true,
+            (
+                TypeKind::Instance { base, args },
+                TypeKind::Instance {
+                    base: other,
+                    args: other_args,
+                },
+            ) => base == other && refs(args, other_args, matched),
+            (
+                TypeKind::Array { elem, len },
+                TypeKind::Array {
+                    elem: other,
+                    len: other_len,
+                },
+            ) => len == other_len && self.could_match_in(*elem, *other, matched),
+            (
+                TypeKind::Func {
+                    params,
+                    returns,
+                    c_abi,
+                },
+                TypeKind::Func {
+                    params: other_params,
+                    returns: other_returns,
+                    c_abi: other_c_abi,
+                },
+            ) => {
+                c_abi == other_c_abi
+                    && refs(params, other_params, matched)
+                    && refs(returns, other_returns, matched)
+            }
+            (TypeKind::FormatArgs { writer }, TypeKind::FormatArgs { writer: other }) => {
+                self.could_match_in(*writer, *other, matched)
+            }
+            _ => false,
+        };
+        if fits {
+            matched.insert((a, b));
+        }
+        fits
     }
 
     /// `E010` with both sides labelled.

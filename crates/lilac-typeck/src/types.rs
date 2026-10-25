@@ -12,6 +12,7 @@ use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
+use crate::generics::Failure;
 use crate::paths::path_tail;
 use crate::{Checker, TypeState, MAX_RECURSION, MAX_TYPE_NESTING};
 
@@ -417,11 +418,11 @@ impl Checker<'_> {
         }
         match self.type_states.get(&ty.id) {
             Some(TypeState::Done) => return Ok(()),
-            // Reported when its layout first failed, maybe folded into an
-            // `E042` that waits for the worklist to drain.
+            // Reported when its layout first failed, maybe held by a failed
+            // instance until the end of the check.
             Some(TypeState::Failed) => {
-                return Err(match self.failures.first() {
-                    Some((_, pending)) => ErrorGuaranteed::held(pending),
+                return Err(match self.failures.first().and_then(Failure::held) {
+                    Some(held) => ErrorGuaranteed::held(held),
                     None => self.diags.already_reported(),
                 });
             }

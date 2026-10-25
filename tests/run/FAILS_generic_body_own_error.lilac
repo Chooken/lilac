@@ -1,0 +1,16 @@
+// expect-error: E043
+// expect-stderr: error[E043]: no conversion from @bit8 to @bit32
+// expect-stderr:  --> FAILS_generic_body_own_error.lilac:9:17
+// A mistake in a generic body that has nothing to do with `T` is reported
+// as it is, once, not as an `E042` for each instance: the template, with
+// `T` abstract, fails it too.
+
+id[T]: function (x: T) value: T {
+    y: @bit32 = 1 as @bit8
+    value = x
+}
+
+main: function () nothing {
+    a: @bit8 = id[@bit8](1)
+    b: @bit16 = id[@bit16](2)
+}

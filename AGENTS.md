@@ -1186,9 +1186,19 @@ bug fix that changes generated code.
   `Types::contains_param` is decided once per type at interning.
 - `E042` traces every site that requested the failing instance
   (`Checker::origins`, recorded on every `request`, cached or not), through
-  generic requesters down to plain functions (`Checker::instance_trace`).
-  `E042`s are held in `Checker::failures` until the worklist drains
-  (`drain_queue`), so origins requested later are included. `E051` keeps its
+  generic requesters down to plain functions. A failed instance's
+  requirements wait in `Checker::failures` (`generics::Failure`): its
+  callers are taken when the worklist drains (`close_failures`), so origins
+  requested later are included and a template's are not, and it is reported
+  at the end of the check (`emit_failures`), after `check_failed_templates`
+  has checked the template of every generic with one. A requirement the
+  template also fails where no arguments could make it pass (same code and
+  primary span, `Checker::template_errors`; `Pending::varies`, narrower
+  than `dependent`: `Checker::could_vary` says a mismatch or conversion
+  between types that can never become one, `Memory[T]` and `Slice[T]`,
+  does not vary) is the body's own error, not its arguments': it is reported as the template words it (`T`, not
+  `@bit8`), once for all instances, and only the rest fold into `E042`
+  (`tests/run/FAILS_generic_body_own_error.lilac`). `E051` keeps its
   first-origin `instantiation chain:` note.
 - A generic instance's member hooks register with the type
   (`register_instance_hooks`) but their bodies are `State::Parked`
@@ -1204,7 +1214,8 @@ bug fix that changes generated code.
   with a type that `contains_param` are held as `dependent`;
   `template_failure` drops those and reports the rest plainly (never
   `E042`), but only for the template instance of a generic with no concrete
-  instance (`reports_template`), so nothing is reported twice. A new error
+  instance (`reports_template`), so nothing is reported twice; a template
+  instance always records its other errors in `template_errors`. A new error
   site whose cause can be `T` must go through `emit_involving`, or unused
   generics in `lib/Standard` start failing. Templates also get `E037` from
   typeck (`indices.rs`): a literal or `const` index, skipping arms whose

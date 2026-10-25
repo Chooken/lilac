@@ -1476,6 +1476,65 @@ fn nested_private_object_field_reaches_its_namespace() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+/// An error in a generic body that is not about its parameters is the
+/// body's own, reported as it is in every instance, never as `E042`.
+#[test]
+fn generic_body_error_about_no_parameter_is_not_e042() {
+    let src = "id[T]: function (x: T) value: T {
+    y: @bit32 = 1 as @bit8
+    value = x
+}
+
+main: function () nothing {
+    a: @bit8 = id[@bit8](1)
+    b: @bit16 = id[@bit16](2)
+}
+";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(codes_of(&diags), ["E043"], "{rendered}");
+}
+
+/// A mismatch between types that mention `T` but differ whatever `T` is
+/// (`Holder[T]` is never `Other[T]`) is the body's own error too.
+#[test]
+fn generic_body_mismatch_no_argument_fixes_is_not_e042() {
+    let src = "Holder[T]: structure {\n    value: T\n}\n\nOther[T]: structure {\n    value: T\n}\n\ntake[T]: function (other: Other[T]) nothing {}\n\nwrap[T]: function (x: T) nothing {\n    holder: Holder[T] = Holder[T] {\n        value = x\n    }\n    take[T](holder)\n}\n\nmain: function () nothing {\n    wrap[@bit8](0x1)\n    wrap[@bit16](0x2)\n}\n";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(codes_of(&diags), ["E043"], "{rendered}");
+    assert!(
+        rendered.contains("no conversion from Holder[T] to Other[T]"),
+        "{rendered}"
+    );
+}
+
+/// A body with both kinds of error: the one about `T` is the instance's
+/// `E042`, the other is reported as it is.
+#[test]
+fn generic_body_errors_split_into_own_and_e042() {
+    let src = "Empty: structure {}
+
+double[T]: function (x: T) value: T {
+    y: @bit32 = 1 as @bit8
+    value = x + x
+}
+
+main: function () nothing {
+    a: Empty = double[Empty](Empty {})
+}
+";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    let mut codes = codes_of(&diags);
+    codes.sort_unstable();
+    assert_eq!(codes, ["E042", "E043"], "{rendered}");
+    assert!(
+        rendered.contains("no exact operator overload"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn fails_generic_duck_typing_short() {
     let src = "gen_function[T]: function () out: T {\n    out = T.other()\n}\n\nmain: function () nothing {\n    variable: @bit32 = gen_function[@bit32]()\n}\n";
@@ -1640,12 +1699,26 @@ fn no_cascade_one_error() {
     assert_eq!(rendered.matches("error[E042]").count(), 1, "{rendered}");
 }
 
+/// A member the generic object lacks whatever `T` is, is the method's own
+/// `E021`, in the template's words, not its instance's `E042`.
+#[test]
+fn missing_member_of_the_generic_object_itself_is_not_e042() {
+    let src = "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    r: @bit32 = variable.get()\n}\n";
+    let (diags, _, _, sm) = run(src);
+    let rendered = render_all(&diags, &sm);
+    assert_eq!(codes_of(&diags), ["E021"], "{rendered}");
+    assert!(
+        rendered.contains("no member `other` on `GenObject[T]`"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn failing_object_method_reported_at_use_site() {
-    // A missing member inside a generic object method points the `E042`
+    // A member `T` lacks inside a generic object method points the `E042`
     // primary at the failing use in the method body; the instantiation note
     // carries the pretty method instance rather than a mangled symbol.
-    let src = "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    r: @bit32 = variable.get()\n}\n";
+    let src = "GenObject[T]: structure {\n    value: T\n    get: function (self) result: T {\n        result = self.value.other()\n    }\n}\n\nmain: function () nothing {\n    variable: GenObject[@bit32] = GenObject {\n        value = 0x0\n    }\n    r: @bit32 = variable.get()\n}\n";
     let (diags, _, _, sm) = run(src);
     let e042: Vec<_> = diags
         .diagnostics()
