@@ -3,15 +3,15 @@ using Standard.Heap as Heap
 Set[K]: structure {
 
     private {
-        map: Map[K, Nothing]
+        map: Map[K, Empty]
     }
 
-    new: function () Set[K] => Map[K, Nothing].new()
+    new: function () Set[K] => Map[K, Empty].new()
 
-    new_using: function (allocator: Heap.Allocator) Set[K] => Map[K, Nothing].new_using(allocator)
+    new_using: function (allocator: Heap.Allocator) Set[K] => Map[K, Empty].new_using(allocator)
 
     add: function (self, key: K) nothing {
-        self.map.add(key, Nothing {})
+        self.map.add(key, Empty {})
     }
 
     contains: function (self, key: K) result: Bool {

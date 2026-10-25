@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+- Types are declared with `structure` and `either` (`A: structure {}`,
+  `B: either { … }`): both are highlighted as keywords, and hovers,
+  outlines and completion use them. `object` and `enum` are plain names
+  now, and code that still declares a type with one shows the error with
+  a quick fix to the new keyword.
+- A mistake in a generic body that no type argument could fix is shown
+  where it is, once, in the generic's own terms (`Holder[T]`), instead of
+  as an `E042` at every call.
+
 ## 0.8.0
 
 - Function values: hovers print `ref function (…) …` types (several
