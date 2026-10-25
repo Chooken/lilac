@@ -387,6 +387,7 @@ impl Parser {
         diags: &mut lilac_error::Diags,
         keyword_span: Span,
     ) -> Result<Expr, ErrorGuaranteed> {
+        let recoveries = self.recoveries;
         let cond = self.with_struct_lit(false, |p| p.parse_expr(diags))?;
         if self.peek().kind == TokenKind::LBrace {
             return Err(Self::err(
@@ -395,10 +396,34 @@ impl Parser {
                 "block `if` is a statement; an `if` value is written `if c then x else y`",
             ));
         }
-        self.expect(diags, TokenKind::KwThen, "`then` in `if` value")?;
-        let then = self.parse_expr(diags)?;
-        self.expect(diags, TokenKind::KwElse, "`else` in `if` value")?;
-        let els = self.parse_expr(diags)?;
+        // An `if` value still being typed (mid-edit) keeps what it has,
+        // the missing parts `Expr::Error`s, so its condition and `then`
+        // are checked (and complete). A part that already recovered
+        // (`if a.`) was reported.
+        let missing = |p: &mut Self, diags: &mut lilac_error::Diags, what: &str| {
+            if p.recoveries == recoveries {
+                Self::expected(diags, p.peek(), what);
+                p.recover();
+            }
+            Expr::Error {
+                span: p.prev_span(),
+            }
+        };
+        let (then, els) = if self.peek().kind == TokenKind::KwThen {
+            self.bump();
+            let then = self.parse_expr(diags)?;
+            let els = if self.peek().kind == TokenKind::KwElse {
+                self.bump();
+                self.parse_expr(diags)?
+            } else {
+                missing(self, diags, "`else` in `if` value")
+            };
+            (then, els)
+        } else {
+            let then = missing(self, diags, "`then` in `if` value");
+            let els = Expr::Error { span: then.span() };
+            (then, els)
+        };
         let span = join_spans(keyword_span, els.span());
         Ok(Expr::IfValue {
             cond: Box::new(cond),

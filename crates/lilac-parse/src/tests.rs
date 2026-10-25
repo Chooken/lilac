@@ -1448,6 +1448,62 @@ fn call_arg_error_recovers_to_expr_error() {
 }
 
 #[test]
+fn an_if_without_its_block_keeps_its_condition() {
+    // Mid-edit, an `if` with no block (or an `if` value with no `then` or
+    // `else`) keeps its condition, so it is checked and completes; one
+    // error each, none more for a condition that already recovered.
+    let src = "main: function () nothing {\n    if a.b\n    x = 0x1\n    if a.\n    \
+               y: @bit8 = if a then b\n    z: @bit8 = if a\n}\n";
+    let (program, diags, had_errors, _) = parse_with_status(src);
+    assert!(had_errors);
+    let ItemKind::Func(decl) = &program.items[0].kind else {
+        panic!("expected function, got {:?}", program.items[0].kind);
+    };
+    let Some(FuncBody::Block(block)) = &decl.body else {
+        panic!("expected block body, got {:?}", decl.body);
+    };
+    assert!(
+        matches!(&block.stmts[0], Stmt::If { cond: Expr::Member { .. }, then, .. } if then.stmts.is_empty())
+    );
+    assert!(
+        !matches!(&block.stmts[1], Stmt::Error { .. }),
+        "{:?}",
+        block.stmts[1]
+    );
+    assert!(
+        matches!(&block.stmts[2], Stmt::If { .. }),
+        "{:?}",
+        block.stmts[2]
+    );
+    for stmt in &block.stmts[3..] {
+        assert!(
+            matches!(
+                stmt,
+                Stmt::Let {
+                    value: Expr::IfValue { .. },
+                    ..
+                }
+            ),
+            "{stmt:?}"
+        );
+    }
+    let messages: Vec<&str> = diags
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| &*diagnostic.msg)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "expected `{` after `if` condition, found `x`",
+            "expected member name after `.`, found `y`",
+            "expected `else` in `if` value, found `z`",
+            "expected `then` in `if` value, found `}`",
+        ]
+    );
+}
+
+#[test]
 fn recovered_failure_before_missing_close_is_single_diagnostic() {
     // A recovered type failure whose statement *survives* must not be
     // followed by a spurious "unterminated block": strict mode sees exactly

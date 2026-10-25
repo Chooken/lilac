@@ -873,6 +873,9 @@
   and statements whose value has no effect (`HirProgram::no_effect`, from
   `HirExpr::has_no_effect`: nothing in them is a call, so `5 + 5` but not
   `a + b`, which calls an operator hook). A scope with an error gets none.
+  Likewise an `if` with no block yet keeps its condition (an empty
+  `then`, `parse_if_stmt`), and an `if` value with no `then` or `else`
+  keeps what it has (`Expr::Error` for the rest), one `E001` each.
   Discarded call results are never flagged, and nothing here is an error.
 - Resilience: a compile that panics keeps the previous analysis and shows
   one `window/showMessage` error until a compile succeeds

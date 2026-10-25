@@ -136,14 +136,29 @@ impl Parser {
         diags: &mut lilac_error::Diags,
     ) -> Result<Stmt, ErrorGuaranteed> {
         let keyword = self.bump();
+        let recoveries = self.recoveries;
         let cond = self.with_struct_lit(false, |p| p.parse_expr(diags))?;
         let captures = self.parse_captures(diags)?;
         if self.peek().kind != TokenKind::LBrace {
-            return Err(Self::expected(
-                diags,
-                self.peek(),
-                "`{` after `if` condition",
-            ));
+            // An `if` still waiting for its block (mid-edit): keep it with
+            // an empty one, so its condition is checked (and completes).
+            // A condition that already recovered (`if a.`) was reported.
+            if self.recoveries == recoveries {
+                Self::expected(diags, self.peek(), "`{` after `if` condition");
+                self.recover();
+            }
+            let end = self.prev_span();
+            return Ok(Stmt::If {
+                cond,
+                captures,
+                then: Block {
+                    stmts: Vec::new(),
+                    span: end,
+                },
+                else_captures: Vec::new(),
+                els: None,
+                span: join_spans(keyword.span, end),
+            });
         }
         let then = self.parse_block(diags)?;
         let mut else_captures = Vec::new();

@@ -375,6 +375,31 @@ fn members_complete_after_a_dot() {
     handle.join().expect("server thread");
 }
 
+/// An `if` still waiting for its block keeps its condition checked, so
+/// names and members complete in it.
+#[test]
+fn an_if_without_its_block_still_completes() {
+    let (client, handle, uri) = open_program();
+    let members = complete_after(&client, &uri, 2, "    if point.");
+    assert_eq!(sorted(labels(&members)), vec!["sum", "x", "y"]);
+
+    let nested = complete_after(
+        &client,
+        &uri,
+        3,
+        "    if point.x == 0x1 {\n        if point.",
+    );
+    assert_eq!(sorted(labels(&nested)), vec!["sum", "x", "y"]);
+
+    let value = complete_after(&client, &uri, 4, "    total: @bit8 = if point.");
+    assert_eq!(sorted(labels(&value)), vec!["sum", "x", "y"]);
+
+    let names = complete_after(&client, &uri, 5, "    if fi");
+    assert!(labels(&names).contains(&"first"), "{:?}", labels(&names));
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 fn sorted(mut labels: Vec<&str>) -> Vec<&str> {
     labels.sort_unstable();
     labels
