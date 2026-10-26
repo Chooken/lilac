@@ -13,24 +13,16 @@ Memory[T]: structure {
 
     new_using: function (count: Int, allocator: Heap.Allocator) result: Memory[T] {
 
-        header_size: Int = align_up(
-            @size_of(MemoryHeader[T]), 
-            @align_of(T)
-        )
-
         result = Memory[T] {
             ptr = allocator.allocate_raw(
-                header_size, 
-                @align_of(T)
+                block_size(count), 
+                block_alignment()
             ) as ref MemoryHeader[T]
         }
 
         result.ptr = MemoryHeader[T] {
             allocator = allocator
-            data = Slice[T].new(
-                @ptr_add(result.ptr as ref unknown, header_size) as ref T, 
-                count
-            )
+            data = Slice[T].new(elements_of(result.ptr), count)
         }
     }
 
@@ -46,12 +38,8 @@ Memory[T]: structure {
 
     slice: function (self, range: Range) Slice[T] => self.ptr.data.slice(range)
 
+    /// Makes room for exactly `new_size` elements; the elements may move.
     resize: function (self, new_size: Int) nothing {
-
-        header_size: Int = align_up(
-            @size_of(MemoryHeader[T]), 
-            @align_of(T)
-        )
 
         allocator: Heap.Allocator = self.ptr.allocator
 
@@ -59,21 +47,39 @@ Memory[T]: structure {
 
         self.ptr = allocator.reallocate_raw(
             ptr, 
-            header_size + self.ptr.data.get_count(), 
-            new_size, 
-            @align_of(T)
+            block_size(self.ptr.data.get_count()), 
+            block_size(new_size), 
+            block_alignment()
         ) as ref MemoryHeader[T]
+
+        self.ptr.data = Slice[T].new(elements_of(self.ptr), new_size)
     }
 
     free: function (self) nothing {
-        header_size: Int = align_up(
-            @size_of(MemoryHeader[T]), 
-            @align_of(T)
-        )
 
         allocator: Heap.Allocator = self.ptr.allocator
 
-        allocator.free_raw(self.ptr as ref unknown, header_size + self.ptr.data.get_count(), @align_of(T))
+        allocator.free_raw(
+            self.ptr as ref unknown, 
+            block_size(self.ptr.data.get_count()), 
+            block_alignment()
+        )
+    }
+
+    private {
+
+        /// The header's size, rounded up so the elements after it are
+        /// aligned.
+        header_size: function () Int => align_up(@size_of(MemoryHeader[T]), @align_of(T))
+
+        /// The bytes of a block holding the header and `count` elements.
+        block_size: function (count: Int) Int => header_size() + count * @size_of(T)
+
+        /// A block's alignment: the header's or the elements', the larger.
+        block_alignment: function () Int => if @i_greater_than_u_native(@align_of(T), @align_of(MemoryHeader[T])) then @align_of(T) else @align_of(MemoryHeader[T])
+
+        /// The first element of the block at `header`.
+        elements_of: function (header: ref MemoryHeader[T]) ref T => @ptr_add(header as ref unknown, header_size()) as ref T
     }
 }
 

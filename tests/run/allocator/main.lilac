@@ -27,7 +27,7 @@ expect_filled: function (address: @bit_native, byte: @bit8, len: @bit_native, co
     loop if @i_less_than_u_native(index, len) {
         expect(@extend_zero(@load_u8(data, index)), @extend_zero(byte), code)
         index = @i_add_native(index, 0x1)
-    } else break
+    }
 }
 
 fill: function (address: @bit_native, byte: @bit8, len: @bit_native) nothing {

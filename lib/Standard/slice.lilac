@@ -85,7 +85,7 @@ Slice[T]: structure {
             @write(slice.get(offset + index), self.get(index))
             index += 1
 
-        } else break
+        }
     }
 
     /// Moves every element into `slice`, from element `offset` on, as
@@ -119,7 +119,7 @@ Slice[T]: structure {
             out.write($"{self.get(index)}")
 
             index += 1
-        } else break
+        }
 
         out.write_bytes("]")
     }

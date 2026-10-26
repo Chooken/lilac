@@ -31,7 +31,7 @@ show: function (list: ref List[Leaf]) nothing {
     loop if index < list.get_count() {
         print_char(list.get(index).c)
         index += 1
-    } else break
+    }
     print_char(']')
 }
 

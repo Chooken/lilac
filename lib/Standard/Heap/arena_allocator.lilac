@@ -219,7 +219,7 @@ ArenaAllocator: structure {
             @memset(@ptr_add(block as ref unknown, header as @bit_native), 0x0, block.used - header)
             block.used = header
 
-        } else break
+        }
 
         self.current_block = self.first_block
 
@@ -301,7 +301,7 @@ private {
             // Read before the unmap takes the header with it.
             optional_next = block.next
             Os.unmap_pages(block as ref unknown, block.size)
-        } else break
+        }
     }
 
     /// The bytes taken past the headers of `first` and every block after it.
@@ -311,7 +311,7 @@ private {
         loop if optional_next.get() -> block: ref ArenaBlock {
             optional_next = block.next
             total = total + (block.used - @size_of(ArenaBlock))
-        } else break
+        }
     }
 
     /// The bytes past the headers of `first` and every block after it.
@@ -321,7 +321,7 @@ private {
         loop if optional_next.get() -> block: ref ArenaBlock {
             optional_next = block.next
             total = total + (block.size - @size_of(ArenaBlock))
-        } else break
+        }
     }
 
     /// One mapping of pages: this header, then the allocations from

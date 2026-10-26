@@ -56,7 +56,7 @@ Wyhash: structure {
 
             self.round(input.slice(Range.of(index, index + 48)))
 
-        } else break
+        }
 
         remaining_slice: Slice[@bit8] = input.slice(Range.of(index, input.get_count()))
 
@@ -121,7 +121,7 @@ Wyhash: structure {
 
                     hasher.round(input.slice(Range.of(index, index + 48)))
 
-                } else break
+                }
                 hasher.final0()
             }
             hasher.final1(input, index)
@@ -251,7 +251,7 @@ Wyhash: structure {
 
                 index += 16
 
-            } else break
+            }
 
             self.a = read[@bit64](input_lb.get(input_lb.get_count() - 16))
             self.b = read[@bit64](input_lb.get(input_lb.get_count() - 8))

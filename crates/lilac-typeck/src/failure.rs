@@ -159,7 +159,9 @@ impl Checker<'_> {
     }
 
     /// `if cond [-> captures] { } [else [-> captures] …]`: a capture `if`
-    /// when `cond` is a call that can fail, else a plain one.
+    /// when `cond` is a call that can fail, else a plain one. As a
+    /// `loop`'s statement (`FnCx::implicit_break`), a chain with no final
+    /// `else` ends with `else break`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_if(
         &mut self,
@@ -172,6 +174,12 @@ impl Checker<'_> {
         span: Span,
         out: &mut Vec<HirStmt>,
     ) {
+        // Taken here so no `if` inside the condition or the `then` block
+        // sees it, and given back to the `else` only when it continues the
+        // chain.
+        let implicit = std::mem::take(&mut fcx.implicit_break);
+        let implicit =
+            (implicit && matches!(els, None | Some(Stmt::If { .. }))).then(|| cond.span());
         let first_capture = captures.first().or(else_captures.first());
         let cond = if let Expr::Call { .. } = cond {
             match self.check_subject(fcx, cond, None) {
@@ -183,6 +191,7 @@ impl Checker<'_> {
                         then,
                         else_captures,
                         els,
+                        implicit,
                         span,
                         out,
                     );
@@ -212,7 +221,7 @@ impl Checker<'_> {
             self.no_captures(first_capture, &cond, "the condition");
         }
         let then = self.captured_block(fcx, then, captures, &[], &[]);
-        let els = self.else_block(fcx, els, else_captures, &[], &[], span);
+        let els = self.else_block(fcx, els, else_captures, &[], &[], implicit, span);
         out.push(HirStmt::If { cond, then, els });
     }
 
@@ -246,6 +255,7 @@ impl Checker<'_> {
         then: &Block,
         else_captures: &[Param],
         els: Option<&Stmt>,
+        implicit: Option<Span>,
         span: Span,
         out: &mut Vec<HirStmt>,
     ) {
@@ -256,7 +266,7 @@ impl Checker<'_> {
         let (success, failure) = call.outs.split_at(call.success);
         let (successes, failures) = hidden.split_at(call.success);
         let then = self.captured_block(fcx, then, captures, successes, success);
-        let els = self.else_block(fcx, els, else_captures, failures, failure, span);
+        let els = self.else_block(fcx, els, else_captures, failures, failure, implicit, span);
         stmts.push(HirStmt::If {
             cond: flag,
             then,
@@ -444,7 +454,10 @@ impl Checker<'_> {
     }
 
     /// An `if`'s `else`: a block binding `captures` (and moving the rest of
-    /// `locals`) when there are any.
+    /// `locals`) when there are any. `implicit` is the span of the
+    /// `else break` a `loop`'s `if` chain ends with: a missing `else`
+    /// breaks there, and an `else if` passes it on.
+    #[allow(clippy::too_many_arguments)]
     fn else_block(
         &mut self,
         fcx: &mut FnCx,
@@ -452,23 +465,35 @@ impl Checker<'_> {
         captures: &[Param],
         locals: &[LocalId],
         tys: &[TypeRef],
+        implicit: Option<Span>,
         span: Span,
     ) -> HirBlock {
-        match els {
-            Some(Stmt::Block(block)) => self.captured_block(fcx, block, captures, locals, tys),
-            Some(els) if locals.is_empty() => self.check_stmt_block(fcx, els),
-            None if locals.is_empty() => empty_block(span),
+        fcx.implicit_break = implicit.is_some();
+        let block = match (els, implicit) {
+            (Some(Stmt::Block(block)), _) => self.captured_block(fcx, block, captures, locals, tys),
+            (Some(els), _) if locals.is_empty() => self.check_stmt_block(fcx, els),
+            (None, Some(at)) if locals.is_empty() => HirBlock {
+                stmts: vec![HirStmt::Break(at)],
+                span: at,
+            },
+            (None, None) if locals.is_empty() => empty_block(span),
             _ => {
-                let span = els.map_or(span, Stmt::span);
+                let span = els.map_or(implicit.unwrap_or(span), Stmt::span);
                 fcx.open(span);
                 let mut stmts = self.bind_captures(fcx, captures, locals, tys);
-                if let Some(els) = els {
-                    stmts.push(HirStmt::Block(self.check_stmt_block(fcx, els)));
+                match (els, implicit) {
+                    (Some(els), _) => {
+                        stmts.push(HirStmt::Block(self.check_stmt_block(fcx, els)));
+                    }
+                    (None, Some(at)) => stmts.push(HirStmt::Break(at)),
+                    (None, None) => {}
                 }
                 fcx.close();
                 HirBlock { stmts, span }
             }
-        }
+        };
+        fcx.implicit_break = false;
+        block
     }
 
     /// More `captures` than `count` outs on this `side` is `E062`.

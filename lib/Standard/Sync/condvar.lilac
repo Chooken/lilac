@@ -11,7 +11,7 @@ using Standard.Os as Os
 /// guard: Sync.MutexGuard[List[Int]] = jobs.lock()
 /// loop if guard.value().is_empty() {
 ///     guard = @move(guard).wait(ref ready)
-/// } else break
+/// }
 /// ```
 ///
 /// A wait may also return with nothing changed (spuriously), so always

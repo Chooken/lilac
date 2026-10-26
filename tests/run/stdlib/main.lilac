@@ -113,7 +113,7 @@ boxes: function () nothing {
 }
 
 consts: function () nothing {
-    c: Const[Int32] = Const[Int32].new(0x3 as Int32)
+    c: Constant[Int32] = Constant[Int32].new(0x3 as Int32)
     expect(c.get() == 0x3 as Int32, 0x40)
 }
 

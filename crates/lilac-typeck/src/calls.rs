@@ -411,7 +411,7 @@ impl Checker<'_> {
                 .label(span, true, "this call can fail")
                 .help(
                     "handle it where it happens: `value: T = call else { return }`, \
-                     `if call -> value: T { ... }`, or `loop if call -> value: T { ... } else break`",
+                     `if call -> value: T { ... }`, or `loop if call -> value: T { ... }`",
                 ),
             ));
         }

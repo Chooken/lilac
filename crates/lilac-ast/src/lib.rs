@@ -439,7 +439,8 @@ pub enum Stmt {
         /// Whole-statement span.
         span: Span,
     },
-    /// `loop <stmt>`: `loop { ... }`, `loop if cond { ... } else break`.
+    /// `loop <stmt>`: `loop { ... }`, `loop if cond { ... }` (which typeck
+    /// ends with `else break` when the chain has no `else`).
     Loop {
         /// Repeated statement.
         body: Box<Stmt>,

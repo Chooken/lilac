@@ -32,13 +32,13 @@ Map[K, V]: structure {
             self.grow()
         }
 
-        if insert_into(key, value, ref self.data) {
+        if insert_into(key, value, self.data.get_slice()) {
             self.used += 1
         }
     }
 
     contains: function (self, key: K) result: Bool {
-        if get_index_of(key, ref self.data) {
+        if get_index_of(key, self.data.get_slice()) {
             result = true
         } else {
             result = false
@@ -47,7 +47,7 @@ Map[K, V]: structure {
 
     get: function (self, key: K) value: ref V else nothing {
 
-        index: Int = get_index_of(key, ref self.data) else {
+        index: Int = get_index_of(key, self.data.get_slice()) else {
             fail
         }
 
@@ -56,7 +56,7 @@ Map[K, V]: structure {
 
     remove: function (self, key: K) nothing {
 
-        index: Int = get_index_of(key, ref self.data) else {
+        index: Int = get_index_of(key, self.data.get_slice()) else {
             return
         }
 
@@ -110,7 +110,7 @@ Map[K, V]: structure {
 
             index += 1
 
-        } else break
+        }
 
         self.used = 0
     }
@@ -147,7 +147,7 @@ Map[K, V]: structure {
 
             index += 1
 
-        } else break
+        }
 
         self.data.free()
         self.data = new_data
@@ -174,7 +174,7 @@ Map[K, V]: structure {
 
             index += 1
 
-        } else break
+        }
 
         to = Map[K, V] {
             data = new_data
@@ -198,7 +198,7 @@ Map[K, V]: structure {
 
             index += 1
 
-        } else break
+        }
 
         self.data.free()
     }
@@ -218,7 +218,7 @@ Map[K, V]: structure {
 
         wrap_index: function (index: Int, capacity: Int) Int => @bit_and_native(index as @bit_native, (capacity - 1) as @bit_native)
 
-        insert_into: function (key: K, value: V, slice: ref Slice[MapBucket[K, V]]) inserted_new: Bool {
+        insert_into: function (key: K, value: V, slice: Slice[MapBucket[K, V]]) inserted_new: Bool {
 
             capacity: Int = slice.get_count()
 
@@ -252,12 +252,12 @@ Map[K, V]: structure {
                 index = wrap_index(index + 1, capacity)
                 bucket = slice.get(index)
 
-            } else break
+            }
 
             @write(bucket, @move(new_bucket))
         }
 
-        get_index_of: function (key: K, slice: ref Slice[MapBucket[K,V]]) index: Int else nothing {
+        get_index_of: function (key: K, slice: Slice[MapBucket[K,V]]) index: Int else nothing {
 
             capacity: Int = slice.get_count()
             index = get_ideal_index(ref key, capacity)

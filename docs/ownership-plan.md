@@ -146,7 +146,7 @@ if map(size) -> memory: ref unknown {
 // Loop: repeat until the call fails
 loop if lines.next() -> line: Text {
     ...
-} else break
+}
 ```
 
 - A guard's `else` block ends in `return`, `break`, `continue`, `fail`,

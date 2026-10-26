@@ -26,7 +26,7 @@ divide_slow: function (n: @bit32, d: @bit32) (quotient: @bit32, remainder: @bit3
     loop if @i_less_than_or_equal_32(d, remainder) {
         remainder = @i_sub_32(remainder, d)
         quotient = @i_add_32(quotient, 0x1)
-    } else break
+    }
 }
 
 run: function (divide: ref function (@bit32, @bit32) (@bit32, @bit32), n: @bit32, d: @bit32) nothing {

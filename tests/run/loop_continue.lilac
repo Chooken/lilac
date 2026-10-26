@@ -14,7 +14,7 @@ main: function () nothing {
             continue
         }
         sum = @i_add_32(sum, i)
-    } else break
+    }
 
     // Three outer passes, each counting the inner odd `k` (1 and 3): 6.
     j: @bit32 = 0x0
@@ -27,7 +27,7 @@ main: function () nothing {
                 continue
             }
             sum = @i_add_32(sum, 0x1)
-        } else break
-    } else break
+        }
+    }
     exit(sum)
 }

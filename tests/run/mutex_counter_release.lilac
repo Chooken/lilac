@@ -25,7 +25,7 @@ work: function (argument: ref unknown) nothing {
         // A temporary guard unlocks at the end of its statement.
         local.lock().value() += 1
         index += 1
-    } else break
+    }
 }
 
 main: function () nothing {
@@ -41,14 +41,14 @@ main: function () nothing {
         stored: ref Os.Thread = @array_at(running, index)
         stored = thread
         index = @i_add_native(index, 0x1)
-    } else break
+    }
     index = 0x0
     loop if index != 0x4 {
         match Os.join(@array_at(running, index)) {
             .Some => exit(0x2)
         }
         index = @i_add_native(index, 0x1)
-    } else break
+    }
     if raw.is_locked() {
         exit(0x3)
     }

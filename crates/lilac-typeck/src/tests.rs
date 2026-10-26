@@ -1218,6 +1218,42 @@ fn loop_if_checks() {
     assert!(!diags.has_errors(), "{diags:?}");
 }
 
+/// The `if` statements of `block`, depth first, with the `else` of each.
+fn if_elses(block: &lilac_hir::HirBlock, out: &mut Vec<Vec<HirStmt>>) {
+    for stmt in &block.stmts {
+        match stmt {
+            HirStmt::If { then, els, .. } => {
+                out.push(els.stmts.clone());
+                if_elses(then, out);
+                if_elses(els, out);
+            }
+            HirStmt::Loop(body) | HirStmt::Block(body) => if_elses(body, out),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn loop_if_without_else_breaks() {
+    // The chain's last `if` breaks; an `if` inside a `then` does not, and
+    // an explicit `else` keeps its own statements.
+    let (diags, hir, _) = check(
+        "main: function () nothing {\n    n: @bit32 = 0x0\n    \
+         loop if n == 0x1 {\n        if n == 0x2 {\n        }\n    } else if n == 0x3 {\n    }\n    \
+         loop if n == 0x4 {\n    } else {\n    }\n}\n",
+    );
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "n");
+    let mut elses = Vec::new();
+    if_elses(main.body.as_ref().expect("body"), &mut elses);
+    let breaks: Vec<bool> = elses
+        .iter()
+        .map(|els| matches!(els.as_slice(), [HirStmt::Break(_)]))
+        .collect();
+    // `n == 0x1`, `n == 0x2`, `n == 0x3`, `n == 0x4`.
+    assert_eq!(breaks, [false, false, true, false], "{elses:?}");
+}
+
 #[test]
 fn if_value_branch_mismatch_is_e043() {
     let diags = check_src(

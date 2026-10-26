@@ -193,7 +193,7 @@ GeneralAllocator: structure {
                 // Read before the unmap takes the header with it.
                 next_slab = slab.next
                 Os.unmap_pages(slab.base, slab.size as @bit_native)
-            } else break
+            }
             index = index + 1
         }
         Os.unmap_pages(table as ref unknown, class_table_size() as @bit_native)
@@ -202,7 +202,7 @@ GeneralAllocator: structure {
         loop if next_large.get() -> header: ref LargeHeader {
             next_large = header.next
             Os.unmap_pages(header.mapping, header.mapping_size as @bit_native)
-        } else break
+        }
     }
 
     private {

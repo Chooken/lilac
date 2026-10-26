@@ -92,7 +92,7 @@ main: function () nothing {
     count: Countdown { left = 0x3 }
     loop if count.next() -> n: @bit32 {
         total = @i_add_32(total, n)
-    } else break
+    }
 
     // `Optional` and `Result` can fail with `get`.
     some: Optional[@bit32] = .Some(0x5)

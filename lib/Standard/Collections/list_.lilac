@@ -105,7 +105,7 @@ List[T]: structure {
 
         if index != self.count {
             move_slice: Slice[T] = self.data.slice(Range.of(index, self.count))
-            move_slice.move_to(self.data, index + 1)
+            move_slice.move_to(self.data.get_slice(), index + 1)
         }
 
         @write(self.data.get(index), value)
@@ -148,7 +148,7 @@ List[T]: structure {
 
         if index != self.count - 1 {
             move_slice: Slice[T] = self.data.slice(Range.of(index + 1, self.count))
-            move_slice.move_to(self.data, index)
+            move_slice.move_to(self.data.get_slice(), index)
         }
 
         self.count -= 1
@@ -180,11 +180,11 @@ List[T]: structure {
             @drop(value)
             index += 1
 
-        } else break
+        }
 
         if range.max() != self.count {
             move_slice: Slice[T] = self.data.slice(Range.of(range.max(), self.count))
-            move_slice.move_to(self.data, range.min())
+            move_slice.move_to(self.data.get_slice(), range.min())
         }
 
         self.count -= range.length()
@@ -193,7 +193,11 @@ List[T]: structure {
 
     /// Doubles the capacity (to 4 when it is 0).
     grow: function (self) nothing {
-        self.reserve(self.get_capacity() * 2)
+        if self.get_capacity() == 0 as Int {
+            self.reserve(4)
+        } else {
+            self.reserve(self.get_capacity() * 2)
+        }
     }
 
     /// Grows the capacity to at least `capacity` elements; a smaller one
@@ -235,7 +239,7 @@ List[T]: structure {
             @drop(value)
             index += 1
 
-        } else break
+        }
 
         self.data.free()
     }

@@ -63,7 +63,7 @@ main: function () nothing {
         guard: Sync.MutexGuard[Int] = counter.lock()
         round += 1
         continue
-    } else break
+    }
     unlocked(0x4)
 
     if fails() -> value: Int {

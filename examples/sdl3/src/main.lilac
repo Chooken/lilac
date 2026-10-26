@@ -77,7 +77,7 @@ print_c: function (text: ref @bit8) nothing {
     loop if at != 0x0 {
         print_byte(at)
         at = @ptr_add(at as ref unknown, 0x1) as ref @bit8
-    } else break
+    }
 }
 
 die: function (what: @byte_buffer) nothing {
@@ -139,7 +139,7 @@ main: function () nothing {
             if event.type == EVENT_QUIT or event.type == EVENT_KEY_DOWN {
                 running = 0x0
             }
-        } else break
+        }
         now: Uint64 = SDL_GetTicks() - start
         if now > 6000 {
             running = 0x0
@@ -162,7 +162,7 @@ main: function () nothing {
         SDL_RenderPresent(renderer)
         frames += 1
         SDL_Delay(0x10)
-    } else break
+    }
     print_line($"drew {frames} frames")
     SDL_DestroyRenderer(renderer)
     SDL_DestroyWindow(window)

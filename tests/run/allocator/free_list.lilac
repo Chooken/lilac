@@ -92,7 +92,7 @@ alloc: function (list: ref FreeList, size: @bit_native, align: @bit_native) payl
         taken.used = 0x1
         payload = @i_add_native(start, header_size)
         return
-    } else break
+    }
 }
 
 // Merges every run of adjacent free blocks into one.
@@ -111,7 +111,7 @@ coalesce: function (list: ref FreeList) nothing {
             }
         }
         address = next
-    } else break
+    }
 }
 
 free: function (list: ref FreeList, payload: @bit_native) nothing {

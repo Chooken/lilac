@@ -248,7 +248,7 @@ impl Parser {
         })
     }
 
-    /// `loop <stmt>`: `loop { ... }`, `loop if c { ... } else break`, ...
+    /// `loop <stmt>`: `loop { ... }`, `loop if c { ... }`, ...
     pub(crate) fn parse_loop_stmt(
         &mut self,
         diags: &mut lilac_error::Diags,

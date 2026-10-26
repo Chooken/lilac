@@ -45,6 +45,10 @@ pub(crate) struct FnCx {
     pub handled: Option<Span>,
     /// The flag out of a function that can fail (`HirFunc::failure`).
     pub fail_flag: Option<LocalId>,
+    /// Set while a `loop`'s own statement is an `if` chain: the chain's
+    /// last `if`, when it has no `else`, breaks when nothing ran
+    /// (`Checker::check_if` takes it).
+    pub implicit_break: bool,
 }
 
 impl FnCx {
@@ -60,6 +64,7 @@ impl FnCx {
             loops: 0,
             handled: None,
             fail_flag: None,
+            implicit_break: false,
         }
     }
 
@@ -532,6 +537,7 @@ impl Checker<'_> {
             ),
             Stmt::Loop { body, .. } => {
                 fcx.loops += 1;
+                fcx.implicit_break = matches!(**body, Stmt::If { .. });
                 let body = self.check_stmt_block(fcx, body);
                 fcx.loops -= 1;
                 out.push(HirStmt::Loop(body));

@@ -719,7 +719,7 @@ if halve(n) -> half: @bit32 {
 // Loop: repeat until the call fails.
 loop if lines.next() -> line: Text {
     ...
-} else break
+}
 ```
 
 Captures on a condition that cannot fail, and a guard on a call that
@@ -839,14 +839,28 @@ loop {
 }
 ```
 
-A conditional loop is just `loop` over an `if`:
+A conditional loop is just `loop` over an `if`. When the loop's
+statement is an `if` chain with no final `else`, the chain ends with an
+`else break`: the loop runs while one of its conditions holds (or, for
+a call that can fail, while it succeeds), and ends once none does.
 
 ```lilac
 val: @bit8 = 0x0
 loop if @i_less_than_8(val, 0x1) {
     // do work
-} else break
+}
+
+loop if a {
+    // while `a`
+} else if b {
+    // while `b` but not `a`
+}
 ```
+
+An explicit `else` is kept as written (`else break` is still allowed),
+so `loop if c { … } else { … }` runs until something in it breaks. To
+repeat an `if` with no `else` and no implicit `break`, write
+`loop { if c { … } }`.
 The intrinsic form needs no operator binding. Once `@less_than` is defined for
 the operand types (see §8), the idiomatic form `loop if val < 0x1` works identically.
 
@@ -861,7 +875,7 @@ loop if @i_less_than_32(i, 0xa) {
         continue // skip even numbers
     }
     // odd numbers only
-} else break
+}
 ```
 
 `break` and `continue` outside a `loop` are `E022`.
