@@ -41,13 +41,24 @@ Condvar: structure {
 
     /// Like `wait_raw`, but returns once about `nanos` nanoseconds have
     /// passed: `timed_out` says whether they have. `mutex` is held again
-    /// either way.
+    /// either way. The OS wait may return early, so this one keeps the
+    /// deadline: it returns before it only once notified.
     wait_raw_timeout: function (self, mutex: ref RawMutex, nanos: @bit64) timed_out: Bool {
         start: @bit64 = Os.monotonic_nanos()
         sequence: @bit32 = @atomic_load_relaxed_32(ref self.sequence)
         mutex.unlock()
-        Os.wait_on_address_timeout(ref self.sequence, sequence, nanos)
-        timed_out = @i_greater_than_or_equal_u_64(@i_sub_64(Os.monotonic_nanos(), start), nanos)
+        timed_out = false
+        loop {
+            elapsed: @bit64 = @i_sub_64(Os.monotonic_nanos(), start)
+            if @i_greater_than_or_equal_u_64(elapsed, nanos) {
+                timed_out = true
+                break
+            }
+            if @atomic_load_relaxed_32(ref self.sequence) != sequence {
+                break
+            }
+            Os.wait_on_address_timeout(ref self.sequence, sequence, @i_sub_64(nanos, elapsed))
+        }
         mutex.lock()
     }
 
