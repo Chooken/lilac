@@ -649,6 +649,7 @@ impl<'a> Lower<'a> {
             | HirExprKind::CompileError { .. }
             | HirExprKind::Unanswered
             | HirExprKind::Assumed { .. }
+            | HirExprKind::AssumedVariant { .. }
             | HirExprKind::Poison
             // Taken by `eval_address`.
             | HirExprKind::FuncRef(_)

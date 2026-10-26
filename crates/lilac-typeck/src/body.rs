@@ -11,6 +11,7 @@ use lilac_ast::{
     BinOp, Block, Expr, FuncBody, FuncDecl, MatchArm, MatchArmBody, MatchPattern, Param, Stmt,
 };
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed, Unreported};
+use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{
     FuncKey, HirArm, HirBlock, HirExpr, HirExprKind, HirFailure, HirFunc, HirLocal, HirOld,
     HirPattern, HirStmt, LocalId, LocalKind, SemanticKind,
@@ -953,63 +954,22 @@ impl Checker<'_> {
                         return poison;
                     }
                 }
-                let Ok((index, payload)) = self.variant(scrutinee, name, arm.span) else {
+                let pattern = match fcx.assumption(scrutinee, name, Intrinsic::HasVariant) {
+                    // A stand-in tag: the variant the test states.
+                    Some(assumed) => Ok((HirPattern::Assumed(name.clone()), assumed.ty)),
+                    None => self
+                        .variant(scrutinee, name, arm.span)
+                        .map(|(index, payload)| (HirPattern::Variant(index), payload)),
+                };
+                let Ok((pattern, payload)) = pattern else {
                     return poison;
                 };
                 let Some(capture) = &arm.capture else {
-                    return (HirPattern::Variant(index), None, false);
+                    return (pattern, None, false);
                 };
-                let declared = self.resolve_type(&capture.ty);
-                let mut by_ref = false;
-                match payload {
-                    Some(payload) if payload.is_error() || declared.is_error() => {}
-                    // `-> v: ref P` on a `P` payload: the payload's address.
-                    Some(payload)
-                        if declared.is_ref && !payload.is_ref && declared.id == payload.id =>
-                    {
-                        by_ref = true;
-                        self.check_ref_capture(scrutinee_expr, payload, capture.span);
-                    }
-                    Some(payload) => {
-                        if payload != declared {
-                            let mut diagnostic = Diagnostic::error(
-                                codes::E010,
-                                format!(
-                                    "mismatched types: capture holds {}, declared {}",
-                                    self.show(payload),
-                                    self.show(declared)
-                                ),
-                            )
-                            .label(
-                                capture.span,
-                                true,
-                                "capture type here",
-                            );
-                            if declared.is_ref && !payload.is_ref {
-                                diagnostic = diagnostic.help(format!(
-                                    "a reference to this payload is `{}`",
-                                    self.show(TypeRef::reference(payload.id))
-                                ));
-                            }
-                            self.diags.emit(diagnostic);
-                        }
-                    }
-                    None => {
-                        self.diags.emit(
-                            Diagnostic::error(
-                                codes::E022,
-                                format!("variant `.{name}` carries no payload to capture"),
-                            )
-                            .label(
-                                capture.span,
-                                true,
-                                "payload-less variant",
-                            ),
-                        );
-                    }
-                }
-                let local = self.declare(fcx, &capture.name, declared, capture.span);
-                (HirPattern::Variant(index), Some(local), by_ref)
+                let (local, by_ref) =
+                    self.check_capture(fcx, capture, payload, name, scrutinee_expr);
+                (pattern, Some(local), by_ref)
             }
             MatchPattern::Literal { literal, span } => (
                 self.literal_pattern(arm, literal, *span, scrutinee),
@@ -1017,6 +977,60 @@ impl Checker<'_> {
                 false,
             ),
         }
+    }
+
+    /// A tag arm's `-> v: T` capture of `payload` (`None`: the variant
+    /// `.name` has none): the local it declares, and whether it holds the
+    /// payload's address (`-> v: ref P`).
+    fn check_capture(
+        &mut self,
+        fcx: &mut FnCx,
+        capture: &Param,
+        payload: Option<TypeRef>,
+        name: &str,
+        scrutinee_expr: &HirExpr,
+    ) -> (LocalId, bool) {
+        let declared = self.resolve_type(&capture.ty);
+        let mut by_ref = false;
+        match payload {
+            Some(payload) if payload.is_error() || declared.is_error() => {}
+            // `-> v: ref P` on a `P` payload: the payload's address.
+            Some(payload) if declared.is_ref && !payload.is_ref && declared.id == payload.id => {
+                by_ref = true;
+                self.check_ref_capture(scrutinee_expr, payload, capture.span);
+            }
+            Some(payload) => {
+                if payload != declared {
+                    let mut diagnostic = Diagnostic::error(
+                        codes::E010,
+                        format!(
+                            "mismatched types: capture holds {}, declared {}",
+                            self.show(payload),
+                            self.show(declared)
+                        ),
+                    )
+                    .label(capture.span, true, "capture type here");
+                    if declared.is_ref && !payload.is_ref {
+                        diagnostic = diagnostic.help(format!(
+                            "a reference to this payload is `{}`",
+                            self.show(TypeRef::reference(payload.id))
+                        ));
+                    }
+                    self.diags.emit(diagnostic);
+                }
+            }
+            None => {
+                self.diags.emit(
+                    Diagnostic::error(
+                        codes::E022,
+                        format!("variant `.{name}` carries no payload to capture"),
+                    )
+                    .label(capture.span, true, "payload-less variant"),
+                );
+            }
+        }
+        let local = self.declare(fcx, &capture.name, declared, capture.span);
+        (local, by_ref)
     }
 
     /// A by-reference capture of a `payload` value needs the enum in

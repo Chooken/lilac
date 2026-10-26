@@ -179,10 +179,12 @@ impl Walk {
                 }
                 live
             }
-            HirExprKind::Variant { payload, .. } => match payload {
-                Some(payload) => self.expr(payload, live),
-                None => live,
-            },
+            HirExprKind::Variant { payload, .. } | HirExprKind::AssumedVariant { payload, .. } => {
+                match payload {
+                    Some(payload) => self.expr(payload, live),
+                    None => live,
+                }
+            }
             HirExprKind::Call { callee, args, .. } => {
                 for arg in args.iter().rev() {
                     live = self.expr(arg, live);

@@ -22,7 +22,7 @@ use crate::body::{local_expr, FnCx};
 use crate::calls::Called;
 use crate::literals::is_foldable_literal;
 use crate::paths::{path_expr, path_tail, shadowed_alias_note};
-use crate::reflect::stand_in_field;
+use crate::reflect::{stand_in_field, Assumption};
 use crate::sigs::BINARY_HOOKS;
 use crate::{Checker, Env, Requirement};
 
@@ -77,7 +77,7 @@ impl Checker<'_> {
     ) -> HirExpr {
         match expr {
             Expr::Ident(name, span) => self.check_ident(fcx, name, *span),
-            Expr::Tag(name, span) => self.check_tag(name, *span, expected),
+            Expr::Tag(name, span) => self.check_tag(fcx, name, *span, expected),
             Expr::Number(bytes, span) => self.check_number(bytes, *span, expected),
             Expr::Str(bytes, span) => HirExpr {
                 ty: Builtin::ByteBuffer.value(),
@@ -913,6 +913,13 @@ impl Checker<'_> {
         if let Some(stand_in) = fcx.assumed_constant(receiver, field, span) {
             return stand_in;
         }
+        if let Receiver::Type(ty) = receiver {
+            let assumed = fcx.assumption(ty.id, field, Intrinsic::HasVariant);
+            if let Some(assumed) = assumed.filter(|_| !ty.is_ref) {
+                let tag = tail_span(span, field);
+                return self.variant_value(ty.id, field, None, span, tag, Some(&assumed));
+            }
+        }
         if self.record_static_member(receiver, span, field).is_err() {
             return HirExpr::poison(span);
         }
@@ -932,7 +939,7 @@ impl Checker<'_> {
         if !ty.is_error() && self.variants_of(ty.id).is_none() {
             return self.missing_constant(ty, field, span);
         }
-        self.variant_value(ty.id, field, None, span, tail_span(span, field))
+        self.variant_value(ty.id, field, None, span, tail_span(span, field), None)
     }
 
     /// `Type.NAME` when `NAME` is a constant declared in the type's body
@@ -1058,7 +1065,13 @@ impl Checker<'_> {
 
     /// Builds variant `name` of enum `ty`, checking the payload argument.
     /// Checks a bare tag `.name` at `span` against the `expected` enum.
-    fn check_tag(&mut self, name: &str, span: Span, expected: Option<TypeId>) -> HirExpr {
+    fn check_tag(
+        &mut self,
+        fcx: &FnCx,
+        name: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> HirExpr {
         self.record_tag(span, expected, &[]);
         if name.is_empty() {
             // The parser reported the `.` with no name.
@@ -1075,9 +1088,12 @@ impl Checker<'_> {
             }
             return HirExpr::poison(span);
         };
-        self.variant_value(want, name, None, span, tag)
+        let assumed = fcx.assumption(want, name, Intrinsic::HasVariant);
+        self.variant_value(want, name, None, span, tag, assumed.as_ref())
     }
 
+    /// Variant `name` of either `ty`, its `payload` checked: the stand-in
+    /// a `@has_variant` states when one is `assumed`.
     pub(crate) fn variant_value(
         &mut self,
         ty: TypeId,
@@ -1085,12 +1101,19 @@ impl Checker<'_> {
         payload: Option<(&mut FnCx, &[Expr])>,
         span: Span,
         tag_span: Span,
+        assumed: Option<&Assumption>,
     ) -> HirExpr {
-        let Ok((index, payload_ty)) = self.variant(ty, name, tag_span) else {
+        let found = match assumed {
+            Some(assumed) => Ok((None, assumed.ty)),
+            None => self
+                .variant(ty, name, tag_span)
+                .map(|(index, payload)| (Some(index), payload)),
+        };
+        let Ok((index, payload_ty)) = found else {
             return HirExpr::poison(span);
         };
         self.record_semantic(tag_span, SemanticKind::Variant);
-        if let Some((def, _)) = self.type_parts(ty) {
+        if let Some((def, _)) = self.type_parts(ty).filter(|_| index.is_some()) {
             self.record_use(tag_span, def);
             if let Some(variant) = self.res.member(def, name) {
                 self.record_use(tag_span, variant);
@@ -1130,13 +1153,20 @@ impl Checker<'_> {
                 Some(Box::new(self.coerce(value, want, arg.span())))
             }
         };
-        HirExpr {
-            ty: TypeRef::value(ty),
-            span,
-            kind: HirExprKind::Variant {
+        let kind = match index {
+            Some(index) => HirExprKind::Variant {
                 index,
                 payload: value,
             },
+            None => HirExprKind::AssumedVariant {
+                name: name.to_owned(),
+                payload: value,
+            },
+        };
+        HirExpr {
+            ty: TypeRef::value(ty),
+            span,
+            kind,
         }
     }
 

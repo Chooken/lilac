@@ -559,6 +559,9 @@ pub enum Intrinsic {
     /// `@has_constant(T, NAME, C)`: whether `T.NAME` is a member constant
     /// of type `C`.
     HasConstant,
+    /// `@has_variant(T, Name, P)`, or `@has_variant(T, Name)` for none:
+    /// whether `.Name` is a variant of `T` with exactly that payload.
+    HasVariant,
     /// `@is_copyable(T)`: whether a by-value use of a `T` copies.
     IsCopyable,
     /// `@is_same(T, U)`: whether `T` and `U` are one type.
@@ -667,7 +670,7 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 44] = [
+    const PLAIN: [(&'static str, Self); 45] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -710,6 +713,7 @@ impl Intrinsic {
         ("@has_method", Self::HasMethod),
         ("@has_function", Self::HasFunction),
         ("@has_constant", Self::HasConstant),
+        ("@has_variant", Self::HasVariant),
         ("@is_copyable", Self::IsCopyable),
         ("@is_same", Self::IsSame),
     ];
@@ -726,7 +730,8 @@ impl Intrinsic {
     }
 
     /// Whether this is a reflection test: `@has_field`, `@has_method`,
-    /// `@has_function`, `@has_constant`, `@is_copyable` or `@is_same`
+    /// `@has_function`, `@has_constant`, `@has_variant`, `@is_copyable`
+    /// or `@is_same`
     /// (checked specially, by typeck's `reflect.rs`).
     #[must_use]
     pub fn is_reflection(self) -> bool {
@@ -736,6 +741,7 @@ impl Intrinsic {
                 | Self::HasMethod
                 | Self::HasFunction
                 | Self::HasConstant
+                | Self::HasVariant
                 | Self::IsCopyable
                 | Self::IsSame
         )
@@ -984,6 +990,14 @@ impl Intrinsic {
                 &[("type", Type), ("name", Slot::MemberName), ("member", Type)],
                 Some(Builtin(Ty::Bit8)),
             ),
+            Self::HasVariant => sig(
+                &[
+                    ("type", Type),
+                    ("name", Slot::MemberName),
+                    ("payload", Type),
+                ],
+                Some(Builtin(Ty::Bit8)),
+            ),
             Self::IsSame => sig(
                 &[("first", Type), ("second", Type)],
                 Some(Builtin(Ty::Bit8)),
@@ -1225,6 +1239,9 @@ impl Intrinsic {
             }
             Self::HasConstant => {
                 "Whether `type` has a member constant `name` of type `member`: a constant `@bit8`."
+            }
+            Self::HasVariant => {
+                "Whether `type` has a variant `name` with exactly the payload type `payload` (left out: none): a constant `@bit8`."
             }
             Self::IsCopyable => "Whether a by-value use of a `type` copies: a constant `@bit8`.",
             Self::IsSame => "Whether `first` and `second` are one type: a constant `@bit8`.",

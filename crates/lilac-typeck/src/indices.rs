@@ -138,12 +138,17 @@ impl Checker<'_> {
             HirExprKind::Variant {
                 payload: Some(payload),
                 ..
+            }
+            | HirExprKind::AssumedVariant {
+                payload: Some(payload),
+                ..
             } => self.expr_indices(payload, guarded, bad),
             HirExprKind::Eq(lhs, rhs) => {
                 self.expr_indices(lhs, guarded, bad);
                 self.expr_indices(rhs, guarded, bad);
             }
             HirExprKind::Variant { payload: None, .. }
+            | HirExprKind::AssumedVariant { payload: None, .. }
             | HirExprKind::Local(_)
             | HirExprKind::Int(_)
             | HirExprKind::Float(_)

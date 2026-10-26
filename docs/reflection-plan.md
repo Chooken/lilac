@@ -1,7 +1,7 @@
 # Reflection Plan
 
 > Status: phases 1 to 4 done, 2026-10-26; phase 5 under way
-> (`@is_copyable` assumptions done).
+> (`@is_copyable` assumptions and `@has_variant` done).
 >
 > Goal: a generic body can ask what its type arguments have, and pick
 > an implementation by the answer, **with every arm type-checked in

@@ -964,7 +964,7 @@ impl Pass<'_, '_> {
                     self.expr(&mut hole.value, false);
                 }
             }
-            HirExprKind::Variant { payload, .. } => {
+            HirExprKind::Variant { payload, .. } | HirExprKind::AssumedVariant { payload, .. } => {
                 if let Some(payload) = payload {
                     self.expr(payload, true);
                 }

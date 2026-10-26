@@ -320,7 +320,7 @@ impl Lower<'_> {
             HirExprKind::Unanswered => {
                 lilac_error::bug!(span, "an unanswered reflection test reached lowering")
             }
-            HirExprKind::Assumed { .. } => {
+            HirExprKind::Assumed { .. } | HirExprKind::AssumedVariant { .. } => {
                 lilac_error::bug!(span, "a reflection test's stand-in reached lowering")
             }
             HirExprKind::CompileError { msg, msg_span } => {

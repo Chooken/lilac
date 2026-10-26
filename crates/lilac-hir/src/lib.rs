@@ -592,6 +592,9 @@ pub struct HirValueArm {
 pub enum HirPattern {
     /// An enum variant, by declaration index.
     Variant(u32),
+    /// A stand-in for the variant `name` a `@has_variant` test assumes
+    /// ([`HirExprKind::AssumedVariant`]). Never lowered.
+    Assumed(String),
     /// An integer or character literal, compared with the scrutinee's
     /// bits (the value typeck read, at the scrutinee's width).
     Int(u64),
@@ -737,6 +740,15 @@ pub enum HirExprKind {
         /// The member's name.
         name: String,
     },
+    /// A stand-in for the variant `name` a `@has_variant` test assumes
+    /// where it holds and is not known true: a value of the tested either
+    /// with the stated payload. Never lowered, like [`HirCallee::Assumed`].
+    AssumedVariant {
+        /// The variant's name.
+        name: String,
+        /// Payload value.
+        payload: Option<Box<HirExpr>>,
+    },
     /// A `@compile_error` site (`E031` if lowered in a reachable function).
     CompileError {
         /// Message.
@@ -795,7 +807,7 @@ impl HirExpr {
                     value.walk(f);
                 }
             }
-            HirExprKind::Variant { payload, .. } => {
+            HirExprKind::Variant { payload, .. } | HirExprKind::AssumedVariant { payload, .. } => {
                 if let Some(payload) = payload {
                     payload.walk(f);
                 }

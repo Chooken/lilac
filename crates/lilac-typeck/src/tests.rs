@@ -1183,6 +1183,8 @@ fn reflection_tests_report_bad_operands_only() {
         "@has_method(Point, x, function (ref Point) @bit32)",
         "@has_function(ref Point, get, function () nothing else nothing)",
         "@has_constant(Point, X, @bit32)",
+        "@has_variant(Point, Some, @bit32)",
+        "@has_variant(@bit8, None)",
         "@is_same(Point, ref Point)",
         "@is_copyable(@bit8)",
     ] {
@@ -1208,6 +1210,7 @@ fn reflection_tests_report_bad_operands_only() {
         ("@has_field(Missing, x, @bit32)", "E021"),
         ("@has_field(Point, x, Missing)", "E021"),
         ("@is_same(Point)", "E022"),
+        ("@has_variant(Point)", "E022"),
         // A failing function value is still `E057`.
         (
             "@is_same(ref function () nothing else nothing, Point)",
@@ -1357,6 +1360,87 @@ main: function () nothing {{
             assert!(has_code(&diags, "E042"), "{body}: {diags:?}");
         }
     }
+}
+
+#[test]
+fn assumed_variants_build_and_match_by_the_stated_payload() {
+    let item = "Point: structure {
+    x: @bit32
+}
+Choice: either {
+    Some: @bit32
+    Empty
+}
+";
+    // Never instantiated, and instantiated with an either that has the
+    // variants and types that have none: the guarded code checks against
+    // the stand-in tags every time.
+    let fine = [
+        "if @has_variant(T, Some, @bit32) { a: T = T.Some(0x1) }",
+        "if @has_variant(T, Some, @bit32) { a: T = .Some(0x1) }",
+        "if @has_variant(T, Empty) { a: T = .Empty\n        b: T = T.Empty }",
+        "if @has_variant(T, Some, @bit32) {
+        match value {
+            .Some -> n: @bit32 { m: @bit32 = n }
+        } else { }
+    }",
+        "if @has_variant(T, Empty) { match value { .Empty => return } else { } }",
+        "if not @has_variant(T, Empty) { } else { a: T = .Empty }",
+        "if @has_variant(T, Gone, @bit8) { a: T = .Gone(0x1) }",
+    ];
+    for body in fine {
+        for uses in [
+            "",
+            "    f[Choice](.Empty)
+    f[Point](Point { x = 0x0 })
+    f[@bit32](0x0)
+",
+        ] {
+            let diags = check_src(&format!(
+                "{item}f[T]: function (value: T) nothing {{
+    {body}
+}}
+main: function () nothing {{
+{uses}}}
+"
+            ));
+            assert!(!diags.has_errors(), "{body} ({uses:?}): {diags:?}");
+        }
+    }
+    let wrong = [
+        ("if @has_variant(T, Empty) { a: T = .Empty(0x1) }", "E022"),
+        ("if @has_variant(T, Some, @bit32) { a: T = .Some }", "E022"),
+        (
+            "if @has_variant(T, Some, @bit32) { match value { .Some -> n: @bit8 { } } else { } }",
+            "E010",
+        ),
+        (
+            "if @has_variant(T, Empty) { match value { .Empty -> n: @bit8 { } } else { } }",
+            "E022",
+        ),
+    ];
+    for (body, code) in wrong {
+        let diags = check_src(&format!(
+            "{item}f[T]: function (value: T) nothing {{
+    {body}
+}}
+main: function () nothing {{}}
+"
+        ));
+        assert!(has_code(&diags, code), "{body}: {diags:?}");
+    }
+    // Outside the test, `Point` has no tags.
+    let diags = check_src(&format!(
+        "{item}f[T]: function (value: T) nothing {{
+    if @has_variant(T, Empty) {{ }}
+    a: T = .Empty
+}}
+main: function () nothing {{
+    f[Point](Point {{ x = 0x0 }})
+}}
+"
+    ));
+    assert!(has_code(&diags, "E010"), "{diags:?}");
 }
 
 #[test]

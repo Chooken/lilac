@@ -1,16 +1,17 @@
 //! The reflection tests: `@has_field`, `@has_method`, `@has_function`,
-//! `@has_constant`, `@is_copyable` and `@is_same`. Each answers by the
-//! lookup a use would take and folds to a `@bit8` literal per instance
-//! (like `@needs_drop`); a template whose answer depends on its arguments
-//! holds `HirExprKind::Unanswered`. A false test is silent: a missing
-//! member, one of another type, a private one or a generic one is `0x0`,
-//! never an error.
+//! `@has_constant`, `@has_variant`, `@is_copyable` and `@is_same`. Each
+//! answers by the lookup a use would take and folds to a `@bit8` literal
+//! per instance (like `@needs_drop`); a template whose answer depends on
+//! its arguments holds `HirExprKind::Unanswered`. A false test is silent:
+//! a missing member, one of another type, a private one or a generic one
+//! is `0x0`, never an error.
 //!
 //! Where a member test holds (`docs/reflection-plan.md`, "Where a test
 //! holds") and is not known true, typeck **assumes** the member: a use
 //! of it checks against a stand-in of the stated type
-//! (`HirExprKind::Assumed`, `HirCallee::Assumed`), so every arm is
-//! checked in every instance. A condition's [`Facts`] say what it proves
+//! (`HirExprKind::Assumed`, `HirCallee::Assumed`; a variant's tag is
+//! `HirExprKind::AssumedVariant` and `HirPattern::Assumed`), so every arm
+//! is checked in every instance. A condition's [`Facts`] say what it proves
 //! where it is true and where it is false; `if`, `and` and `or` push them
 //! on [`FnCx::assumed`] over the code they guard. Lowering compiles only
 //! the arm a known condition picks (`Lower::outcome`), so it never meets
@@ -39,10 +40,13 @@ pub(crate) struct Assumption {
     /// The member's name.
     pub name: String,
     /// The test: `@has_field`, `@has_method`, `@has_function`,
-    /// `@has_constant`, or `@is_copyable` (in the ownership pass only).
+    /// `@has_constant`, `@has_variant`, or `@is_copyable` (in the
+    /// ownership pass only).
     pub test: Intrinsic,
-    /// The stated type (a function type for the function tests).
-    pub ty: TypeRef,
+    /// The stated type (a function type for the function tests, the
+    /// payload's for `@has_variant`); `None` only for a variant with no
+    /// payload.
+    pub ty: Option<TypeRef>,
 }
 
 impl Assumption {
@@ -52,7 +56,15 @@ impl Assumption {
             owner: ty,
             name: String::new(),
             test: Intrinsic::IsCopyable,
-            ty: TypeRef::value(ty),
+            ty: Some(TypeRef::value(ty)),
+        }
+    }
+
+    /// The stated type of a member test's member, which always has one.
+    fn stated(&self, span: Span) -> TypeRef {
+        match self.ty {
+            Some(ty) => ty,
+            None => lilac_error::bug!(span, "a member assumed with no type"),
         }
     }
 }
@@ -109,6 +121,7 @@ pub(crate) fn is_member_test(expr: &Expr) -> bool {
                 | Intrinsic::HasMethod
                 | Intrinsic::HasFunction
                 | Intrinsic::HasConstant
+                | Intrinsic::HasVariant
         )
     )
 }
@@ -117,7 +130,7 @@ pub(crate) fn is_member_test(expr: &Expr) -> bool {
 /// type. `base` is the object, through any reference.
 pub(crate) fn stand_in_field(assumed: Assumption, base: HirExpr, span: Span) -> HirExpr {
     HirExpr {
-        ty: assumed.ty,
+        ty: assumed.stated(span),
         span,
         kind: HirExprKind::Assumed {
             base: Some(Box::new(base)),
@@ -156,7 +169,7 @@ impl FnCx {
             .assumption(ty.id, name, Intrinsic::HasConstant)
             .filter(|_| !ty.is_ref)?;
         Some(HirExpr {
-            ty: assumed.ty,
+            ty: assumed.stated(span),
             span,
             kind: HirExprKind::Assumed {
                 base: None,
@@ -288,12 +301,13 @@ impl Checker<'_> {
             let callee = stand_in_field(assumed, base, at);
             return self.value_call(fcx, callee, &what, args, span);
         }
+        let stated = assumed.stated(span);
         let TypeKind::Func {
             params,
             returns,
             failures,
             ..
-        } = self.types.kind(assumed.ty.id).clone()
+        } = self.types.kind(stated.id).clone()
         else {
             lilac_error::bug!(span, "an assumed function of a non-function type");
         };
@@ -338,7 +352,7 @@ impl Checker<'_> {
         Ok(Called::Call {
             callee: HirCallee::Assumed {
                 name: assumed.name,
-                ty: assumed.ty.id,
+                ty: stated.id,
             },
             args: hir_args,
             outs,
@@ -357,6 +371,7 @@ impl Checker<'_> {
         let arity = match intrinsic {
             Intrinsic::IsCopyable => 1,
             Intrinsic::IsSame => 2,
+            Intrinsic::HasVariant if args.len() == 2 => 2,
             _ => 3,
         };
         self.intrinsic_arity(name, arity, args.len(), span)?;
@@ -379,6 +394,22 @@ impl Checker<'_> {
                 let second = self.test_type(fcx, &args[1]);
                 self.same_type(first?, second?)
             }
+            Intrinsic::HasVariant => {
+                let owner = self.test_type(fcx, &args[0]);
+                let variant = self.member_name(&args[1]);
+                let payload = args.get(2).map(|arg| self.test_type(fcx, arg));
+                let (owner, (variant, variant_span)) = (owner?, variant?);
+                let payload = payload.transpose()?;
+                let answer = self.has_variant(owner, &variant, variant_span, payload);
+                // Known true, a tag finds the real variant.
+                fcx.tested = (answer != Some(true)).then(|| Assumption {
+                    owner: owner.deref().id,
+                    name: variant,
+                    test: intrinsic,
+                    ty: payload,
+                });
+                answer
+            }
             _ => {
                 // Every operand is checked, so each reports its own error.
                 let owner = self.test_type(fcx, &args[0]);
@@ -396,7 +427,7 @@ impl Checker<'_> {
                     owner: owner.deref().id,
                     name: member,
                     test: intrinsic,
-                    ty: stated,
+                    ty: Some(stated),
                 });
                 answer
             }
@@ -573,6 +604,45 @@ impl Checker<'_> {
             self.record_use(name_span, member);
         }
         Ok(answer)
+    }
+
+    /// `@has_variant` on `owner` (looked through a reference): whether a
+    /// tag `.name` of it is a variant with exactly the `stated` payload
+    /// (`None`: none). A found variant's name is a use of it.
+    fn has_variant(
+        &mut self,
+        owner: TypeRef,
+        name: &str,
+        name_span: Span,
+        stated: Option<TypeRef>,
+    ) -> Option<bool> {
+        let owner = owner.deref();
+        let member = match self.type_parts(owner.id) {
+            Some((def, _)) => match self.res.member(def, name) {
+                Some(member) if matches!(self.res.def(member).kind, DefKind::Variant(_)) => {
+                    Some(member)
+                }
+                _ => return Some(false),
+            },
+            None => None,
+        };
+        let Some(variants) = self.variants_of(owner.id) else {
+            // A parameter, or a template's either, which has no layout,
+            // may have it; any other type has no variants.
+            return (!self.types.contains_param(owner.id)).then_some(false);
+        };
+        let Some((_, payload)) = variants.into_iter().find(|(variant, _)| variant == name) else {
+            return Some(false);
+        };
+        let answer = match (payload, stated) {
+            (None, None) => Some(true),
+            (Some(payload), Some(stated)) => self.same_type(payload, stated),
+            _ => Some(false),
+        };
+        if let Some(member) = member.filter(|_| answer != Some(false)) {
+            self.record_use(name_span, member);
+        }
+        answer
     }
 
     /// The function type of `member`, a function of `owner` at

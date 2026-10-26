@@ -147,7 +147,9 @@
   nothing; the ownership pass gives it its meaning.
 - Reflection tests (`lilac-typeck/src/reflect.rs`, `docs/reflection-plan.md`):
   `@has_field`/`@has_method`/`@has_function`/`@has_constant`
-  (`T, name, type`), `@is_copyable(T)` and `@is_same(T, U)`
+  (`T, name, type`), `@has_variant` (`T, Name`, then the payload type
+  or nothing; `has_variant` reads `variants_of`), `@is_copyable(T)` and
+  `@is_same(T, U)`
   (`Intrinsic::is_reflection`) fold to a `@bit8` literal per instance,
   like `@needs_drop`. A member test answers by the lookup a use takes
   (`Resolved::member`, `fields_of`, `const_type`, `sig_of` substituted
@@ -173,7 +175,10 @@
   ownership pass treats like a `Deref` (no borrow of the object), a
   constant `Assumed { base: None }`, a method or function
   `HirCallee::Assumed` checked against the stated `TypeKind::Func`
-  (failure outs and flag appended, `E057` unless handled). Lowering
+  (failure outs and flag appended, `E057` unless handled), a variant
+  `HirExprKind::AssumedVariant` (built by `variant_value`, from a tag,
+  `T.Name` or `T.Name(p)`) and `HirPattern::Assumed` (`check_pattern`).
+  Lowering
   `bug!`s on a stand-in: `Lower::outcome` keeps it from ever lowering
   one. An `@is_copyable(T)` test not known true is noted in
   `Checker::copyable_tests` (by span, per instance body); the ownership

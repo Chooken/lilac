@@ -555,6 +555,7 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@has_method`** | `(T, name, function (R, P...) O)` | Whether `value.name(...)` is a method of exactly that function type, `R` its receiver (`ref T`, or `T` for `self: T`), as a `@bit8` constant. |
 | **`@has_function`** | `(T, name, function (P...) O)` | Whether `T.name(...)` is a static function of exactly that function type, as a `@bit8` constant. |
 | **`@has_constant`** | `(T, NAME, C)` | Whether `T.NAME` is a member constant of type `C`, as a `@bit8` constant. |
+| **`@has_variant`** | `(T, Name, P)` or `(T, Name)` | Whether `.Name` is a variant of `T` with a payload of type `P` (no payload when `P` is left out), as a `@bit8` constant. |
 | **`@is_copyable`** | `(T)` or `(value)` | Whether a by-value use of a `T` copies (§1), as a `@bit8` constant. |
 | **`@is_same`** | `(T, U)` | Whether `T` and `U` are one type (aliases are their types; `ref` counts), as a `@bit8` constant. |
 
@@ -630,7 +631,7 @@ old value); `@write` is for an empty one. They need a `ref` to a known type
 is a constant, so `if @needs_drop(T)` lowers only the live arm.
 
 The reflection tests (`@has_field`, `@has_method`, `@has_function`,
-`@has_constant`, `@is_copyable`, `@is_same`) let a generic body ask what
+`@has_constant`, `@has_variant`, `@is_copyable`, `@is_same`) let a generic body ask what
 its type arguments have. Each is a `@bit8` constant per instance, true
 only on an exact match of what a use would find there: the member is
 named by its identifier (`E022` otherwise), looked up through a `ref`
@@ -657,7 +658,10 @@ place of type `F`, written, read and borrowed like a field behind a
 `ref`; `value.name(…)` and `T.name(…)` take their arguments and give
 their outs as the stated function type says (one that can fail must be
 handled where it is called, like any call that can fail); `T.NAME` is
-a value of type `C`. A held test changes nothing: the real member is
+a value of type `C`; and `.Name` (or `T.Name`) builds a `T` and
+matches as a `match` arm's tag, its payload a `P` (none when the test
+states none), even on a `T` that has no variants. A held test changes
+nothing: the real member is
 the one found. Moves and drops in a ruled-out arm count as a run-time
 `if`'s do (`E063` after it). Only the arm the test picks is compiled,
 so nothing assumed is ever run. Own names (a bare `NAME` in the type's

@@ -64,12 +64,14 @@ impl Checker<'_> {
             return Err(self.callee_failed(fcx, args, self.diags.already_reported()));
         }
         let tag = tail_span(tag_span, name);
+        let assumed = fcx.assumption(want, name, Intrinsic::HasVariant);
         Ok(Called::Value(self.variant_value(
             want,
             name,
             Some((fcx, args)),
             span,
             tag,
+            assumed.as_ref(),
         )))
     }
 
@@ -440,6 +442,17 @@ impl Checker<'_> {
             if let Some(assumed) = assumed.filter(|_| !ty.is_ref) {
                 return self.assumed_call(fcx, assumed, None, generic_args.len(), args, span);
             }
+            let assumed = fcx.assumption(ty.id, field, Intrinsic::HasVariant);
+            if let Some(assumed) = assumed.filter(|_| !ty.is_ref) {
+                if !generic_args.is_empty() {
+                    let error = self.generic_arity(span, field, 0, generic_args.len());
+                    return Err(self.callee_failed(fcx, args, error));
+                }
+                let tag = tail_span(member_span, field);
+                let payload = Some((fcx, args));
+                let value = self.variant_value(ty.id, field, payload, span, tag, Some(&assumed));
+                return Ok(Called::Value(value));
+            }
         }
         let ty = match receiver {
             Receiver::Type(ty) => ty,
@@ -502,6 +515,7 @@ impl Checker<'_> {
                     Some((fcx, args)),
                     span,
                     member_name,
+                    None,
                 )))
             }
             DefKind::Func(_) => {
