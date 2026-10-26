@@ -73,14 +73,14 @@ StringLayout: either {
 
 StringInline: structure {
 
-    buffer: @array(Uint8, 15)
+    buffer: @array(Uint8, 23)
     count: Uint8
 
-    SIZE: Int => 15
+    SIZE: Int => 23
 
     new: function () result: StringInline {
         result = StringInline {
-            buffer = @array(Uint8, 15) {}
+            buffer = @array(Uint8, 23) {}
             count = 0
         }
     }

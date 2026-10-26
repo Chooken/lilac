@@ -5,6 +5,7 @@ Memory[T]: structure {
 
     private {
         ptr: ref MemoryHeader[T]
+        count: Int
     }
 
     new: function (count: Int) result: Memory[T] {
@@ -18,25 +19,26 @@ Memory[T]: structure {
                 block_size(count), 
                 block_alignment()
             ) as ref MemoryHeader[T]
+            count = count
         }
 
         result.ptr = MemoryHeader[T] {
             allocator = allocator
-            data = Slice[T].new(elements_of(result.ptr), count)
+            data = elements_of(result.ptr)
         }
     }
 
-    get: function (self, index: Int) ref T => self.ptr.data.get(index)
+    get: function (self, index: Int) ref T => self.get_slice().get(index)
 
-    get_count: function (self) Int => self.ptr.data.get_count()
+    get_count: function (self) Int => self.count
 
     get_slice: function (self) slice: Slice[T] {
-        slice = self.ptr.data
+        slice = Slice[T].new(self.ptr.data, self.count)
     }
 
     get_allocator: function (self) Heap.Allocator => self.ptr.allocator
 
-    slice: function (self, range: Range) Slice[T] => self.ptr.data.slice(range)
+    slice: function (self, range: Range) Slice[T] => self.get_slice().slice(range)
 
     /// Makes room for exactly `new_size` elements; the elements may move.
     resize: function (self, new_size: Int) nothing {
@@ -47,12 +49,13 @@ Memory[T]: structure {
 
         self.ptr = allocator.reallocate_raw(
             ptr, 
-            block_size(self.ptr.data.get_count()), 
+            block_size(self.count), 
             block_size(new_size), 
             block_alignment()
         ) as ref MemoryHeader[T]
 
-        self.ptr.data = Slice[T].new(elements_of(self.ptr), new_size)
+        self.ptr.data = elements_of(self.ptr)
+        self.count = new_size
     }
 
     free: function (self) nothing {
@@ -61,7 +64,7 @@ Memory[T]: structure {
 
         allocator.free_raw(
             self.ptr as ref unknown, 
-            block_size(self.ptr.data.get_count()), 
+            block_size(self.count), 
             block_alignment()
         )
     }
@@ -87,7 +90,7 @@ private {
 
     MemoryHeader[T]: structure {
         allocator: Heap.Allocator
-        data: Slice[T]
+        data: ref T
     }
 
     /// `value` rounded up to a multiple of `alignment` (a power of two),
