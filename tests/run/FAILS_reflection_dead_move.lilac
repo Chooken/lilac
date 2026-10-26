@@ -1,0 +1,31 @@
+// expect-error: E063
+// expect-stderr: error[E063]: `handle` may have been moved
+// An arm a false test rules out moves like a run-time `if`'s: a use
+// after the `if` may find the value gone.
+
+using Standard
+
+Handle: structure {
+    id: Int
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+take: function (handle: Handle) nothing {
+}
+
+keep[T]: function (handle: Handle) nothing {
+    if @has_field(T, n, Int) {
+        take(handle)
+    }
+    take(handle)
+}
+
+Plain: structure {
+    id: Int
+}
+
+main: function () nothing {
+    keep[Plain](Handle { id = 1 })
+}

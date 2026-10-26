@@ -1,6 +1,6 @@
 # Reflection Plan
 
-> Status: phases 1 to 3 done, 2026-10-26; phases 4 and 5 open.
+> Status: phases 1 to 4 done, 2026-10-26; phase 5 open.
 >
 > Goal: a generic body can ask what its type arguments have, and pick
 > an implementation by the answer, **with every arm type-checked in
@@ -178,7 +178,14 @@ it would reach the backend.
   backend); `or`, `not` and nesting with side effects in each operand
   give the same results as before.
 
-## Phase 4: assumptions
+## Phase 4: assumptions (done)
+
+As built: the stack holds `Assumption { owner, name, test, ty }`, and
+only tests not known true push one (a held test finds the real
+member). A stand-in field's base is the object place, treated like a
+`Deref` by the ownership pass, so it borrows nothing. Own names, a
+member's address (`ref T.f`) and the editor's hover on a stand-in are
+left out, and `Map` still requires `hash`.
 
 - `FnCx::assumed`: a stack of `Assumption { owner: TypeId, name,
   member: Assumed, held: bool }` (`Assumed::Field(TypeRef)`,

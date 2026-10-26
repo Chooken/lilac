@@ -1025,6 +1025,7 @@ impl Pass<'_, '_> {
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::Unanswered
+            | HirExprKind::Assumed { .. }
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }
@@ -1056,7 +1057,11 @@ impl Pass<'_, '_> {
     /// `ref` it goes through, or the temporary it is a field of.
     fn borrowed_place(&mut self, place: &mut HirExpr) {
         match &mut place.kind {
-            HirExprKind::Deref(inner) => self.expr(inner, false),
+            // A stand-in field reads its object as a `ref` would.
+            HirExprKind::Deref(inner)
+            | HirExprKind::Assumed {
+                base: Some(inner), ..
+            } => self.expr(inner, false),
             HirExprKind::Field { base, .. } => {
                 if base.is_place() && HirPath::of(base).is_none() {
                     self.borrowed_place(base);

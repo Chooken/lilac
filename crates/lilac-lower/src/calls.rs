@@ -103,6 +103,9 @@ impl Lower<'_> {
             HirCallee::Intrinsic(_) => {
                 lilac_error::bug!(span, "intrinsic in the general call path")
             }
+            HirCallee::Assumed { .. } => {
+                lilac_error::bug!(span, "a reflection test's stand-in reached lowering")
+            }
         };
         state.emit(LirInst::Call {
             func: target,

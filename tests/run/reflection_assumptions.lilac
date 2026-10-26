@@ -1,0 +1,115 @@
+// expect-stdout: 21 0 0 | 7 0 | 12 0 | 4 -1 0 | 9 0 0 | 0 0 9 9
+// Where a member test holds and its answer is not known true, a use of
+// the member checks against a stand-in of the stated type, so both arms
+// are checked in every instance; only the arm the test picks is
+// compiled.
+
+using Standard
+using Standard.Io
+
+Keyed: structure {
+    id: Int
+    hash: function (self) Int => self.id * 7
+}
+
+Plain: structure {
+    id: Int
+}
+
+// A `hash` of another type: the test is false.
+Odd: structure {
+    id: Int
+    hash: function (self) Int8 => 1
+}
+
+hash_key[K]: function (key: ref K) Int =>
+    if @has_method(K, hash, function (ref K) Int) then key.hash() else 0
+
+Tally: structure {
+    count: Int
+}
+
+add_one: function (n: ref Int) nothing {
+    n = n + 1
+}
+
+// A stand-in field written, read and passed by `ref`.
+bump[T]: function (value: ref T) result: Int {
+    result = 0
+    if @has_field(T, count, Int) {
+        value.count = value.count + 1
+        add_one(ref value.count)
+        result = value.count
+    }
+}
+
+Token: structure {
+    n: Int
+    spend: function (self: Token) Int => self.n * 3
+}
+
+// A stand-in method that takes its receiver by value.
+spend_all[T]: function (value: T) Int =>
+    if @has_method(T, spend, function (T) Int) then value.spend() else 0
+
+Halves: structure {
+    n: Int
+    half: function (self) value: Int else nothing {
+        if self.n > 10 {
+            fail
+        }
+        value = self.n / 2
+    }
+}
+
+// A stand-in that can fail, handled by a capture `if`.
+halve[T]: function (value: ref T) result: Int {
+    result = 0
+    if @has_method(T, half, function (ref T) Int else nothing) {
+        if value.half() -> half: Int {
+            result = half
+        } else {
+            result = -1
+        }
+    }
+}
+
+Counted: structure {
+    n: Int
+}
+
+// The test holds after it in an `and`, and in the `then` arm.
+positive[T]: function (value: ref T, x: Bool) result: Int {
+    result = 0
+    if x and @has_field(T, n, Int) and value.n > 0 {
+        result = value.n
+    }
+}
+
+// `not t or x` is false only where `t` holds: the `else` arm sees it.
+fallback[T]: function (value: ref T, x: Bool) result: Int {
+    if not @has_field(T, n, Int) or x {
+        result = 0
+    } else {
+        result = value.n
+    }
+}
+
+main: function () nothing {
+    keyed: Keyed = Keyed { id = 3 }
+    plain: Plain = Plain { id = 3 }
+    odd: Odd = Odd { id = 3 }
+    print($"{hash_key[Keyed](ref keyed)} {hash_key[Plain](ref plain)} {hash_key[Odd](ref odd)} | ")
+    tally: Tally = Tally { count = 5 }
+    print($"{bump[Tally](ref tally)} {bump[Plain](ref plain)} | ")
+    token: Token = Token { n = 4 }
+    print($"{spend_all[Token](token)} {spend_all[Plain](plain)} | ")
+    small: Halves = Halves { n = 8 }
+    large: Halves = Halves { n = 12 }
+    print($"{halve[Halves](ref small)} {halve[Halves](ref large)} {halve[Plain](ref plain)} | ")
+    counted: Counted = Counted { n = 9 }
+    print($"{positive[Counted](ref counted, true)} {positive[Counted](ref counted, false)} ")
+    print($"{positive[Plain](ref plain, true)} | ")
+    print($"{fallback[Counted](ref counted, true)} {fallback[Plain](ref plain, false)} ")
+    print_line($"{fallback[Counted](ref counted, false)} {counted.n}")
+}

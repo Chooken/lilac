@@ -1233,6 +1233,80 @@ fn reflection_tests_report_bad_operands_only() {
 }
 
 #[test]
+fn assumed_members_check_against_the_stated_type() {
+    let item = "Point: structure {
+    x: @bit32
+}
+";
+    // Never instantiated, and instantiated where every test is false:
+    // the guarded code checks against the stand-ins either way.
+    let fine = [
+        "if @has_field(T, n, @bit32) { value.n = value.n }",
+        "if @has_method(T, get, function (ref T) @bit32) { a: @bit32 = value.get() }",
+        "if @has_method(T, take, function (T, @bit8) @bit32) { a: @bit32 = value.take(0x1) }",
+        "if @has_function(T, make, function () T) { a: T = T.make() }",
+        "if @has_constant(T, LIMIT, @bit8) { a: @bit8 = T.LIMIT }",
+        "if not @has_field(T, n, @bit8) { } else { a: @bit8 = value.n }",
+        "if 0x1 and @has_field(T, n, @bit8) and value.n == 0x0 { value.n = 0x1 }",
+        "if not @has_field(T, n, @bit8) or value.n == 0x0 { } else { value.n = 0x1 }",
+        "a: @bit8 = if @has_field(T, n, @bit8) then value.n else 0x0",
+        "if @has_method(T, get, function (@bit8) @bit32) { }",
+        "if @has_method(T, next, function (ref T) @bit8 else nothing) {          if value.next() -> b: @bit8 { } }",
+    ];
+    for body in fine {
+        for uses in [
+            "",
+            "    f[Point](ref p)
+",
+        ] {
+            let diags = check_src(&format!(
+                "{item}f[T]: function (value: ref T) nothing {{
+    {body}
+}}
+main: function () nothing {{
+    p: Point = Point {{ x = 0x0 }}
+{uses}}}
+"
+            ));
+            assert!(!diags.has_errors(), "{body} ({uses:?}): {diags:?}");
+        }
+    }
+    let wrong = [
+        ("if @has_field(T, n, @bit32) { a: @bit8 = value.n }", "E043"),
+        (
+            "if @has_method(T, get, function (ref T) @bit32) { value.get(0x1) }",
+            "E022",
+        ),
+        (
+            "if @has_method(T, next, function (ref T) @bit8 else nothing) { value.next() }",
+            "E057",
+        ),
+    ];
+    for (body, code) in wrong {
+        let diags = check_src(&format!(
+            "{item}f[T]: function (value: ref T) nothing {{
+    {body}
+}}
+main: function () nothing {{}}
+"
+        ));
+        assert!(has_code(&diags, code), "{body}: {diags:?}");
+    }
+    // `t or x` proves nothing where it is true.
+    let diags = check_src(&format!(
+        "{item}f[T]: function (value: ref T, x: @bit8) nothing {{
+    if @has_field(T, n, @bit8) or x {{ value.n = 0x1 }}
+}}
+main: function () nothing {{
+    p: Point = Point {{ x = 0x0 }}
+    f[Point](ref p, 0x1)
+}}
+"
+    ));
+    assert!(has_code(&diags, "E042"), "{diags:?}");
+}
+
+#[test]
 fn fail_outside_a_failing_function_is_e058() {
     let diags = check_src("main: function () nothing {\n    fail\n}\n");
     assert!(has_code(&diags, "E058"), "{diags:?}");

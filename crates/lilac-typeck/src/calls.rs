@@ -435,6 +435,12 @@ impl Checker<'_> {
         member_span: Span,
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
+        if let Receiver::Type(ty) = receiver {
+            let assumed = fcx.assumption(ty.id, field, Intrinsic::HasFunction);
+            if let Some(assumed) = assumed.filter(|_| !ty.is_ref) {
+                return self.assumed_call(fcx, assumed, None, generic_args.len(), args, span);
+            }
+        }
         let ty = match receiver {
             Receiver::Type(ty) => ty,
             Receiver::Bare(def) => {
@@ -538,7 +544,7 @@ impl Checker<'_> {
     }
 
     /// `value.method(...)`: the receiver is passed as `ref Self`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn method_call(
         &mut self,
         fcx: &mut FnCx,
@@ -551,6 +557,13 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
         let base = receiver.ty.deref();
+        let assumed = fcx
+            .assumption(base.id, field, Intrinsic::HasMethod)
+            .or_else(|| fcx.assumption(base.id, field, Intrinsic::HasField));
+        if let Some(assumed) = assumed {
+            let receiver = Some(receiver);
+            return self.assumed_call(fcx, assumed, receiver, generic_args.len(), args, span);
+        }
         let recorded = self.record_member(member_span, field, Some(MemberReceiver::Value(base)));
         self.callee(fcx, args, recorded)?;
         let owner = self.show_id(base.id);

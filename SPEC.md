@@ -641,9 +641,27 @@ included (`function (ref Iterator[T]) T else nothing`; `E010` for any
 other type); a generic member never matches. Anything else is a false
 test, which is silent: a missing member, one of another type, or a type
 with no members (a builtin, an array, a function reference). A found
-member's name is a use of it (hover, references, rename). Both arms of
-an `if` on a test are checked for every instance, so for now both must
-be valid whatever the answer.
+member's name is a use of it (hover, references, rename). A method's
+type states its receiver first, `ref T` or `T` for `self: T`; one
+that takes anything else first is no method's, so its test is false.
+
+Where a member test holds and is not known true (it is false here, or
+a template's answer waits on its parameters), the member is
+**assumed**: a use of it checks against the stated type, so both arms
+of an `if` on a test are checked in every instance and the arm the
+test rules out must be valid as if the member existed. A test holds in
+code that runs only when it is true: the `then` of `if t`, the `else`
+of `if not t`, the right side of `t and …` and the `then` after it, and
+the right side and `else` of `not t or …`. There `value.name` is a
+place of type `F`, written, read and borrowed like a field behind a
+`ref`; `value.name(…)` and `T.name(…)` take their arguments and give
+their outs as the stated function type says (one that can fail must be
+handled where it is called, like any call that can fail); `T.NAME` is
+a value of type `C`. A held test changes nothing: the real member is
+the one found. Moves and drops in a ruled-out arm count as a run-time
+`if`'s do (`E063` after it). Only the arm the test picks is compiled,
+so nothing assumed is ever run. Own names (a bare `NAME` in the type's
+own body) and a member's address (`ref T.name`) are never assumed.
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference

@@ -1,0 +1,19 @@
+// expect-error: E022
+// expect-stderr: error[E022]: wrong number of arguments: expected 0, found 1
+// The arm a false test rules out is still checked, against the stated
+// type: a wrong call of the assumed `hash` is an error even though no
+// instance has it.
+
+using Standard
+
+Plain: structure {
+    id: Int
+}
+
+hash_key[K]: function (key: ref K) Int =>
+    if @has_method(K, hash, function (ref K) Int) then key.hash(1) else 0
+
+main: function () nothing {
+    plain: Plain = Plain { id = 3 }
+    hash_key[Plain](ref plain)
+}

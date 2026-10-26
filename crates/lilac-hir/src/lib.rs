@@ -618,6 +618,16 @@ pub enum HirCallee {
     Value(Box<HirExpr>),
     /// A compiler intrinsic.
     Intrinsic(Intrinsic),
+    /// A stand-in for the method or static function `name` a reflection
+    /// test assumes where it holds and is not known true: its function
+    /// type `ty` (a `TypeKind::Func`) is the test's. Code a test guards
+    /// is never lowered, so lowering never meets one.
+    Assumed {
+        /// The member's name.
+        name: String,
+        /// The stated function type.
+        ty: TypeId,
+    },
 }
 
 /// Checked expression shapes.
@@ -716,6 +726,17 @@ pub enum HirExprKind {
     /// cannot answer, since the answer depends on its arguments: a
     /// `@bit8` only templates hold, never lowered.
     Unanswered,
+    /// A stand-in for the field or constant `name` a reflection test
+    /// assumes where it holds and is not known true, of the test's type:
+    /// a field of the object place `base` (a place, read and written as
+    /// one behind a `ref`), or a constant (no `base`, a value). Never
+    /// lowered, like [`HirCallee::Assumed`].
+    Assumed {
+        /// The object a field is of.
+        base: Option<Box<HirExpr>>,
+        /// The member's name.
+        name: String,
+    },
     /// A `@compile_error` site (`E031` if lowered in a reachable function).
     CompileError {
         /// Message.
@@ -747,6 +768,7 @@ impl HirExpr {
                 | HirExprKind::Field { .. }
                 | HirExprKind::Deref(_)
                 | HirExprKind::Global(_)
+                | HirExprKind::Assumed { base: Some(_), .. }
         )
     }
 
@@ -759,7 +781,10 @@ impl HirExpr {
             | HirExprKind::Move(base)
             | HirExprKind::RefOf(base)
             | HirExprKind::Not(base)
-            | HirExprKind::Retype(base) => base.walk(f),
+            | HirExprKind::Retype(base)
+            | HirExprKind::Assumed {
+                base: Some(base), ..
+            } => base.walk(f),
             HirExprKind::Format(format) => {
                 for hole in &format.holes {
                     hole.value.walk(f);
@@ -813,6 +838,7 @@ impl HirExpr {
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::Unanswered
+            | HirExprKind::Assumed { base: None, .. }
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }

@@ -22,6 +22,7 @@ use crate::body::{local_expr, FnCx};
 use crate::calls::Called;
 use crate::literals::is_foldable_literal;
 use crate::paths::{path_expr, path_tail, shadowed_alias_note};
+use crate::reflect::stand_in_field;
 use crate::sigs::BINARY_HOOKS;
 use crate::{Checker, Env, Requirement};
 
@@ -89,7 +90,7 @@ impl Checker<'_> {
                 kind: HirExprKind::Int(u64::from(u32::from(*scalar))),
             },
             Expr::RefOf { value, span } => self.check_ref_of(fcx, value, *span),
-            Expr::Not { value, span } => self.check_not(fcx, value, *span),
+            Expr::Not { .. } => self.check_condition(fcx, expr, "not").0,
             Expr::Cast(operand, target) => self.check_cast(fcx, operand, target),
             Expr::Member { obj, field, span } => {
                 if let Some((name, span)) = self.qualified_name(fcx, expr) {
@@ -696,7 +697,7 @@ impl Checker<'_> {
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let item = match receiver {
                         Ok(receiver) => {
-                            self.static_member(receiver, field, *span, None, Naming::PLACE)
+                            self.static_member(fcx, receiver, field, *span, None, Naming::PLACE)
                         }
                         Err(_) => HirExpr::poison(*span),
                     };
@@ -707,7 +708,7 @@ impl Checker<'_> {
                     return Ok(HirExpr::poison(*span));
                 }
                 let shadowed = self.shadowed_alias(fcx, &base);
-                Ok(self.field_access(base, field, *span, None, false, shadowed))
+                Ok(self.field_access(fcx, base, field, *span, None, false, shadowed))
             }
             Expr::Call { span, .. } => {
                 let call = self.check_expr(fcx, expr, None);
@@ -756,8 +757,10 @@ impl Checker<'_> {
 
     /// `base.field` on an object (through a reference if needed).
     /// `shadowed` is the alias a local `base` hides ([`Self::shadowed_alias`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn field_access(
         &mut self,
+        fcx: &FnCx,
         base: HirExpr,
         field: &str,
         span: Span,
@@ -766,6 +769,9 @@ impl Checker<'_> {
         shadowed: Option<(String, Span)>,
     ) -> HirExpr {
         let base = self.auto_deref(base);
+        if let Some(assumed) = fcx.assumed_field(&base, field) {
+            return stand_in_field(assumed, base, span);
+        }
         let receiver = MemberReceiver::Value(base.ty);
         if self.record_member(span, field, Some(receiver)).is_err() {
             return HirExpr::poison(span);
@@ -878,26 +884,30 @@ impl Checker<'_> {
             let Ok(receiver) = receiver else {
                 return HirExpr::poison(span);
             };
-            return self.static_member(receiver, field, span, expected, Naming::VALUE);
+            return self.static_member(fcx, receiver, field, span, expected, Naming::VALUE);
         }
         let base = self.check_expr(fcx, obj, None);
         if base.ty.is_error() {
             return base;
         }
         let shadowed = self.shadowed_alias(fcx, &base);
-        self.field_access(base, field, span, expected, true, shadowed)
+        self.field_access(fcx, base, field, span, expected, true, shadowed)
     }
 
     /// `Type.name` as a value: a constant of the type, a function of it
     /// (its address, `E077` unless `naming` is behind `ref`), or a variant.
     fn static_member(
         &mut self,
+        fcx: &FnCx,
         receiver: Receiver,
         field: &str,
         span: Span,
         expected: Option<TypeId>,
         naming: Naming,
     ) -> HirExpr {
+        if let Some(stand_in) = fcx.assumed_constant(receiver, field, span) {
+            return stand_in;
+        }
         if self.record_static_member(receiver, span, field).is_err() {
             return HirExpr::poison(span);
         }
@@ -1184,7 +1194,7 @@ impl Checker<'_> {
                 if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let item = match receiver {
                         Ok(receiver) => {
-                            self.static_member(receiver, field, *span, None, Naming::PLACE)
+                            self.static_member(fcx, receiver, field, *span, None, Naming::PLACE)
                         }
                         Err(_) => HirExpr::poison(*span),
                     };
@@ -1196,7 +1206,7 @@ impl Checker<'_> {
                 }
                 self.no_bound_method(&base, field, *span)?;
                 let shadowed = self.shadowed_alias(fcx, &base);
-                Ok(self.field_access(base, field, *span, None, false, shadowed))
+                Ok(self.field_access(fcx, base, field, *span, None, false, shadowed))
             }
             Expr::Ident(..) => self.check_place(fcx, value),
             Expr::TypeApp(ty) => Ok(self.check_type_app(fcx, ty, true)),
@@ -1259,7 +1269,7 @@ impl Checker<'_> {
                     (self.check_name(fcx, &path, path_span, naming), path)
                 } else if let Some(receiver) = self.static_receiver(fcx, obj) {
                     let item = match receiver {
-                        Ok(receiver) => self.static_member(receiver, field, *at, None, naming),
+                        Ok(receiver) => self.static_member(fcx, receiver, field, *at, None, naming),
                         Err(_) => HirExpr::poison(*at),
                     };
                     (item, field.clone())
@@ -1270,7 +1280,7 @@ impl Checker<'_> {
                         return HirExpr::poison(span);
                     }
                     let shadowed = self.shadowed_alias(fcx, &base);
-                    let item = self.field_access(base, field, *at, None, false, shadowed);
+                    let item = self.field_access(fcx, base, field, *at, None, false, shadowed);
                     (item, field.clone())
                 }
             }
@@ -1426,18 +1436,7 @@ impl Checker<'_> {
     ) -> HirExpr {
         match op {
             BinOp::And | BinOp::Or => {
-                let what = if op == BinOp::And { "and" } else { "or" };
-                let lhs = self.check_cond(fcx, lhs, what);
-                let rhs = self.check_cond(fcx, rhs, what);
-                return HirExpr {
-                    ty: Builtin::Bit8.value(),
-                    span,
-                    kind: HirExprKind::Logic {
-                        and: op == BinOp::And,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    },
-                };
+                return self.check_logic(fcx, lhs, op == BinOp::And, rhs, span).0;
             }
             BinOp::EqEq => return self.check_equality(fcx, lhs, rhs, span, "=="),
             BinOp::NotEq => {
@@ -1523,19 +1522,6 @@ impl Checker<'_> {
         }
     }
 
-    /// `not value`: the `@bit8` negation of a condition, never a hook.
-    fn check_not(&mut self, fcx: &mut FnCx, value: &Expr, span: Span) -> HirExpr {
-        let cond = self.check_cond(fcx, value, "not");
-        if cond.ty.is_error() {
-            return HirExpr::poison(span);
-        }
-        HirExpr {
-            ty: Builtin::Bit8.value(),
-            span,
-            kind: HirExprKind::Not(Box::new(cond)),
-        }
-    }
-
     /// `lhs == rhs` (or `!=`, named by `what`): strict bit-equality of two
     /// values of one type, never a hook.
     fn check_equality(
@@ -1613,11 +1599,15 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> HirExpr {
-        let cond = self.check_cond(fcx, cond, "if");
+        let (cond, facts) = self.check_condition(fcx, cond, "if");
+        let mark = fcx.assume(&facts.when_true);
         let then = self.check_expr(fcx, then, expected);
+        fcx.assumed.truncate(mark);
         // A `then` that failed leaves the error type: the `else` stays silent.
         let els_expected = expected.or(Some(self.types.read_type(then.ty).id));
+        let mark = fcx.assume(&facts.when_false);
         let els = self.check_expr(fcx, els, els_expected);
+        fcx.assumed.truncate(mark);
         let result = match expected {
             Some(want) => self.types.value_type(want),
             None if !then.ty.is_error() => self.types.read_type(then.ty),

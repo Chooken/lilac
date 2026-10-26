@@ -163,7 +163,10 @@ impl Walk {
             | HirExprKind::Move(inner)
             | HirExprKind::RefOf(inner)
             | HirExprKind::Retype(inner)
-            | HirExprKind::Not(inner) => self.expr(inner, live),
+            | HirExprKind::Not(inner)
+            | HirExprKind::Assumed {
+                base: Some(inner), ..
+            } => self.expr(inner, live),
             HirExprKind::Struct(values) => {
                 for value in values.iter().rev() {
                     live = self.expr(value, live);
@@ -186,7 +189,9 @@ impl Walk {
                 }
                 match callee {
                     HirCallee::Value(callee) => self.expr(callee, live),
-                    HirCallee::Func(_) | HirCallee::Intrinsic(_) => live,
+                    HirCallee::Func(_) | HirCallee::Intrinsic(_) | HirCallee::Assumed { .. } => {
+                        live
+                    }
                 }
             }
             HirExprKind::Eq(lhs, rhs) => {
@@ -227,6 +232,7 @@ impl Walk {
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::Unanswered
+            | HirExprKind::Assumed { base: None, .. }
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => live,
         }

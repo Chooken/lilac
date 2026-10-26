@@ -121,7 +121,10 @@ impl Checker<'_> {
             | HirExprKind::RefOf(base)
             | HirExprKind::Move(base)
             | HirExprKind::Not(base)
-            | HirExprKind::Retype(base) => self.expr_indices(base, guarded, bad),
+            | HirExprKind::Retype(base)
+            | HirExprKind::Assumed {
+                base: Some(base), ..
+            } => self.expr_indices(base, guarded, bad),
             HirExprKind::Struct(values) => {
                 for value in values {
                     self.expr_indices(value, guarded, bad);
@@ -151,6 +154,7 @@ impl Checker<'_> {
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
             | HirExprKind::Unanswered
+            | HirExprKind::Assumed { base: None, .. }
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }

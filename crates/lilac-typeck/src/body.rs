@@ -19,6 +19,7 @@ use lilac_span::Span;
 use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 
 use crate::calls::Called;
+use crate::reflect::Assumption;
 use crate::sigs::leading;
 use crate::sink::has_error;
 use crate::{Checker, Requirement, State};
@@ -49,6 +50,12 @@ pub(crate) struct FnCx {
     /// last `if`, when it has no `else`, breaks when nothing ran
     /// (`Checker::check_if` takes it).
     pub implicit_break: bool,
+    /// The members reflection tests assume over the code being checked,
+    /// innermost last (`reflect.rs`).
+    pub assumed: Vec<Assumption>,
+    /// The assumption of the member test just checked, when its answer
+    /// is not known true (`Checker::check_condition` takes it).
+    pub tested: Option<Assumption>,
 }
 
 impl FnCx {
@@ -65,6 +72,8 @@ impl FnCx {
             handled: None,
             fail_flag: None,
             implicit_break: false,
+            assumed: Vec::new(),
+            tested: None,
         }
     }
 
@@ -164,6 +173,13 @@ fn bind_call_refs(fcx: &mut FnCx, place: HirExpr, out: &mut Vec<HirStmt>) -> Hir
         HirExprKind::Field { base, index } => HirExprKind::Field {
             base: Box::new(bind_call_refs(fcx, *base, out)),
             index,
+        },
+        HirExprKind::Assumed {
+            base: Some(base),
+            name,
+        } => HirExprKind::Assumed {
+            base: Some(Box::new(bind_call_refs(fcx, *base, out))),
+            name,
         },
         HirExprKind::Deref(inner) => match inner.kind {
             HirExprKind::Local(_)
@@ -675,7 +691,10 @@ impl Checker<'_> {
             (place, ty)
         };
         let value_hir = self.coerce(value_hir, want, target_span);
-        let through_ref = matches!(place.kind, HirExprKind::Deref(_));
+        let through_ref = matches!(
+            place.kind,
+            HirExprKind::Deref(_) | HirExprKind::Assumed { .. }
+        );
         if self.format_store(&value_hir, through_ref, span).is_err() {
             return;
         }

@@ -490,7 +490,10 @@ fn split_parts(parts: &[FStrPart]) -> (Vec<Vec<u8>>, Vec<(&Expr, Span)>) {
 fn is_lasting(expr: &HirExpr) -> bool {
     match &expr.kind {
         HirExprKind::Local(_) | HirExprKind::Global(_) | HirExprKind::Deref(_) => true,
-        HirExprKind::Field { base, .. } => is_lasting(base),
+        HirExprKind::Field { base, .. }
+        | HirExprKind::Assumed {
+            base: Some(base), ..
+        } => is_lasting(base),
         _ => false,
     }
 }

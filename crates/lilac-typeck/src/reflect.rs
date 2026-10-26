@@ -5,20 +5,332 @@
 //! holds `HirExprKind::Unanswered`. A false test is silent: a missing
 //! member, one of another type, a private one or a generic one is `0x0`,
 //! never an error.
+//!
+//! Where a member test holds (`docs/reflection-plan.md`, "Where a test
+//! holds") and is not known true, typeck **assumes** the member: a use
+//! of it checks against a stand-in of the stated type
+//! (`HirExprKind::Assumed`, `HirCallee::Assumed`), so every arm is
+//! checked in every instance. A condition's [`Facts`] say what it proves
+//! where it is true and where it is false; `if`, `and` and `or` push them
+//! on [`FnCx::assumed`] over the code they guard. Lowering compiles only
+//! the arm a known condition picks (`Lower::outcome`), so it never meets
+//! a stand-in.
 
-use lilac_ast::{Expr, TypeShape};
+use lilac_ast::{BinOp, Expr, TypeShape};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::intrinsics::Intrinsic;
-use lilac_hir::{HirExpr, HirExprKind};
+use lilac_hir::{HirCallee, HirExpr, HirExprKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{Builtin, TypeKind, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::body::FnCx;
 use crate::calls::Called;
+use crate::expr::Receiver;
 use crate::Checker;
 
+/// A member a test assumes where it holds and is not known true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Assumption {
+    /// The tested type, through a reference.
+    pub owner: TypeId,
+    /// The member's name.
+    pub name: String,
+    /// The test: `@has_field`, `@has_method`, `@has_function` or
+    /// `@has_constant`.
+    pub test: Intrinsic,
+    /// The stated type (a function type for the function tests).
+    pub ty: TypeRef,
+}
+
+/// What a condition proves: the assumptions that hold where it is true
+/// and where it is false.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Facts {
+    pub when_true: Vec<Assumption>,
+    pub when_false: Vec<Assumption>,
+}
+
+impl Facts {
+    /// What `not` of the condition proves.
+    fn flipped(self) -> Self {
+        Self {
+            when_true: self.when_false,
+            when_false: self.when_true,
+        }
+    }
+
+    /// What `a and b` proves: true, both sides held; false, only what
+    /// either side's falsity proves alike.
+    fn both(self, right: Self) -> Self {
+        Self {
+            when_true: [self.when_true, right.when_true].concat(),
+            when_false: common(self.when_false, &right.when_false),
+        }
+    }
+
+    /// What `a or b` proves, the reverse of [`Facts::both`].
+    fn either(self, right: Self) -> Self {
+        self.flipped().both(right.flipped()).flipped()
+    }
+}
+
+/// The assumptions in both lists.
+fn common(left: Vec<Assumption>, right: &[Assumption]) -> Vec<Assumption> {
+    left.into_iter().filter(|a| right.contains(a)).collect()
+}
+
+/// Whether `expr` is a member test itself (not one inside it).
+pub(crate) fn is_member_test(expr: &Expr) -> bool {
+    let Expr::Call { callee, .. } = expr else {
+        return false;
+    };
+    let Expr::Ident(name, _) = &**callee else {
+        return false;
+    };
+    matches!(
+        Intrinsic::lookup(name),
+        Some(
+            Intrinsic::HasField
+                | Intrinsic::HasMethod
+                | Intrinsic::HasFunction
+                | Intrinsic::HasConstant
+        )
+    )
+}
+
+/// The stand-in field `base.name` for `assumed`: a place of the stated
+/// type. `base` is the object, through any reference.
+pub(crate) fn stand_in_field(assumed: Assumption, base: HirExpr, span: Span) -> HirExpr {
+    HirExpr {
+        ty: assumed.ty,
+        span,
+        kind: HirExprKind::Assumed {
+            base: Some(Box::new(base)),
+            name: assumed.name,
+        },
+    }
+}
+
+impl FnCx {
+    /// Assumes `facts` over the code checked next; returns the mark to
+    /// truncate [`FnCx::assumed`] back to after it.
+    pub(crate) fn assume(&mut self, facts: &[Assumption]) -> usize {
+        let mark = self.assumed.len();
+        self.assumed.extend_from_slice(facts);
+        mark
+    }
+
+    /// The `@has_field` assumed of `name` on the object `base` (through
+    /// any reference) is, if any.
+    pub(crate) fn assumed_field(&self, base: &HirExpr, name: &str) -> Option<Assumption> {
+        self.assumption(base.ty.id, name, Intrinsic::HasField)
+    }
+
+    /// `Type.NAME` where a `@has_constant` is assumed: the stand-in
+    /// constant, a value of the stated type.
+    pub(crate) fn assumed_constant(
+        &self,
+        receiver: Receiver,
+        name: &str,
+        span: Span,
+    ) -> Option<HirExpr> {
+        let Receiver::Type(ty) = receiver else {
+            return None;
+        };
+        let assumed = self
+            .assumption(ty.id, name, Intrinsic::HasConstant)
+            .filter(|_| !ty.is_ref)?;
+        Some(HirExpr {
+            ty: assumed.ty,
+            span,
+            kind: HirExprKind::Assumed {
+                base: None,
+                name: assumed.name,
+            },
+        })
+    }
+
+    /// The innermost assumption of `name` on `owner` by `test`.
+    pub(crate) fn assumption(
+        &self,
+        owner: TypeId,
+        name: &str,
+        test: Intrinsic,
+    ) -> Option<Assumption> {
+        self.assumed
+            .iter()
+            .rev()
+            .find(|a| a.owner == owner && a.name == name && a.test == test)
+            .cloned()
+    }
+}
+
 impl Checker<'_> {
+    /// Checks a condition and what it proves: `not`, `and` and `or` pass
+    /// on their operands' [`Facts`], a member test its assumption, and
+    /// anything else proves nothing.
+    pub(crate) fn check_condition(
+        &mut self,
+        fcx: &mut FnCx,
+        cond: &Expr,
+        what: &str,
+    ) -> (HirExpr, Facts) {
+        match cond {
+            Expr::Not { value, span } => {
+                let (inner, facts) = self.check_condition(fcx, value, "not");
+                let hir = if inner.ty.is_error() {
+                    HirExpr::poison(*span)
+                } else {
+                    HirExpr {
+                        ty: Builtin::Bit8.value(),
+                        span: *span,
+                        kind: HirExprKind::Not(Box::new(inner)),
+                    }
+                };
+                (hir, facts.flipped())
+            }
+            Expr::BinOp {
+                lhs,
+                op: op @ (BinOp::And | BinOp::Or),
+                rhs,
+                span,
+            } => self.check_logic(fcx, lhs, *op == BinOp::And, rhs, *span),
+            _ if is_member_test(cond) => {
+                fcx.tested = None;
+                let hir = self.check_cond(fcx, cond, what);
+                let facts = Facts {
+                    when_true: fcx.tested.take().into_iter().collect(),
+                    when_false: Vec::new(),
+                };
+                (hir, facts)
+            }
+            _ => (self.check_cond(fcx, cond, what), Facts::default()),
+        }
+    }
+
+    /// `lhs and rhs` (`and`) or `lhs or rhs`: `rhs` runs only when `lhs`
+    /// does not decide, so it is checked under what that proves.
+    pub(crate) fn check_logic(
+        &mut self,
+        fcx: &mut FnCx,
+        lhs: &Expr,
+        and: bool,
+        rhs: &Expr,
+        span: Span,
+    ) -> (HirExpr, Facts) {
+        let what = if and { "and" } else { "or" };
+        let (left, left_facts) = self.check_condition(fcx, lhs, what);
+        let mark = fcx.assume(if and {
+            &left_facts.when_true
+        } else {
+            &left_facts.when_false
+        });
+        let (right, right_facts) = self.check_condition(fcx, rhs, what);
+        fcx.assumed.truncate(mark);
+        let facts = if and {
+            left_facts.both(right_facts)
+        } else {
+            left_facts.either(right_facts)
+        };
+        let hir = HirExpr {
+            ty: Builtin::Bit8.value(),
+            span,
+            kind: HirExprKind::Logic {
+                and,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            },
+        };
+        (hir, facts)
+    }
+
+    /// A call of an assumed member. A stand-in method or static function
+    /// checks its arguments (after the `receiver`, passed as the stated
+    /// type takes it) and outs against the stated type, and one that can
+    /// fail must be handled where it is called, as a named call must; a
+    /// stand-in field is called through the function reference it holds.
+    pub(crate) fn assumed_call(
+        &mut self,
+        fcx: &mut FnCx,
+        assumed: Assumption,
+        receiver: Option<HirExpr>,
+        generic_args: usize,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Called, ErrorGuaranteed> {
+        if generic_args > 0 {
+            // No test states a generic member.
+            let error = self.generic_arity(span, &assumed.name, 0, generic_args);
+            return Err(self.callee_failed(fcx, args, error));
+        }
+        if assumed.test == Intrinsic::HasField {
+            let Some(receiver) = receiver else {
+                lilac_error::bug!(span, "a field call with no receiver");
+            };
+            let what = format!("field `{}`", assumed.name);
+            let base = self.auto_deref(receiver);
+            let at = base.span;
+            let callee = stand_in_field(assumed, base, at);
+            return self.value_call(fcx, callee, &what, args, span);
+        }
+        let TypeKind::Func {
+            params,
+            returns,
+            failures,
+            ..
+        } = self.types.kind(assumed.ty.id).clone()
+        else {
+            lilac_error::bug!(span, "an assumed function of a non-function type");
+        };
+        let mut hir_args = Vec::new();
+        if let Some(receiver) = receiver {
+            // Only a method type that takes the owner first is assumed.
+            let receiver = match params.first() {
+                Some(first) if first.is_ref && !receiver.ty.is_ref => HirExpr {
+                    ty: TypeRef::reference(receiver.ty.id),
+                    span: receiver.span,
+                    kind: HirExprKind::RefOf(Box::new(receiver)),
+                },
+                Some(first) if first.is_ref => receiver,
+                _ => self.auto_deref(receiver),
+            };
+            hir_args.push(receiver);
+        }
+        let skip = hir_args.len().min(params.len());
+        hir_args.extend(self.check_args(fcx, &params[skip..], args, span)?);
+        let mut outs = returns;
+        if let Some(failures) = failures {
+            if fcx.handled != Some(span) {
+                return Err(self.diags.emit(
+                    Diagnostic::error(
+                        codes::E057,
+                        format!(
+                            "`{}` can fail, and the failure is not handled",
+                            assumed.name
+                        ),
+                    )
+                    .label(span, true, "this call can fail")
+                    .help(
+                        "handle it where it happens: `value: T = call else { return }`, \
+                         `if call -> value: T { ... }`, or `loop if call -> value: T { ... }`",
+                    ),
+                ));
+            }
+            // The failure outs, then the flag (`HirFunc::failure`).
+            outs.extend(failures);
+            outs.push(Builtin::Bit8.value());
+        }
+        Ok(Called::Call {
+            callee: HirCallee::Assumed {
+                name: assumed.name,
+                ty: assumed.ty.id,
+            },
+            args: hir_args,
+            outs,
+        })
+    }
+
     /// One of the reflection tests (see the module docs).
     pub(crate) fn check_reflect(
         &mut self,
@@ -55,7 +367,19 @@ impl Checker<'_> {
                 let stated = self.test_type(fcx, &args[2]);
                 let (owner, (member, member_span), stated) = (owner?, member?, stated?);
                 self.stated_function(intrinsic, stated, args[2].span())?;
-                self.has_member(intrinsic, owner, &member, member_span, stated)?
+                let answer = self.has_member(intrinsic, owner, &member, member_span, stated)?;
+                // Known true, a use finds the real member. A method type
+                // that does not take the owner first is no method's, so
+                // nothing is assumed of it.
+                let assumable = answer != Some(true)
+                    && (intrinsic != Intrinsic::HasMethod || self.takes_owner(owner, stated));
+                fcx.tested = assumable.then(|| Assumption {
+                    owner: owner.deref().id,
+                    name: member,
+                    test: intrinsic,
+                    ty: stated,
+                });
+                answer
             }
         };
         let kind = answer.map_or(HirExprKind::Unanswered, |yes| {
@@ -124,17 +448,17 @@ impl Checker<'_> {
     }
 
     /// `E010` unless the type a `@has_method` or `@has_function` states is
-    /// a function type (written without `ref`), so a test never stays
-    /// false for a type no member can have.
+    /// a function type (written without `ref`).
     fn stated_function(
         &mut self,
         intrinsic: Intrinsic,
         stated: TypeRef,
         span: Span,
     ) -> Result<(), ErrorGuaranteed> {
-        if !matches!(intrinsic, Intrinsic::HasMethod | Intrinsic::HasFunction)
-            || (!stated.is_ref && matches!(self.types.kind(stated.id), TypeKind::Func { .. }))
-        {
+        if !matches!(intrinsic, Intrinsic::HasMethod | Intrinsic::HasFunction) {
+            return Ok(());
+        }
+        if !stated.is_ref && matches!(self.types.kind(stated.id), TypeKind::Func { .. }) {
             return Ok(());
         }
         let found = self.show(stated);
@@ -149,6 +473,17 @@ impl Checker<'_> {
             diagnostic.help("state its type: `function (ref T) @bit8`")
         };
         Err(self.diags.emit(diagnostic))
+    }
+
+    /// Whether the stated function type takes `owner` first, as a method
+    /// of it does (`ref T`, or `T` for `self: T`).
+    fn takes_owner(&self, owner: TypeRef, stated: TypeRef) -> bool {
+        match self.types.kind(stated.id) {
+            TypeKind::Func { params, .. } => {
+                params.first().is_some_and(|first| first.id == owner.id)
+            }
+            _ => false,
+        }
     }
 
     /// Whether `a` and `b` are one type; `None` while a parameter in

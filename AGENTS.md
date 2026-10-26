@@ -161,6 +161,21 @@
   lowering never meets (`bug!`). The type operand may be a bare or
   failing function type: the parser reads `function (…) …` as an
   operand (`Expr::TypeApp`; as a value it is `E010`, `check_type_app`).
+  Assumptions (phase 4): a member test not known true sets
+  `FnCx::tested`; `check_condition` turns conditions into `Facts`
+  (`when_true`/`when_false`: `not` swaps, `and` checks its right side
+  under the left's `when_true`, `or` under its `when_false`), and
+  `check_if`, `check_if_value` and `check_logic` push them on
+  `FnCx::assumed` over the code they guard. `field_access`,
+  `method_call`, `static_call` and `static_member` try the stack first
+  (`assumed_field`, `assumed_call`, `assumed_constant`): a stand-in
+  field is `HirExprKind::Assumed { base: Some(object) }`, a place the
+  ownership pass treats like a `Deref` (no borrow of the object), a
+  constant `Assumed { base: None }`, a method or function
+  `HirCallee::Assumed` checked against the stated `TypeKind::Func`
+  (failure outs and flag appended, `E057` unless handled). Lowering
+  `bug!`s on a stand-in: `Lower::outcome` keeps it from ever lowering
+  one.
 - Globals: a top-level `name: T = constant` (or `name: T`, zeroed) is a
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an

@@ -14,10 +14,11 @@ use lilac_ast::{Block, Expr, LetBinding, Param, Stmt};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
 use lilac_hir::{HirBlock, HirCallee, HirExpr, HirExprKind, HirStmt, LocalId};
 use lilac_span::Span;
-use lilac_ty::{Builtin, TypeId, TypeRef};
+use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
 use crate::body::{empty_block, local_expr, moved_local, never_finishes, set_flag, FnCx};
 use crate::calls::Called;
+use crate::reflect::{is_member_test, Facts};
 use crate::Checker;
 
 /// The checked call of a guard or capture `if`.
@@ -59,11 +60,21 @@ impl FailingCall {
 impl Checker<'_> {
     /// How many of a call's outs are success outs, when its callee can fail.
     pub(crate) fn success_outs(&self, callee: &HirCallee) -> Option<usize> {
-        let HirCallee::Func(key) = callee else {
-            return None;
-        };
-        let decl = self.res.def(key.def).func()?;
-        decl.failures.as_ref().map(|_| decl.returns.len())
+        match callee {
+            HirCallee::Func(key) => {
+                let decl = self.res.def(key.def).func()?;
+                decl.failures.as_ref().map(|_| decl.returns.len())
+            }
+            HirCallee::Assumed { ty, .. } => match self.types.kind(*ty) {
+                TypeKind::Func {
+                    returns,
+                    failures: Some(_),
+                    ..
+                } => Some(returns.len()),
+                _ => None,
+            },
+            HirCallee::Value(_) | HirCallee::Intrinsic(_) => None,
+        }
     }
 
     /// `fail`: clears the flag and leaves.
@@ -129,6 +140,7 @@ impl Checker<'_> {
         let name = match &callee {
             HirCallee::Func(key) => self.function_name(key.def),
             HirCallee::Value(_) => "this function reference".to_owned(),
+            HirCallee::Assumed { name, .. } => name.clone(),
             HirCallee::Intrinsic(_) => match value {
                 Expr::Call { callee, .. } => match &**callee {
                     Expr::Ident(name, _) => name.clone(),
@@ -181,7 +193,8 @@ impl Checker<'_> {
         let implicit =
             (implicit && matches!(els, None | Some(Stmt::If { .. }))).then(|| cond.span());
         let first_capture = captures.first().or(else_captures.first());
-        let cond = if let Expr::Call { .. } = cond {
+        let mut facts = Facts::default();
+        let cond = if matches!(cond, Expr::Call { .. }) && !is_member_test(cond) {
             match self.check_subject(fcx, cond, None) {
                 Ok(Subject::Fails(call)) => {
                     self.check_capture_if(
@@ -215,13 +228,19 @@ impl Checker<'_> {
                 Err(_) => HirExpr::poison(cond.span()),
             }
         } else {
-            self.check_cond(fcx, cond, "if")
+            let (cond, proved) = self.check_condition(fcx, cond, "if");
+            facts = proved;
+            cond
         };
         if !cond.ty.is_error() {
             self.no_captures(first_capture, &cond, "the condition");
         }
+        let mark = fcx.assume(&facts.when_true);
         let then = self.captured_block(fcx, then, captures, &[], &[]);
+        fcx.assumed.truncate(mark);
+        let mark = fcx.assume(&facts.when_false);
         let els = self.else_block(fcx, els, else_captures, &[], &[], implicit, span);
+        fcx.assumed.truncate(mark);
         out.push(HirStmt::If { cond, then, els });
     }
 
