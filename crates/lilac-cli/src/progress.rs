@@ -130,11 +130,11 @@ impl Reporter {
         }
     }
 
-    /// The backend's step hook; `opt` names the optimization level.
-    pub fn codegen(&self, step: CodegenStep, opt: &str, object: &str) {
+    /// The backend's step hook; `mode` names the build mode.
+    pub fn codegen(&self, step: CodegenStep, mode: &str, object: &str) {
         match step {
             CodegenStep::Lower => {
-                self.status("Optimizing", opt);
+                self.status("Optimizing", mode);
                 self.begin("codegen lower");
             }
             CodegenStep::Verify => self.begin("codegen verify"),

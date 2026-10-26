@@ -104,6 +104,11 @@ fn builds_into_the_mode_folder_and_runs() {
         ],
         "{err}"
     );
+    assert!(
+        err.lines()
+            .any(|line| line.split_whitespace().eq(["Optimizing", "Debug"])),
+        "{err}"
+    );
 
     let release = build(
         &dir,

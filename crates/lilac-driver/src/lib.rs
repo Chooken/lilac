@@ -79,6 +79,17 @@ impl OptimizeMode {
             Self::ReleaseSmall => "release-small",
         }
     }
+
+    /// The mode's title, as `@builtin.Build.Mode` names its variant and
+    /// `lilac build` reports it.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Debug => "Debug",
+            Self::Release => "Release",
+            Self::ReleaseSmall => "ReleaseSmall",
+        }
+    }
 }
 
 /// A pipeline stage, reported to [`Session::progress`].

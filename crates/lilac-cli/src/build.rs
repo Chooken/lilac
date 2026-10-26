@@ -256,11 +256,10 @@ fn emit_and_link(
             .unwrap_or_default()
     };
     let opt = crate::opt_level(session.optimize);
-    let opt_name = format!("{opt:?}");
     let object_name = file_name(&paths.obj);
     let backend = lilac_codegen_llvm::LlvmBackend::new(&session.target.to_triple(), opt);
     let bytes = backend.emit_object(module, session.entry, &mut |step| {
-        reporter.codegen(step, &opt_name, &object_name);
+        reporter.codegen(step, session.optimize.title(), &object_name);
     })?;
     write_file(&paths.obj, &bytes)?;
     if let Some(parent) = paths.exe.parent().filter(|p| !p.as_os_str().is_empty()) {

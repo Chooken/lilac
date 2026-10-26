@@ -57,6 +57,74 @@ nanoseconds per call:
 5. **`erf` uses a continued fraction** where piecewise polynomials would
    do. That is why it is about 800 times slower than C.
 
+## Step 0: the surface, `Float64.sin(x)` and `Float`
+
+The elementary functions become static functions of their type, and
+`Float` names `Float64` for code that does not care about widths. This
+replaces `math-plan.md`'s decision that methods are the main surface for
+these functions: `angle.sin()` reads as a property of the value, where
+math writes `sin(angle)`.
+
+- **Static functions, not a `Math` namespace.** `Math.sin(x)` would need
+  one function per width under one name. Lilac has no overloading and
+  infers no type arguments, so it would serve one width only, or be
+  spelled `Math.sin[Float32](x)`. `Float32.sin(x)` works for every width
+  today, with no language change:
+  - a static receiver sees through aliases, so `Float.sin(x)` works;
+  - inside a numeric type's body a static is an own name, so `Float64`'s
+    own code writes `sin(x)` bare (`own.rs`);
+  - the editor lists them after `Float64.` (the static receiver's
+    members).
+  - `Standard.Math` keeps what is not one scalar's function (random
+    numbers, linear algebra, SIMD).
+- **Which functions move.** The rule: what math writes as `f(x)` is a
+  static function; a question about the value, or a reshaping of it,
+  stays a method.
+  - Static: the `@math_functions` list (`exp` … `tan_pi`), `log`,
+    `sin_cos`, `atan2`, `pow`, `pow_int`, `cbrt`, `hypot`, `root`, and
+    `sqrt`, so the roots sit together. Two-argument ones take the
+    arguments in C's order: `Float64.atan2(y, x)`, `Float64.pow(x, y)`,
+    `Float64.log(x, base)`, `Float64.root(x, n)`.
+  - Methods, unchanged: classification (`is_nan`, `classify`, …),
+    rounding (`floor`, `round`, …), `abs`, `copy_sign`, `min`/`max`/
+    `clamp`, `lerp` and the other interpolations, bits and ulps
+    (`to_bits`, `next_up`, `ulp`, …), conversions, `compare` and
+    formatting.
+  - The method forms go away; no shim keeps `x.sin()`.
+- **`Float: alias Float64`**, beside `Byte: alias Uint8` (the script
+  writes it into `float64.lilac`).
+  - An alias, not a structure of its own: `Float` and `Float64` are one
+    type, so a beginner's `Float` passes to any `Float64` function with
+    no conversion, and the literal hooks, constants (`Float.PI`) and
+    functions all come along.
+  - Not native-sized. Every supported target has 64-bit floats in
+    hardware (SSE2 on i686, `+vfp2` on 32-bit Arm, wasm's `f64`), so
+    nothing gets faster at another width, and a width that varied by
+    target would break "the same bits on every target". `Int` is
+    pointer-sized because it indexes memory; a float never does.
+  - Its `///` doc says it is `Float64`, and to name a width when
+    storage or SIMD lanes matter.
+- **Work:**
+  - `numeric_types.pl`: `math_methods` writes `name: function (x: T) r:
+    T` (and `(x: T, y: T)` …); `%quick` and `correct_method` take the
+    parameter names. Rerun it.
+  - Callers: `Standard`'s own uses (`float_*.lilac`, `Float32`/`Float16`
+    bodies calling `Float64` functions), the programs `math.rs`,
+    `numeric_differential.rs` and `numeric_link.rs` generate, the run
+    tests, `bench/math`, `examples/`, and every `///` doc that writes
+    `(1e300).sin()`. Find them by the compile errors: a method call of a
+    static is `E022`.
+  - Docs: `math-plan.md`'s decision and phase 5's list, and the
+    `AGENTS.md` paragraph on elementary functions.
+- **Tests:** the existing suites, rewritten; a run test that
+  `Float.sin(x)`, `Float.PI` and a `Float` passed to a `Float64`
+  parameter work; a typeck test that `x.sin()` is `E022` and names
+  `Float64.sin(x)`, if the message can say so (a fix that rewrites the
+  call is better still).
+
+Land this before step 3: step 3 edits the same generated methods (`%quick32`),
+and every later benchmark and test is written once, in the new form.
+
 ## Step 1: compiler, internal linkage
 
 - The backend gives every defined function `internal` linkage, except
@@ -229,14 +297,15 @@ For each function:
 
 | step | size | gain |
 |---|---|---|
+| 0. static functions, `Float` | small (generator plus callers) | the surface: `Float64.sin(x)`, `Float.sin(x)` |
 | 1. internal linkage | small | about 40% on small functions, every program |
 | 2. minimax fits | small to medium | needed by 3 and 4 |
 | 3. `Float32` fast tiers | medium (one pattern, proven exhaustively) | about 100 times, to C's speed |
 | 4. `Float64` fast tiers | large (about 15 designs) | 10 to 100 times, to within 1.5 times C |
 | 5. FMA | medium (phase 8) | about 1.5 times on top, with `--cpu` |
 
-Steps 1 and 2 are independent and can run in parallel. Step 3 can start
-once step 2 lands. Step 4's families are independent of each other once
+Steps 0, 1 and 2 are independent and can run in parallel. Step 3 can
+start once steps 0 and 2 land. Step 4's families are independent of each other once
 step 2 lands: one session per family, each touching only its own kernel
 file, the shared `float_tables.lilac` generator section, and its own
 `%quick` entries.
