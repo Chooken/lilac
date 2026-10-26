@@ -124,6 +124,11 @@ pub enum TypeKind {
         params: Vec<TypeRef>,
         /// Return-slot types in order.
         returns: Vec<TypeRef>,
+        /// `else` outs (`function (…) T else E`): the function can fail,
+        /// and these are what a failure gives. `else nothing` is an empty
+        /// list. Only an alias's target and a reflection test name one; no
+        /// value has such a type.
+        failures: Option<Vec<TypeRef>>,
         /// `export function (…)`: a C function, called with the C ABI.
         c_abi: bool,
     },
@@ -255,6 +260,9 @@ pub struct FuncSig {
     pub returns: Vec<TypeRef>,
 }
 
+/// A function type's identity: parameters, returns, failure outs, C ABI.
+type FuncKey = (Vec<TypeRef>, Vec<TypeRef>, Option<Vec<TypeRef>>, bool);
+
 /// The type interner.
 #[derive(Clone, Debug, Default)]
 pub struct Types {
@@ -271,7 +279,7 @@ pub struct Types {
     /// The name a type displays as: the one alias that names it, `None`
     /// when two do ([`Types::add_alias`]).
     alias_names: HashMap<TypeId, Option<String>>,
-    funcs: HashMap<(Vec<TypeRef>, Vec<TypeRef>, bool), TypeId>,
+    funcs: HashMap<FuncKey, TypeId>,
     params: HashMap<(u32, String), TypeId>,
     instances: HashMap<(DefId, Vec<TypeRef>), TypeId>,
     arrays: HashMap<(TypeId, u64), TypeId>,
@@ -297,10 +305,14 @@ impl Types {
             TypeKind::Array { elem, .. } => self.contains_param(*elem),
             TypeKind::FormatArgs { writer } => self.contains_param(*writer),
             TypeKind::Func {
-                params, returns, ..
+                params,
+                returns,
+                failures,
+                ..
             } => params
                 .iter()
                 .chain(returns.iter())
+                .chain(failures.iter().flatten())
                 .any(|slot| self.contains_param(slot.id)),
             _ => false,
         };
@@ -422,17 +434,19 @@ impl Types {
                 TypeKind::Func {
                     params,
                     returns,
+                    failures,
                     c_abi,
                 } => {
-                    let params = params
-                        .iter()
-                        .map(|param| self.substitute_in(*param, args, done))
-                        .collect();
-                    let returns = returns
-                        .iter()
-                        .map(|ret| self.substitute_in(*ret, args, done))
-                        .collect();
-                    TypeRef::value(self.intern_func_abi(params, returns, c_abi))
+                    let mut slots = |slots: &[TypeRef]| -> Vec<TypeRef> {
+                        slots
+                            .iter()
+                            .map(|slot| self.substitute_in(*slot, args, done))
+                            .collect()
+                    };
+                    let params = slots(&params);
+                    let returns = slots(&returns);
+                    let failures = failures.as_deref().map(slots);
+                    TypeRef::value(self.intern_function(params, returns, failures, c_abi))
                 }
                 _ => ty.deref(),
             };
@@ -471,13 +485,27 @@ impl Types {
         returns: Vec<TypeRef>,
         c_abi: bool,
     ) -> TypeId {
-        let key = (params, returns, c_abi);
+        self.intern_function(params, returns, None, c_abi)
+    }
+
+    /// Interns (or finds) a function type that can fail when `failures`
+    /// is given (`function (…) T else E`), an `export function` one when
+    /// `c_abi`.
+    pub fn intern_function(
+        &mut self,
+        params: Vec<TypeRef>,
+        returns: Vec<TypeRef>,
+        failures: Option<Vec<TypeRef>>,
+        c_abi: bool,
+    ) -> TypeId {
+        let key = (params, returns, failures, c_abi);
         if let Some(&id) = self.funcs.get(&key) {
             return id;
         }
         let id = self.push(TypeKind::Func {
             params: key.0.clone(),
             returns: key.1.clone(),
+            failures: key.2.clone(),
             c_abi,
         });
         self.funcs.insert(key, id);
@@ -635,6 +663,7 @@ impl Types {
             TypeKind::Func {
                 params,
                 returns,
+                failures,
                 c_abi,
             } => {
                 if *c_abi {
@@ -643,15 +672,20 @@ impl Types {
                 out.push_str("function (");
                 list(self, params, out);
                 out.push_str(") ");
-                match returns.len() {
+                let outs = |slots: &[TypeRef], out: &mut String| match slots.len() {
                     0 => out.push_str("nothing"),
-                    1 => list(self, returns, out),
+                    1 => list(self, slots, out),
                     // More than one out is parenthesized, as written.
                     _ => {
                         out.push('(');
-                        list(self, returns, out);
+                        list(self, slots, out);
                         out.push(')');
                     }
+                };
+                outs(returns, out);
+                if let Some(failures) = failures {
+                    out.push_str(" else ");
+                    outs(failures, out);
                 }
             }
             TypeKind::Error => out.push_str("<error>"),
@@ -769,6 +803,16 @@ mod tests {
         let nullary = types.intern_func(Vec::new(), Vec::new());
         assert_ne!(one, nullary);
         assert_eq!(types.display(nullary), "function () nothing");
+        // Failure outs are part of the type, and substitution walks them.
+        let param = TypeRef::value(types.intern_param(0, "T"));
+        let failing = types.intern_function(Vec::new(), Vec::new(), Some(vec![param]), false);
+        assert_ne!(failing, nullary);
+        assert!(types.contains_param(failing));
+        assert_eq!(types.display(failing), "function () nothing else T");
+        let done = types.substitute(TypeRef::value(failing), &[TypeRef::value(bit8)]);
+        assert_eq!(types.display(done.id), "function () nothing else @bit8");
+        let silent = types.intern_function(Vec::new(), Vec::new(), Some(Vec::new()), false);
+        assert_eq!(types.display(silent), "function () nothing else nothing");
     }
 
     #[test]

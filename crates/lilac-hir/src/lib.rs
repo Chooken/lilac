@@ -712,6 +712,10 @@ pub enum HirExprKind {
     SizeOf(TypeRef),
     /// `@align_of(T)`.
     AlignOf(TypeRef),
+    /// A reflection test (`@has_method`, `@is_same`, ...) a template
+    /// cannot answer, since the answer depends on its arguments: a
+    /// `@bit8` only templates hold, never lowered.
+    Unanswered,
     /// A `@compile_error` site (`E031` if lowered in a reachable function).
     CompileError {
         /// Message.
@@ -808,6 +812,7 @@ impl HirExpr {
             | HirExprKind::Global(_)
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
+            | HirExprKind::Unanswered
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }

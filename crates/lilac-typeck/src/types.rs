@@ -66,9 +66,9 @@ impl Checker<'_> {
                 if !ty.is_ref {
                     self.bare_function_type(ty);
                 }
-                let id = self.resolve_function(ty, func);
+                let id = self.resolve_function(func);
                 // A bare one recovers as the reference it should be.
-                id.map_or(TypeRef::ERROR, TypeRef::reference)
+                self.function_value(ty, TypeRef::reference(id))
             }
             TypeShape::Array {
                 element,
@@ -82,29 +82,40 @@ impl Checker<'_> {
         }
     }
 
-    /// The function type `func` spells (written at `ty`), `None` when it
-    /// cannot be one (`E057`, reported). Only an alias's target may be one
-    /// without `ref`; every other caller checks the `ref`.
-    pub(crate) fn resolve_function(&mut self, ty: &AstType, func: &FuncType) -> Option<TypeId> {
-        if func.failures.is_some() {
-            self.diags.emit(
-                Diagnostic::error(codes::E057, "a function type cannot fail")
-                    .label(ty.span, true, "declared with `else` outs")
-                    .help("only a named function can fail; call it directly"),
-            );
-            return None;
-        }
-        let params = func
-            .params
-            .iter()
-            .map(|slot| self.resolve_syntax(&slot.ty))
-            .collect();
-        let returns = func
-            .returns
-            .iter()
-            .map(|slot| self.resolve_syntax(&slot.ty))
-            .collect();
-        Some(self.types.intern_func_abi(params, returns, func.is_export))
+    /// The function type `func` spells, failure outs included. Only an
+    /// alias's target may be one without `ref`, and only it may fail;
+    /// every other caller checks both ([`Checker::function_value`]).
+    pub(crate) fn resolve_function(&mut self, func: &FuncType) -> TypeId {
+        let mut slots = |slots: &[lilac_ast::Param]| -> Vec<TypeRef> {
+            slots
+                .iter()
+                .map(|slot| self.resolve_syntax(&slot.ty))
+                .collect()
+        };
+        let params = slots(&func.params);
+        let returns = slots(&func.returns);
+        let failures = func.failures.as_deref().map(slots);
+        self.types
+            .intern_function(params, returns, failures, func.is_export)
+    }
+
+    /// `ty`, the type of a value written at `syntax`: a function type that
+    /// can fail is `E057`, since no function value can fail yet.
+    pub(crate) fn function_value(&mut self, syntax: &AstType, ty: TypeRef) -> TypeRef {
+        let TypeKind::Func {
+            failures: Some(_), ..
+        } = self.types.kind(ty.id)
+        else {
+            return ty;
+        };
+        self.diags.emit(
+            Diagnostic::error(codes::E057, "a function value cannot fail")
+                .label(syntax.span, true, "this function type has `else` outs")
+                .help(
+                    "only a named function can fail: call it directly, or wrap the call in a function that handles the failure",
+                ),
+        );
+        TypeRef::ERROR
     }
 
     /// `E077` for a function type written without `ref`, at `ty`: its fix
@@ -181,10 +192,11 @@ impl Checker<'_> {
         if bare {
             self.bare_function_alias(ty, name);
         }
-        TypeRef {
+        let value = TypeRef {
             id: target.id,
             is_ref: ty.is_ref || target.is_ref || bare,
-        }
+        };
+        self.function_value(ty, value)
     }
 
     /// Resolves a named type: a generic parameter, a builtin, or an
@@ -387,12 +399,19 @@ impl Checker<'_> {
     fn ensure(&mut self, ty: TypeRef, span: Span, defer: bool) -> Result<(), ErrorGuaranteed> {
         match self.types.kind(ty.id).clone() {
             TypeKind::Func {
-                params, returns, ..
+                params,
+                returns,
+                failures,
+                ..
             } => {
                 if self.ensured.contains(&ty.id) {
                     return Ok(());
                 }
-                for slot in params.iter().chain(returns.iter()) {
+                for slot in params
+                    .iter()
+                    .chain(returns.iter())
+                    .chain(failures.iter().flatten())
+                {
                     self.ensure_type(*slot, span)?;
                 }
                 self.ensured.insert(ty.id);

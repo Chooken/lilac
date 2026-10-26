@@ -274,8 +274,9 @@ checks.
   - A guard's `else` block must leave. Reuse the end-of-block knowledge
     behind `HirProgram::unreachable` (`check_stmts`), and add `fail` to
     it.
-  - `extern`/`export` functions cannot fail (`E028`); function types
-    cannot fail yet.
+  - `extern`/`export` functions cannot fail (`E028`); function values
+    cannot fail yet (a failing function type is only named:
+    `docs/reflection-plan.md`).
 - **2.3 Lowering**: a function that can fail gets a hidden `@bit8` success
   out after its other outs (place ABI); `return` sets it, `fail` clears
   it. Call sites branch on it. `IR_SPEC.md` notes the convention.

@@ -1,0 +1,116 @@
+// expect-stdout: 1011 0100 1111 0000 1000 1000 1000 1100 1 1010
+// The reflection tests fold to `@bit8` constants per instance: each is
+// true only on an exact match of a member a use would find here. A
+// missing member, one of another type, a private one, a generic one or
+// a type with no members is false, never an error.
+
+using Standard
+using Standard.Io
+using hidden
+
+Counter: structure {
+    count: @bit32
+    label: ref Counter
+    LIMIT: @bit32 => 0x10
+
+    get: function (self) @bit32 => self.count
+    take: function (self: Counter) @bit32 => self.count
+    next: function (self) value: @bit32 else nothing {
+        if self.count == 0x0 {
+            fail
+        }
+        value = self.count
+    }
+    zero: function () Counter => Counter { count = 0x0, label = @address_to_ptr(0x0) as ref Counter }
+    convert[U]: function (self, value: U) U => value
+}
+
+// A same-named member of another type.
+Other: structure {
+    count: @bit64
+    get: function (self) @bit64 => self.count
+}
+
+Count: alias @bit32
+Getter: alias function (ref Counter) @bit32
+
+say: function (answer: @bit8) nothing {
+    if answer {
+        print_char('1')
+    } else {
+        print_char('0')
+    }
+}
+
+// Both arms are valid for every `T`: the test only picks one.
+fields[T]: function () nothing {
+    say(@has_field(T, count, @bit32))
+    say(@has_field(T, count, @bit64))
+    say(@has_field(T, label, ref Counter))
+    say(@has_field(ref T, count, Count))
+    print_char(' ')
+}
+
+methods[T]: function () nothing {
+    say(@has_method(T, get, function (ref T) @bit32))
+    say(@has_method(T, get, Getter))
+    say(@has_method(T, take, function (T) @bit32))
+    say(@has_method(T, next, function (ref T) @bit32 else nothing))
+    print_char(' ')
+}
+
+// Never instantiated: checked as a template, where a test whose answer
+// depends on `T` waits, and one that cannot vary is answered.
+unused[T]: function () nothing {
+    say(@has_field(T, count, @bit32))
+    say(@has_field(Box[T], count, T))
+    say(@has_method(Counter, get, function (ref T) @bit32))
+    say(@is_same(T, @bit32))
+    say(@is_same(T, T))
+    say(@is_copyable(T))
+}
+
+main: function () nothing {
+    // Fields: `Counter` has `count: @bit32` and `label: ref Counter`;
+    // `Other`'s `count` is an `@bit64`.
+    fields[Counter]()
+    fields[Other]()
+    // Methods, through an alias and with failure outs.
+    methods[Counter]()
+    methods[Other]()
+    // A static function is not a method, and a method is not a static
+    // function; a generic one never matches; a missing one is false.
+    say(@has_function(Counter, zero, function () Counter))
+    say(@has_method(Counter, zero, function () Counter))
+    say(@has_function(Counter, get, function (ref Counter) @bit32))
+    say(@has_method(Counter, missing, function (ref Counter) @bit32))
+    print_char(' ')
+    // Constants.
+    say(@has_constant(Counter, LIMIT, @bit32))
+    say(@has_constant(Counter, LIMIT, @bit64))
+    say(@has_constant(Counter, count, @bit32))
+    say(@has_method(Counter, convert, function (ref Counter, @bit8) @bit8))
+    print_char(' ')
+    // A private member is not there from outside its namespace.
+    say(@has_field(Secretive, shown, @bit32))
+    say(@has_field(Secretive, count, @bit32))
+    say(@has_method(Secretive, peek, function (ref Secretive) @bit32))
+    say(@has_field(@bit32, count, @bit32))
+    print_char(' ')
+    // `@is_same`: aliases are transparent, `ref` counts.
+    say(@is_same(Count, @bit32))
+    say(@is_same(Getter, function (ref Counter) @bit32))
+    say(@is_same(ref Counter, Counter))
+    say(@is_same(Counter, Other))
+    print_char(' ')
+    // A value stands for its type.
+    c: Counter = Counter.zero()
+    say(@is_same(c, Counter))
+    print_char(' ')
+    // `@is_copyable`: a structure copies unless a hook stops it.
+    say(@is_copyable(Counter))
+    say(@is_copyable(Box[@bit8]))
+    say(@is_copyable(ref Box[@bit8]))
+    say(@is_copyable(Other) == 0x0)
+    print_char(0xA)
+}

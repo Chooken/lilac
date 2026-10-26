@@ -833,13 +833,10 @@ impl Checker<'_> {
     /// namespace and those inside it (`Resolved::reaches`), so types in one
     /// folder (`Shared` and `Weak`) build and read each other.
     pub(crate) fn private_denied(&mut self, member: DefId, owner: DefId, access: Span) -> bool {
-        let def = self.res.def(member);
-        if def.vis != Visibility::Private
-            || self.env.owner == Some(owner)
-            || self.res.reaches(self.file_ns(), self.res.def(owner).ns)
-        {
+        if !self.private_hidden(member, owner) {
             return false;
         }
+        let def = self.res.def(member);
         let decl = def.span;
         let path = match self.res.namespace_path(self.res.def(owner).ns) {
             "" => "the root namespace".to_owned(),
@@ -858,6 +855,14 @@ impl Checker<'_> {
                 ));
         self.diags.emit(diagnostic);
         true
+    }
+
+    /// Whether `member` of `owner` is private and out of reach here
+    /// ([`Self::private_denied`], which reports it).
+    pub(crate) fn private_hidden(&self, member: DefId, owner: DefId) -> bool {
+        self.res.def(member).vis == Visibility::Private
+            && self.env.owner != Some(owner)
+            && !self.res.reaches(self.file_ns(), self.res.def(owner).ns)
     }
 
     /// `obj.field` as a value: a field read, or a variant of a named enum.
@@ -1214,7 +1219,14 @@ impl Checker<'_> {
     /// id[@bit32]`, [`Self::check_instance`]); a type is no value (`E021`).
     fn check_type_app(&mut self, fcx: &mut FnCx, ty: &AstType, behind_ref: bool) -> HirExpr {
         let TypeShape::Named { name, args } = &ty.shape else {
-            lilac_error::bug!(ty.span, "a type in value position is a named type");
+            // A function type (the parser reads one as an operand, for the
+            // reflection tests) is no value.
+            self.diags.emit(
+                Diagnostic::error(codes::E010, "a function type is not a value")
+                    .label(ty.span, true, "a type here")
+                    .help("name a function instead: `ref f`"),
+            );
+            return HirExpr::poison(ty.span);
         };
         let callee = path_expr(name, ty.name_span);
         self.check_instance_value(fcx, &callee, args, ty.span, behind_ref)

@@ -145,6 +145,22 @@
   `*p`, and `@drop(p)` as the drop routine on `*p`. `@discard(x)` (`E066`:
   an owned structure, in a function of its type, `Env::owner`) lowers to
   nothing; the ownership pass gives it its meaning.
+- Reflection tests (`lilac-typeck/src/reflect.rs`, `docs/reflection-plan.md`):
+  `@has_field`/`@has_method`/`@has_function`/`@has_constant`
+  (`T, name, type`), `@is_copyable(T)` and `@is_same(T, U)`
+  (`Intrinsic::is_reflection`) fold to a `@bit8` literal per instance,
+  like `@needs_drop`. A member test answers by the lookup a use takes
+  (`Resolved::member`, `fields_of`, `const_type`, `sig_of` substituted
+  at the owner's arguments; `private_hidden` is `private_denied`
+  without its `E026`), true only when the found type is the stated one
+  (`TypeRef` equality); a member's function type is its parameters, its
+  success outs and its failure outs (`member_function_type`), and a
+  generic member never matches. A false test reports nothing. In a
+  template an answer a parameter could change is
+  `HirExprKind::Unanswered` (`same_type` over `could_match`), which
+  lowering never meets (`bug!`). The type operand may be a bare or
+  failing function type: the parser reads `function (…) …` as an
+  operand (`Expr::TypeApp`; as a value it is `E010`, `check_type_app`).
 - Globals: a top-level `name: T = constant` (or `name: T`, zeroed) is a
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an

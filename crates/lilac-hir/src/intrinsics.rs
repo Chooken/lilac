@@ -547,6 +547,22 @@ pub enum Intrinsic {
     /// `@discard(place)`: inside a function of `T`, ends `T`'s whole life
     /// without its `@on_drop`; its fields become places of their own.
     Discard,
+    /// `@has_field(T, name, F)`: whether `value.name` is a field of type
+    /// `F` (a constant `@bit8`).
+    HasField,
+    /// `@has_method(T, name, function (R, P...) O)`: whether `value.name(...)`
+    /// is a method of exactly that type, `R` its receiver.
+    HasMethod,
+    /// `@has_function(T, name, function (P...) O)`: whether `T.name(...)` is
+    /// a static function of exactly that type.
+    HasFunction,
+    /// `@has_constant(T, NAME, C)`: whether `T.NAME` is a member constant
+    /// of type `C`.
+    HasConstant,
+    /// `@is_copyable(T)`: whether a by-value use of a `T` copies.
+    IsCopyable,
+    /// `@is_same(T, U)`: whether `T` and `U` are one type.
+    IsSame,
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -583,6 +599,8 @@ pub enum Slot {
     StringLiteral,
     /// What the `@compiler_print` hook takes (`@panic`).
     Message,
+    /// A member's bare name (the reflection tests).
+    MemberName,
 }
 
 impl Slot {
@@ -617,6 +635,7 @@ impl std::fmt::Display for Slot {
             Self::FormatArgs => f.write_str("@format_args(W)"),
             Self::StringLiteral => f.write_str("\"string literal\""),
             Self::Message => f.write_str("Message"),
+            Self::MemberName => f.write_str("name"),
         }
     }
 }
@@ -648,7 +667,7 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 38] = [
+    const PLAIN: [(&'static str, Self); 44] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -687,6 +706,12 @@ impl Intrinsic {
         ("@drop", Self::Drop),
         ("@needs_drop", Self::NeedsDrop),
         ("@discard", Self::Discard),
+        ("@has_field", Self::HasField),
+        ("@has_method", Self::HasMethod),
+        ("@has_function", Self::HasFunction),
+        ("@has_constant", Self::HasConstant),
+        ("@is_copyable", Self::IsCopyable),
+        ("@is_same", Self::IsSame),
     ];
 
     /// Whether this is a memory builtin: `@move`, `@write`, `@read`, `@drop`,
@@ -697,6 +722,22 @@ impl Intrinsic {
         matches!(
             self,
             Self::Move | Self::Write | Self::Read | Self::Drop | Self::NeedsDrop | Self::Discard
+        )
+    }
+
+    /// Whether this is a reflection test: `@has_field`, `@has_method`,
+    /// `@has_function`, `@has_constant`, `@is_copyable` or `@is_same`
+    /// (checked specially, by typeck's `reflect.rs`).
+    #[must_use]
+    pub fn is_reflection(self) -> bool {
+        matches!(
+            self,
+            Self::HasField
+                | Self::HasMethod
+                | Self::HasFunction
+                | Self::HasConstant
+                | Self::IsCopyable
+                | Self::IsSame
         )
     }
 
@@ -865,12 +906,14 @@ impl Intrinsic {
     /// a type or literal operand (`@size_of`, `@align_of`, `@array_len`,
     /// `@needs_drop`, `@compile_error`), any array (`@array_at`), any format
     /// (the `@format_args_*` consumers), a place or `ref` of any type (the
-    /// memory builtins), or the panic hook's message (`@panic`). Their
+    /// memory builtins), the panic hook's message (`@panic`), or types and
+    /// member names (the reflection tests). Their
     /// signatures only describe the operands, with slots that are not
     /// [`Slot::is_checked`].
     #[must_use]
     pub fn is_special(self) -> bool {
         self.is_memory()
+            || self.is_reflection()
             || matches!(
                 self,
                 Self::SizeOf
@@ -932,11 +975,19 @@ impl Intrinsic {
                 &[("array", RefArray), ("index", native)],
                 Some(RefParam("T")),
             ),
-            Self::NeedsDrop => sig(&[("type", Type)], Some(Builtin(Ty::Bit8))),
+            Self::NeedsDrop | Self::IsCopyable => sig(&[("type", Type)], Some(Builtin(Ty::Bit8))),
             Self::CompileError => sig(&[("message", StringLiteral)], None),
             Self::Panic => sig(&[("message", Message)], None),
             Self::Move => sig(&[("place", Slot::Param("T"))], Some(Slot::Param("T"))),
             Self::Discard => sig(&[("place", Slot::Param("T"))], None),
+            Self::HasField | Self::HasMethod | Self::HasFunction | Self::HasConstant => sig(
+                &[("type", Type), ("name", Slot::MemberName), ("member", Type)],
+                Some(Builtin(Ty::Bit8)),
+            ),
+            Self::IsSame => sig(
+                &[("first", Type), ("second", Type)],
+                Some(Builtin(Ty::Bit8)),
+            ),
             Self::Write => sig(
                 &[("address", RefParam("T")), ("value", Slot::Param("T"))],
                 None,
@@ -1163,6 +1214,20 @@ impl Intrinsic {
             Self::Discard => {
                 "Inside a function of `T`, ends `place`'s whole life without its `@on_drop`; its fields become places of their own."
             }
+            Self::HasField => {
+                "Whether a value of `type` has a field `name` of type `member`: a constant `@bit8`."
+            }
+            Self::HasMethod => {
+                "Whether a value of `type` has a method `name` of exactly the function type `member`, its receiver first: a constant `@bit8`."
+            }
+            Self::HasFunction => {
+                "Whether `type` has a static function `name` of exactly the function type `member`: a constant `@bit8`."
+            }
+            Self::HasConstant => {
+                "Whether `type` has a member constant `name` of type `member`: a constant `@bit8`."
+            }
+            Self::IsCopyable => "Whether a by-value use of a `type` copies: a constant `@bit8`.",
+            Self::IsSame => "Whether `first` and `second` are one type: a constant `@bit8`.",
         };
         text.to_owned()
     }
@@ -1394,6 +1459,9 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@trap"), Some(Intrinsic::Trap));
         assert_eq!(Intrinsic::lookup("@move"), Some(Intrinsic::Move));
         assert_eq!(Intrinsic::lookup("@needs_drop"), Some(Intrinsic::NeedsDrop));
+        assert_eq!(Intrinsic::lookup("@has_method"), Some(Intrinsic::HasMethod));
+        assert_eq!(Intrinsic::lookup("@is_same"), Some(Intrinsic::IsSame));
+        assert_eq!(Intrinsic::lookup("@has_member"), None);
     }
 
     #[test]

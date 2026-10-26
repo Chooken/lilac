@@ -131,6 +131,7 @@ pub fn value_call(
     let TypeKind::Func {
         params,
         returns,
+        failures,
         c_abi,
     } = types.kind(ty.id)
     else {
@@ -167,11 +168,19 @@ pub fn value_call(
         out.param(param);
     }
     out.push(") ");
-    let returns = names(returns, syntax.map(|syntax| &syntax.returns));
-    match returns.len() {
+    let outs = |out: &mut Out, outs: Vec<String>| match outs.len() {
         0 => out.push("nothing"),
-        1 => out.push(&returns[0]),
-        _ => out.push(&format!("({})", returns.join(", "))),
+        1 => out.push(&outs[0]),
+        _ => out.push(&format!("({})", outs.join(", "))),
+    };
+    outs(
+        &mut out,
+        names(returns, syntax.map(|syntax| &syntax.returns)),
+    );
+    if let Some(failures) = failures {
+        out.push(" else ");
+        let declared = syntax.and_then(|syntax| syntax.failures.as_ref());
+        outs(&mut out, names(failures, declared));
     }
     Some(out.finish())
 }

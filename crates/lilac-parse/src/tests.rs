@@ -417,6 +417,40 @@ fn generic_type_in_value_position() {
 }
 
 #[test]
+fn function_types_parse_as_operands() {
+    let stmts = main_stmts(
+        "main: function () nothing {
+    a: @bit8 = @has_method(T, next, function (ref T) T else nothing)
+    b: @bit8 = @is_same(ref function () nothing, T)
+}
+",
+    );
+    let Stmt::Let { value, .. } = &stmts[0] else {
+        panic!("{:?}", stmts[0]);
+    };
+    let Expr::Call { args, .. } = value else {
+        panic!("{value:?}");
+    };
+    let Expr::TypeApp(ty) = &args[2] else {
+        panic!("{:?}", args[2]);
+    };
+    let TypeShape::Function(func) = &ty.shape else {
+        panic!("{ty:?}");
+    };
+    assert!(!ty.is_ref);
+    assert_eq!(func.failures.as_ref().map(Vec::len), Some(0));
+    let Stmt::Let { value, .. } = &stmts[1] else {
+        panic!("{:?}", stmts[1]);
+    };
+    let Expr::Call { args, .. } = value else {
+        panic!("{value:?}");
+    };
+    assert!(
+        matches!(&args[0], Expr::RefOf { value, .. } if matches!(value.as_ref(), Expr::TypeApp(_)))
+    );
+}
+
+#[test]
 fn generic_function_instances_parse() {
     let stmts = main_stmts(
         "main: function () nothing {\n    a: T = ref id[@bit8]\n    b: T = ref Box[@bit8].convert[@bit32]\n    c: T = Box[@bit8].convert[@bit32]\n}\n",

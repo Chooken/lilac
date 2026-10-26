@@ -60,9 +60,7 @@ impl Checker<'_> {
         // An alias's target is the one place a bare function type may be
         // written: each use then writes `ref Name`.
         let resolved = self.with_env(env, |c| match &syntax.shape {
-            TypeShape::Function(func) if !syntax.is_ref => c
-                .resolve_function(&syntax, func)
-                .map_or(TypeRef::ERROR, TypeRef::value),
+            TypeShape::Function(func) if !syntax.is_ref => TypeRef::value(c.resolve_function(func)),
             TypeShape::Named { name, args } => c.resolve_named(&syntax, name, args, true),
             _ => c.resolve_syntax(&syntax),
         });

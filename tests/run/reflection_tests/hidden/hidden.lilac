@@ -1,0 +1,8 @@
+Secretive: structure {
+    shown: @bit32
+
+    private {
+        count: @bit32
+        peek: function (self) @bit32 => self.count
+    }
+}

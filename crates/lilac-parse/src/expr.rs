@@ -309,6 +309,12 @@ impl Parser {
             TokenKind::KwMatch => self.parse_match_value(diags, token.span),
             TokenKind::FStrStart => self.parse_fstring(diags, token.span),
             TokenKind::KwSelf => Ok(Expr::Ident("self".to_owned(), token.span)),
+            // A function type as an operand: a reflection test's stated
+            // type (`@has_method(T, f, function (ref T) @bit8)`).
+            TokenKind::KwFunction => {
+                let ty = self.parse_func_type(diags, token.span, token.span, false)?;
+                Ok(Expr::TypeApp(Box::new(ty)))
+            }
             // A `.` with no name after it (mid-edit) is a tag with an
             // empty name, so the rest still parses and the editor can
             // complete it.
@@ -561,6 +567,7 @@ pub(crate) fn starts_expression(kind: TokenKind) -> bool {
             | TokenKind::KwIf
             | TokenKind::KwMatch
             | TokenKind::KwSelf
+            | TokenKind::KwFunction
             | TokenKind::Dot
     )
 }

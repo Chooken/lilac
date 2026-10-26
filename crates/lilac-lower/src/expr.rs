@@ -317,6 +317,9 @@ impl Lower<'_> {
                 let (_, align) = self.size_align(*ty);
                 state.constant(LirConst::Int(align), lir, span)
             }
+            HirExprKind::Unanswered => {
+                lilac_error::bug!(span, "an unanswered reflection test reached lowering")
+            }
             HirExprKind::CompileError { msg, msg_span } => {
                 state.emit(LirInst::CompileError {
                     msg: msg.clone(),

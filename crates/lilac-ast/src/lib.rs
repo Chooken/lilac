@@ -335,9 +335,10 @@ pub struct FuncType {
     pub params: Vec<Param>,
     /// Return slots.
     pub returns: Vec<Param>,
-    /// Failure outs after `else`. A function type cannot fail yet, so
-    /// typeck rejects one; an enum body's functions are read through this
-    /// and keep theirs.
+    /// Failure outs after `else`. A failing function type is only named
+    /// (an alias's target, a reflection test's member type): a value of
+    /// one is `E057`. A type body's functions are read through this and
+    /// keep theirs.
     pub failures: Option<Vec<Param>>,
     /// `export function (…)`: a C function's address, called with the C
     /// ABI.

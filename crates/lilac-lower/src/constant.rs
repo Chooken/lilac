@@ -624,6 +624,7 @@ impl<'a> Lower<'a> {
             | HirExprKind::Str(_)
             | HirExprKind::Format(_)
             | HirExprKind::CompileError { .. }
+            | HirExprKind::Unanswered
             | HirExprKind::Poison
             // Taken by `eval_address`.
             | HirExprKind::FuncRef(_)

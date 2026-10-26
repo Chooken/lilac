@@ -1220,6 +1220,7 @@ impl Checker<'_> {
             Intrinsic::FormatArgsHoles | Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
                 self.check_format_consumer(fcx, intrinsic, name, args, span)
             }
+            _ if intrinsic.is_reflection() => self.check_reflect(fcx, intrinsic, name, args, span),
             _ if intrinsic.is_memory() => {
                 self.check_memory(fcx, intrinsic, name, args, span, expected)
             }

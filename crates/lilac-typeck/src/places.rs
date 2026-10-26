@@ -1024,6 +1024,7 @@ impl Pass<'_, '_> {
             | HirExprKind::Const(_)
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
+            | HirExprKind::Unanswered
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => {}
         }

@@ -144,11 +144,15 @@ impl<'t> Region<'t> {
                 TypeKind::Func {
                     params,
                     returns,
+                    failures,
                     c_abi,
                 } => {
                     self.out.push('F');
                     if *c_abi {
                         self.out.push_str("KC");
+                    }
+                    if failures.is_some() {
+                        self.out.push_str("KF");
                     }
                     for param in params {
                         self.ty(*param);
@@ -158,6 +162,12 @@ impl<'t> Region<'t> {
                         self.ty(*ret);
                     }
                     self.out.push('E');
+                    if let Some(failures) = failures {
+                        for failure in failures {
+                            self.ty(*failure);
+                        }
+                        self.out.push('E');
+                    }
                 }
                 TypeKind::Param { index, name } => {
                     self.out.push('p');
@@ -528,17 +538,15 @@ impl<'s> Parsed<'s> {
                         tasks.push(Task::List(after, true));
                     }
                 }
-                Task::FunctionReturns => {
-                    if self.src.get(after) == Some(&b'E') {
-                        out.push("nothing");
-                    } else if self.src.get(self.end(after)) == Some(&b'E') {
-                        tasks.push(Task::List(after, true));
-                    } else {
-                        // More than one out is parenthesized, as written.
-                        out.push("(");
-                        tasks.push(Task::Text(")"));
-                        tasks.push(Task::List(after, true));
+                Task::FunctionReturns(fails) => {
+                    if fails {
+                        tasks.push(Task::FunctionFailures);
                     }
+                    self.print_outs(&mut after, &mut tasks, out);
+                }
+                Task::FunctionFailures => {
+                    out.push(" else ");
+                    self.print_outs(&mut after, &mut tasks, out);
                 }
                 Task::Type(at) => self.print_type(self.resolve(at), &mut tasks, out),
                 Task::Path(at) => {
@@ -599,12 +607,16 @@ impl<'s> Parsed<'s> {
             }
             b'F' => {
                 let mut params = at + 1;
-                if self.src.get(params) == Some(&b'K') {
+                if self.src.get(params..params + 2) == Some(b"KC") {
                     params += 2;
                     out.push("export ");
                 }
+                let fails = self.src.get(params..params + 2) == Some(b"KF");
+                if fails {
+                    params += 2;
+                }
                 out.push("function (");
-                tasks.push(Task::FunctionReturns);
+                tasks.push(Task::FunctionReturns(fails));
                 tasks.push(Task::Text(") "));
                 tasks.push(Task::List(params, true));
             }
@@ -614,6 +626,23 @@ impl<'s> Parsed<'s> {
                 }
             }
             _ => tasks.push(Task::Path(at)),
+        }
+    }
+
+    /// Queues the tasks that print a function type's outs, the list at
+    /// `after`: `nothing`, one type, or more parenthesized, as written.
+    /// An empty list moves `after` past its `E` itself, since no list
+    /// task ends there.
+    fn print_outs(&self, after: &mut usize, tasks: &mut Vec<Task>, out: &mut Out) {
+        if self.src.get(*after) == Some(&b'E') {
+            out.push("nothing");
+            *after += 1;
+        } else if self.src.get(self.end(*after)) == Some(&b'E') {
+            tasks.push(Task::List(*after, true));
+        } else {
+            out.push("(");
+            tasks.push(Task::Text(")"));
+            tasks.push(Task::List(*after, true));
         }
     }
 
@@ -639,8 +668,11 @@ enum Task {
     List(usize, bool),
     /// A hook signature's `)` and its returns, which follow its parameters.
     SignatureReturns,
-    /// A function type's returns, which follow its parameters.
-    FunctionReturns,
+    /// A function type's returns, which follow its parameters, and its
+    /// failure outs after them when `true`.
+    FunctionReturns(bool),
+    /// A failing function type's `else` outs, which follow its returns.
+    FunctionFailures,
     Type(usize),
     Path(usize),
     Ident(usize),
@@ -716,13 +748,20 @@ impl Parser<'_> {
             }
             b'F' => {
                 self.pos += 1;
-                if self.peek() == Some(b'K') {
-                    if self.src.get(self.pos + 1) != Some(&b'C') {
+                if self.peek() == Some(b'K') && self.src.get(self.pos + 1) == Some(&b'C') {
+                    self.pos += 2;
+                }
+                let fails = self.peek() == Some(b'K');
+                if fails {
+                    if self.src.get(self.pos + 1) != Some(&b'F') {
                         return None;
                     }
                     self.pos += 2;
                 }
                 steps.push(Step::EndType(at));
+                if fails {
+                    steps.push(Step::Types(b'E'));
+                }
                 steps.push(Step::Types(b'E'));
                 steps.push(Step::Types(b'E'));
             }
@@ -929,6 +968,24 @@ mod tests {
                 Vec::new(),
                 true,
             )));
+            out.push(TypeRef::value(types.intern_function(
+                vec![*ty],
+                vec![other],
+                Some(Vec::new()),
+                false,
+            )));
+            out.push(TypeRef::value(types.intern_function(
+                Vec::new(),
+                Vec::new(),
+                Some(vec![*ty, other]),
+                false,
+            )));
+            out.push(TypeRef::value(types.intern_function(
+                vec![other],
+                vec![*ty, other],
+                Some(vec![other]),
+                index % 2 == 0,
+            )));
         }
         let nested = out.clone();
         for pair in nested.chunks(2) {
@@ -964,7 +1021,7 @@ mod tests {
         for _ in 0..count {
             let mut pick = || pool[next(pool.len())];
             let (a, b) = (pick(), pick());
-            let ty = match next(8) {
+            let ty = match next(9) {
                 0 => TypeRef::reference(a.id),
                 1 => TypeRef::value(types.intern_instance(DefId(3), vec![a])),
                 2 => TypeRef::value(types.intern_instance(DefId(4), vec![a, b])),
@@ -972,6 +1029,7 @@ mod tests {
                 4 => TypeRef::value(types.intern_func(vec![a, b], vec![b])),
                 5 => TypeRef::value(types.intern_format_args(a.id)),
                 6 => TypeRef::value(types.intern_func(Vec::new(), vec![a, b])),
+                7 => TypeRef::value(types.intern_function(vec![a], vec![b], Some(vec![a]), false)),
                 _ => TypeRef::value(types.intern_func_abi(vec![a], Vec::new(), true)),
             };
             pool.push(ty);
@@ -1073,6 +1131,27 @@ mod tests {
             true,
         );
         assert_eq!(types.mangle(c_func), "[FKCR6NumberEmE]");
+        // A failing one flags `KF` and adds its `else` outs as a third list.
+        let failing = types.intern_function(
+            vec![TypeRef::reference(number.id)],
+            vec![Builtin::Bit32.value()],
+            Some(Vec::new()),
+            false,
+        );
+        assert_eq!(types.mangle(failing), "[FKFR6NumberEmEE]");
+        assert_eq!(
+            demangle(&types.mangle(failing)).as_deref(),
+            Some("[function (ref Number) @bit32 else nothing]")
+        );
+        let both = types.intern_function(Vec::new(), Vec::new(), Some(vec![number, holder]), false);
+        assert_eq!(
+            types.display(both),
+            "function () nothing else (Number, A.B.Holder)"
+        );
+        assert_eq!(
+            demangle(&types.mangle(both)).as_deref(),
+            Some("[function () nothing else (Number, A.B.Holder)]")
+        );
         let array = types.intern_array(holder.id, 63);
         assert_eq!(types.mangle(array), "[ANN1A1B6Holder10_]");
         let arrays = types.intern_instance(DefId(4), vec![TypeRef::value(array), holder]);

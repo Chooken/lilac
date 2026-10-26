@@ -209,6 +209,7 @@ fn check_c_function_types(lower: &Lower<'_>, target: Target, diags: &mut Diags) 
                 params,
                 returns,
                 c_abi: true,
+                ..
             } = lower.types.kind(local.ty.id)
             else {
                 continue;

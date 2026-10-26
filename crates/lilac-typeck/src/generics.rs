@@ -259,8 +259,17 @@ impl Checker<'_> {
                 TypeKind::Instance { args, .. } => stack.extend(args.iter().map(|arg| arg.id)),
                 TypeKind::Array { elem, .. } => stack.push(*elem),
                 TypeKind::Func {
-                    params, returns, ..
-                } => stack.extend(params.iter().chain(returns).map(|slot| slot.id)),
+                    params,
+                    returns,
+                    failures,
+                    ..
+                } => stack.extend(
+                    params
+                        .iter()
+                        .chain(returns)
+                        .chain(failures.iter().flatten())
+                        .map(|slot| slot.id),
+                ),
                 _ => {}
             }
         }

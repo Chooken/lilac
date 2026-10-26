@@ -226,6 +226,7 @@ impl Walk {
             | HirExprKind::Global(_)
             | HirExprKind::SizeOf(_)
             | HirExprKind::AlignOf(_)
+            | HirExprKind::Unanswered
             | HirExprKind::CompileError { .. }
             | HirExprKind::Poison => live,
         }

@@ -1151,6 +1151,87 @@ fn failing_functions_are_not_values_or_types() {
     assert!(has_code(&diags, "E028"), "{diags:?}");
 }
 
+/// A failing function type is a type an alias may name, but no value has
+/// one: `ref` of it, written out or through the alias, is `E057`.
+#[test]
+fn failing_function_types_are_alias_targets_only() {
+    let alias = "Next: alias function (n: @bit32) item: @bit32 else nothing\n";
+    let diags = check_src(&format!("{alias}Again: alias Next\n"));
+    assert!(!diags.has_errors(), "{diags:?}");
+    for item in [
+        "run: function (f: ref Next) nothing {\n}\n",
+        "run: function (f: ref function () nothing else @bit8) nothing {\n}\n",
+        "Holder: structure {\n    next: ref Next\n}\n",
+    ] {
+        let diags = check_src(&format!("{alias}{item}"));
+        assert!(has_code(&diags, "E057"), "{item}: {diags:?}");
+    }
+}
+
+#[test]
+fn reflection_tests_report_bad_operands_only() {
+    let item = "Point: structure {
+    x: @bit32
+    get: function (self) @bit32 => self.x
+}
+";
+    // A false test is silent, whatever it asks of whatever type.
+    for test in [
+        "@has_field(Point, y, @bit32)",
+        "@has_field(@bit8, x, @bit32)",
+        "@has_method(Point, get, function (ref Point) @bit8)",
+        "@has_method(Point, x, function (ref Point) @bit32)",
+        "@has_function(ref Point, get, function () nothing else nothing)",
+        "@has_constant(Point, X, @bit32)",
+        "@is_same(Point, ref Point)",
+        "@is_copyable(@bit8)",
+    ] {
+        let diags = check_src(&format!(
+            "{item}main: function () nothing {{
+    a: @bit8 = {test}
+}}
+"
+        ));
+        assert!(!diags.has_errors(), "{test}: {diags:?}");
+    }
+    for (test, code) in [
+        // The name is an identifier.
+        ("@has_field(Point, \"x\", @bit32)", "E022"),
+        ("@has_field(Point, a.x, @bit32)", "E022"),
+        // A method's or function's stated type is a function type.
+        ("@has_method(Point, get, @bit32)", "E010"),
+        (
+            "@has_method(Point, get, ref function (ref Point) @bit32)",
+            "E010",
+        ),
+        // Each operand is checked.
+        ("@has_field(Missing, x, @bit32)", "E021"),
+        ("@has_field(Point, x, Missing)", "E021"),
+        ("@is_same(Point)", "E022"),
+        // A failing function value is still `E057`.
+        (
+            "@is_same(ref function () nothing else nothing, Point)",
+            "E057",
+        ),
+    ] {
+        let diags = check_src(&format!(
+            "{item}main: function () nothing {{
+    a: @bit8 = {test}
+}}
+"
+        ));
+        assert_eq!(codes_of(&diags), [code], "{test}: {diags:?}");
+    }
+    // A function type is no value outside a test.
+    let diags = check_src(
+        "main: function () nothing {
+    a: @bit8 = function () nothing
+}
+",
+    );
+    assert!(has_code(&diags, "E010"), "{diags:?}");
+}
+
 #[test]
 fn fail_outside_a_failing_function_is_e058() {
     let diags = check_src("main: function () nothing {\n    fail\n}\n");

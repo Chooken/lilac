@@ -1,6 +1,6 @@
 # Reflection Plan
 
-> Status: proposed, 2026-10-26.
+> Status: phases 1 and 2 done, 2026-10-26; phases 3 to 5 open.
 >
 > Goal: a generic body can ask what its type arguments have, and pick
 > an implementation by the answer, **with every arm type-checked in
@@ -96,7 +96,7 @@ lowering drop all of it when the test is false):
 - A value `if` and an `and`/`or` outside a condition follow the same
   rules.
 
-## Phase 1: failing function types
+## Phase 1: failing function types (done)
 
 A test must be able to state a member that can fail, so the type is
 exact. This is not syntax: the parser already reads
@@ -105,21 +105,24 @@ it (`E057`, `resolve_function`) because `TypeKind::Func` has no place
 for failure outs, which was enough while function values could not
 fail (`docs/function-values-plan.md`).
 
-- `TypeKind::Func` gains `failures: Option<Vec<TypeRef>>`.
-  `resolve_function` fills it; `Types::display`, the mangler,
-  `demangle`, `contains_param`/`substitute` and the editor's
-  `render::type_outs_text` print and walk it (`function (…) T else E`,
+- `TypeKind::Func` gains `failures: Option<Vec<TypeRef>>`
+  (`Types::intern_function`). `resolve_function` fills it;
+  `Types::display`, the mangler (a `KF` flag after `F`, then the
+  failures as a third `E`-ended list), `demangle`,
+  `contains_param`/`substitute`, `could_match` and the editor's
+  `render::value_call` print and walk it (`function (…) T else E`,
   outs parenthesized past one, as for successes).
 - A failing function type is accepted in a test's type slot and as an
-  alias's target. `ref` of one stays `E057` ("a function value cannot
-  fail yet"): values are a follow-up (below), not needed here.
+  alias's target. A value of one, `ref` written out or through an
+  alias, is `E057` (`Checker::function_value`): values are a follow-up
+  (below), not needed here.
 - A member's own type (for the comparison) is built from its
   declaration's `failures`, so `next: function (self) item: T else
   nothing` is `function (ref Iterator[T]) T else nothing`.
 - Tests: display and mangle round trips; `E057` still on `ref` of a
   failing type.
 
-## Phase 2: the tests
+## Phase 2: the tests (done)
 
 - `lilac-hir/src/intrinsics.rs`: the new `Intrinsic`s, `is_special`,
   `signature` (`Slot::Type`, `Slot::MemberName`, the type slot, out

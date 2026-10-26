@@ -28,6 +28,7 @@ mod memory;
 mod own;
 mod paths;
 mod places;
+mod reflect;
 mod sigs;
 mod sink;
 mod suggest;
@@ -951,7 +952,7 @@ impl Checker<'_> {
     /// Whether `a` and `b` can be the same type once their generic
     /// parameters are substituted (each parameter matched on its own, so
     /// this may say yes too often, never too rarely).
-    fn could_match(&self, a: TypeId, b: TypeId) -> bool {
+    pub(crate) fn could_match(&self, a: TypeId, b: TypeId) -> bool {
         self.could_match_in(a, b, &mut HashSet::new())
     }
 
@@ -995,17 +996,24 @@ impl Checker<'_> {
                 TypeKind::Func {
                     params,
                     returns,
+                    failures,
                     c_abi,
                 },
                 TypeKind::Func {
                     params: other_params,
                     returns: other_returns,
+                    failures: other_failures,
                     c_abi: other_c_abi,
                 },
             ) => {
                 c_abi == other_c_abi
                     && refs(params, other_params, matched)
                     && refs(returns, other_returns, matched)
+                    && match (failures, other_failures) {
+                        (Some(failures), Some(other)) => refs(failures, other, matched),
+                        (None, None) => true,
+                        _ => false,
+                    }
             }
             (TypeKind::FormatArgs { writer }, TypeKind::FormatArgs { writer: other }) => {
                 self.could_match_in(*writer, *other, matched)

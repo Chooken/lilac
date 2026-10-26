@@ -544,6 +544,12 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@drop`** | `(ref T)` | Drops the `T` at the address, leaving the slot empty. |
 | **`@needs_drop`** | `(T)` or `(value)` | Whether dropping a `T` does anything (its own `@on_drop`, or a field or payload that needs a drop), as a `@bit8` constant. |
 | **`@discard`** | `(place)` | Ends an owned value's life without its `@on_drop`, inside a function of its type (§1, `E066`). |
+| **`@has_field`** | `(T, name, F)` | Whether `value.name` is a field of type `F` here, as a `@bit8` constant. |
+| **`@has_method`** | `(T, name, function (R, P...) O)` | Whether `value.name(...)` is a method of exactly that function type, `R` its receiver (`ref T`, or `T` for `self: T`), as a `@bit8` constant. |
+| **`@has_function`** | `(T, name, function (P...) O)` | Whether `T.name(...)` is a static function of exactly that function type, as a `@bit8` constant. |
+| **`@has_constant`** | `(T, NAME, C)` | Whether `T.NAME` is a member constant of type `C`, as a `@bit8` constant. |
+| **`@is_copyable`** | `(T)` or `(value)` | Whether a by-value use of a `T` copies (§1), as a `@bit8` constant. |
+| **`@is_same`** | `(T, U)` | Whether `T` and `U` are one type (aliases are their types; `ref` counts), as a `@bit8` constant. |
 
 Atomics are sequentially consistent unless the name carries an ordering
 before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
@@ -615,6 +621,22 @@ Assignment through a `ref` (`p = value`) is for a full slot (it drops the
 old value); `@write` is for an empty one. They need a `ref` to a known type
 (`E010` for `ref unknown`: there is no type to move or drop). `@needs_drop`
 is a constant, so `if @needs_drop(T)` lowers only the live arm.
+
+The reflection tests (`@has_field`, `@has_method`, `@has_function`,
+`@has_constant`, `@is_copyable`, `@is_same`) let a generic body ask what
+its type arguments have. Each is a `@bit8` constant per instance, true
+only on an exact match of what a use would find there: the member is
+named by its identifier (`E022` otherwise), looked up through a `ref`
+as member access is, visible from the test (a private member out of
+reach is not there), and of exactly the stated type. A method's or
+function's type is a function type written without `ref`, failure outs
+included (`function (ref Iterator[T]) T else nothing`; `E010` for any
+other type); a generic member never matches. Anything else is a false
+test, which is silent: a missing member, one of another type, or a type
+with no members (a builtin, an array, a function reference). A found
+member's name is a use of it (hover, references, rename). Both arms of
+an `if` on a test are checked for every instance, so for now both must
+be valid whatever the answer.
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference
@@ -726,9 +748,11 @@ Captures on a condition that cannot fail, and a guard on a call that
 cannot fail, are `E062`. The declaration shorthand may fail too:
 `arena: Arena.new(size) else -> why: Os.Error { return }`.
 
-A function that can fail cannot be a function value, a function type cannot fail
-(`E057`), and neither can an `extern`, an `export` (`E028`) or a hook
-(`E022`).
+A function that can fail cannot be a function value, and no function
+value can have a failing type, `ref function (…) T else E` (`E057`).
+Such a type, `function (…) T else E`, is only named: by an alias's
+target, and by a reflection test stating a member's type. An `extern`,
+an `export` (`E028`) and a hook (`E022`) cannot fail.
 
 ### Function values
 
@@ -1460,7 +1484,9 @@ Callback: alias function (Event) nothing
   so `alias unknown` is `E023`. A function type also lives only behind
   a `ref`, but its alias is the one place it is written bare: `Callback:
   alias function (Event) nothing` is used as `ref Callback`, and a bare
-  `Callback` is `E077` (§1).
+  `Callback` is `E077` (§1). The target may fail (`Next: alias function
+  (ref Items) Item else nothing`), but then nothing can be of the type:
+  `ref Next` is `E057`.
 * An alias that needs itself to be known, directly or through other
   aliases (`Pair: alias Both[Pair]`), is `E074`, reported once at the use
   that closes the loop.
