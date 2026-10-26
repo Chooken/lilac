@@ -1,7 +1,8 @@
 
 
+/// Exchanges the values at `a` and `b`, moving each; no hook runs.
 swap[T]: function (a: ref T, b: ref T) nothing {
     c: T = @read(a)
-    a = @read(b)
-    b = @read(c)
+    @write(a, @read(b))
+    @write(b, @move(c))
 }

@@ -6,9 +6,13 @@ Set[K]: structure {
         map: Map[K, Empty]
     }
 
-    new: function () Set[K] => Map[K, Empty].new()
+    new: function () set: Set[K] {
+        set = Set[K] { map = Map[K, Empty].new() }
+    }
 
-    new_using: function (allocator: Heap.Allocator) Set[K] => Map[K, Empty].new_using(allocator)
+    new_using: function (allocator: Heap.Allocator) set: Set[K] {
+        set = Set[K] { map = Map[K, Empty].new_using(allocator) }
+    }
 
     add: function (self, key: K) nothing {
         self.map.add(key, Empty {})

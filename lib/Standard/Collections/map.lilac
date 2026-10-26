@@ -18,13 +18,13 @@ Map[K, V]: structure {
 
     new_using: function (allocator: Heap.Allocator) result: Map[K, V] {
         result = Map[K,V] {
-            data = Memory[MapBucket[K, V]].new_using(
-                DEFAULT_INITIAL_CAPACITY, 
-                allocator
-            )
+            data = empty_buckets(DEFAULT_INITIAL_CAPACITY, allocator)
             used = 0
         }
     }
+
+    /// How many keys the map holds.
+    get_count: function (self) Int => self.used
 
     add: function (self, key: K, value: V) nothing {
 
@@ -125,15 +125,7 @@ Map[K, V]: structure {
             return
         }
 
-        if self.used == 0 as Int {
-            self.data.resize(capacity)
-            return
-        }
-
-        new_data: Memory[MapBucket[K, V]] = Memory[MapBucket[K, V]].new_using(
-            capacity, 
-            self.data.get_allocator()
-        )
+        new_data: Memory[MapBucket[K, V]] = empty_buckets(capacity, self.data.get_allocator())
 
         index: Int = 0
 
@@ -142,7 +134,7 @@ Map[K, V]: structure {
             bucket: ref MapBucket[K, V] = self.data.get(index)
 
             if bucket.is_occupied {
-                insert_into(@read(ref bucket.key), @read(ref bucket.value), ref new_data)
+                insert_into(@read(ref bucket.key), @read(ref bucket.value), new_data.get_slice())
             }
 
             index += 1
@@ -157,10 +149,7 @@ Map[K, V]: structure {
 
         capacity: Int = self.data.get_count()
 
-        new_data: Memory[MapBucket[K, V]] = Memory[MapBucket[K, V]].new_using(
-            capacity,
-            self.data.get_allocator()
-        )
+        new_data: Memory[MapBucket[K, V]] = empty_buckets(capacity, self.data.get_allocator())
 
         index: Int = 0
 
@@ -207,6 +196,12 @@ Map[K, V]: structure {
 
         get_occupency: function (self) Int => ((self.used + 1) * 100) / self.data.get_count()
 
+        /// `capacity` buckets, all unoccupied.
+        empty_buckets: function (capacity: Int, allocator: Heap.Allocator) data: Memory[MapBucket[K, V]] {
+            data = Memory[MapBucket[K, V]].new_using(capacity, allocator)
+            @memset(data.get_slice().base() as ref unknown, 0x0, @size_of(MapBucket[K, V]) * capacity)
+        }
+
         grow: function (self) nothing {
             self.reserve(self.data.get_count() * 2)
         }
@@ -238,8 +233,8 @@ Map[K, V]: structure {
             loop if bucket.is_occupied {
 
                 if bucket.key == new_bucket.key {
-                    @drop(bucket.key)
-                    @drop(bucket.value)
+                    @drop(ref bucket.key)
+                    @drop(ref bucket.value)
                     inserted_new = false
                     break
                 }

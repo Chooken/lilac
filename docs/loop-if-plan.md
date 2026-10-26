@@ -71,9 +71,9 @@
   (`tests/run/loop_if_else_break.lilac`) to show it is still legal.
 - `map.lilac`'s two loops are fixed by the rule itself. Their
   whole-table path is unreachable today: the load factor (75%) keeps
-  an empty bucket, which ends every probe first. `Map` does not
-  compile once instantiated yet (unrelated errors), so there is no
-  `Map` run test; `loop_if_implicit_break` tests the loop shape.
+  an empty bucket, which ends every probe first. `tests/run/map.lilac`
+  walks the longest chains there are (every key hashing alike), and
+  `loop_if_implicit_break` tests the loop shape.
 - Run test (`tests/run/loop_if_implicit_break.lilac`): a plain `loop if` that
   ends; an `else if` chain that ends only when both are false; a
   capture `loop if` over a failing call whose failure out needs a
