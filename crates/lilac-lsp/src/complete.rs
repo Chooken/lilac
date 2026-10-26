@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lilac_ast::{FuncType, Type as AstType, TypeShape};
+use lilac_ast::{FuncType, Param, Type as AstType, TypeShape};
 use lilac_driver::Analysis;
 use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{Layout, LocalSite, MemberReceiver};
@@ -466,6 +466,38 @@ impl<'a> Scope<'a> {
         entries
     }
 
+    /// The names the name operand of the reflection test `test` may give
+    /// (`x` in `@has_field(Point, x, …)`): the members of that kind of
+    /// the type the path `ty` names, `None` when it names no structure or
+    /// either. A generic function is never a test's match, so none is
+    /// offered.
+    fn tested_members(&self, test: Intrinsic, ty: &str) -> Option<Vec<Entry>> {
+        let segments: Vec<&str> = ty.split('.').collect();
+        let (Named::Type(def) | Named::Constructor(def)) = self.resolve(&segments)? else {
+            return None;
+        };
+        let resolved = &self.analysis.resolved;
+        let tested = |kind: &DefKind| match (test, kind) {
+            (Intrinsic::HasField, DefKind::Field(_))
+            | (Intrinsic::HasConstant, DefKind::Const { .. })
+            | (Intrinsic::HasVariant, DefKind::Variant(_)) => true,
+            (Intrinsic::HasMethod | Intrinsic::HasFunction, DefKind::Func(decl)) => {
+                let method = decl.params.first().is_some_and(Param::is_receiver);
+                decl.generic_params.is_empty() && method == (test == Intrinsic::HasMethod)
+            }
+            _ => false,
+        };
+        Some(
+            resolved
+                .def(def)
+                .members
+                .values()
+                .filter(|id| tested(&resolved.def(**id).kind))
+                .filter_map(|id| self.item_entry(*id))
+                .collect(),
+        )
+    }
+
     /// The entries after a `.`: the members of what the compiler looked
     /// the name at the cursor up in, else the variants of the tag there.
     /// A generic body checked once per instance records a site per check;
@@ -573,8 +605,25 @@ pub fn completion(
 ) -> Option<CompletionResponse> {
     let text = lines.text();
     let cursor = lines.offset(position_at)?;
-    let Completing { start, after } = Context::new(text, cursor).completing()?;
+    let context = Context::new(text, cursor);
+    let Completing { start, after } = context.completing()?;
     let scope = Scope::new(retained, uri, text, edits, cursor)?;
+    // A reflection test's name operand, after a type operand.
+    let tested = || {
+        let (callee, argument) = context.call()?;
+        let reflection = Intrinsic::lookup(&callee).filter(|test| {
+            argument == 1
+                && matches!(
+                    test,
+                    Intrinsic::HasField
+                        | Intrinsic::HasMethod
+                        | Intrinsic::HasFunction
+                        | Intrinsic::HasConstant
+                        | Intrinsic::HasVariant
+                )
+        })?;
+        scope.tested_members(reflection, &context.first_argument()?)
+    };
     let entries = if after == After::At {
         let mut entries: Vec<Entry> = Intrinsic::names()
             .into_iter()
@@ -598,6 +647,8 @@ pub fn completion(
         entries
     } else if after == After::Dot {
         scope.dot_entries()
+    } else if let Some(entries) = tested() {
+        entries
     } else {
         scope.names()
     };

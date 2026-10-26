@@ -552,6 +552,33 @@ fn members_complete_from_what_the_compiler_looked_up() {
     handle.join().expect("server thread");
 }
 
+/// A reflection test's name operand lists the members of the test's kind
+/// of the type its type operand names; a value or parameter there gets
+/// the names in scope.
+#[test]
+fn reflection_names_complete_from_the_type_operand() {
+    let (client, handle, uri) = open_program();
+    let fields = complete_marked(
+        &client,
+        &uri,
+        2,
+        "    b: @bit8 = @has_field(Point, <|>, @bit8)",
+    );
+    assert_eq!(sorted(labels(&fields)), vec!["x", "y"]);
+    let methods = complete_marked(&client, &uri, 3, "    b: @bit8 = @has_method(Point, s<|>)");
+    assert_eq!(labels(&methods), vec!["sum"]);
+    let functions = complete_marked(&client, &uri, 4, "    b: @bit8 = @has_function(Point, <|>)");
+    assert_eq!(labels(&functions), Vec::<&str>::new());
+    let variants = complete_marked(&client, &uri, 5, "    b: @bit8 = @has_variant(Shape, <|>)");
+    assert_eq!(sorted(labels(&variants)), vec!["Dot", "Line"]);
+    let value = complete_marked(&client, &uri, 6, "    b: @bit8 = @has_field(first, <|>)");
+    assert!(labels(&value).contains(&"first"), "{:?}", labels(&value));
+    let other = complete_marked(&client, &uri, 7, "    b: @bit8 = @is_same(Point, <|>)");
+    assert!(labels(&other).contains(&"Point"), "{:?}", labels(&other));
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
 /// A top-level condition's namespace paths complete, though the final
 /// check never sees the condition.
 #[test]

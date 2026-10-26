@@ -134,6 +134,36 @@ impl<'a> Context<'a> {
     /// call's `(` or the cursor is in a comment.
     #[must_use]
     pub fn call(&self) -> Option<(String, u32)> {
+        self.open_call()
+            .map(|(callee, argument, _)| (callee, argument))
+    }
+
+    /// The first argument of the call [`Context::call`] finds, when it is
+    /// a dotted path (`Point`, `Shapes.Line`) ended by a `,` before the
+    /// cursor: the type operand of a reflection test.
+    #[must_use]
+    pub fn first_argument(&self) -> Option<String> {
+        let (_, _, paren) = self.open_call()?;
+        let mut path = String::new();
+        let mut index = paren + 1;
+        loop {
+            let name = self.tokens.get(index)?;
+            if !is_path_name(name) {
+                return None;
+            }
+            path.push_str(&name.text);
+            let next = self.tokens.get(index + 1)?;
+            match next.kind {
+                TokenKind::Dot => path.push('.'),
+                TokenKind::Comma if hi(next) <= self.cursor => return Some(path),
+                _ => return None,
+            }
+            index += 2;
+        }
+    }
+
+    /// [`Context::call`], with the index of the call's `(` token.
+    fn open_call(&self) -> Option<(String, u32, usize)> {
         if self.in_comment {
             return None;
         }
@@ -146,6 +176,7 @@ impl<'a> Context<'a> {
                 TokenKind::LParen => open.push(Open::Paren {
                     callee: self.path_ending(index),
                     commas: 0,
+                    at: index,
                 }),
                 TokenKind::LBracket => open.push(Open::Bracket),
                 TokenKind::LBrace => open.push(Open::Brace),
@@ -164,7 +195,8 @@ impl<'a> Context<'a> {
             Open::Paren {
                 callee: Some(callee),
                 commas,
-            } => Some((callee, commas)),
+                at,
+            } => Some((callee, commas, at)),
             _ => None,
         }
     }
@@ -225,10 +257,12 @@ pub fn is_identifier(name: &str) -> bool {
 
 /// A bracket open before the cursor.
 enum Open {
-    /// `(`, with the path just before it when it is a call's.
+    /// `(`, with the path just before it when it is a call's, and its
+    /// index among the tokens.
     Paren {
         callee: Option<String>,
         commas: u32,
+        at: usize,
     },
     Bracket,
     Brace,
@@ -318,6 +352,11 @@ mod tests {
         Context::new(&text, cursor).call()
     }
 
+    fn first_argument(marked: &str) -> Option<String> {
+        let (text, cursor) = at(marked);
+        Context::new(&text, cursor).first_argument()
+    }
+
     fn string(marked: &str) -> bool {
         let (text, cursor) = at(marked);
         Context::new(&text, cursor).in_string()
@@ -356,6 +395,19 @@ mod tests {
         assert_eq!(call("{ x }|"), None);
         assert_eq!(call("f(P { x = |"), None);
         assert_eq!(call("f(1, // |"), None);
+    }
+
+    #[test]
+    fn a_path_first_argument_is_read() {
+        let path = |path: &str| Some(path.to_owned());
+        assert_eq!(first_argument("@has_field(Point, |"), path("Point"));
+        assert_eq!(first_argument("@has_field(Point, na|"), path("Point"));
+        assert_eq!(first_argument("f(A.B.Point, x, |"), path("A.B.Point"));
+        assert_eq!(first_argument("f(g(Point, |"), path("Point"));
+        assert_eq!(first_argument("f(Point|"), None);
+        assert_eq!(first_argument("f(Box[Int], |"), None);
+        assert_eq!(first_argument("f(a + b, |"), None);
+        assert_eq!(first_argument("f(Point, g(|"), None);
     }
 
     #[test]

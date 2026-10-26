@@ -904,7 +904,11 @@
   does not account for the text's length falls back to one
   `Edit::between` of the two texts. Locals in scope come from
   `LocalSite::scope` and `ty` (typeck's `FnCx::open`/`close` track block
-  spans); `@` lists `Intrinsic::names()` and the builtin types.
+  spans); `@` lists `Intrinsic::names()` and the builtin types. A
+  member test's name operand (`@has_field(Point, |`) lists the type
+  operand's members of the test's kind (`Scope::tested_members`, over
+  the path `Context::first_argument` reads); a generic one never
+  matches, so none is listed.
   After a `.` (`complete::needs_current_compile`) the request instead
   waits for a compile of the current text: the server parks it
   (`Server::parked`, skipping the debounce), answers it when a compile of

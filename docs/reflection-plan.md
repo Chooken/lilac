@@ -1,9 +1,7 @@
 # Reflection Plan
 
-> Status: phases 1 to 4 done, 2026-10-26; phase 5 under way
-> (`@is_copyable` assumptions, `@has_variant` and `@has_hook` done;
-> `@has_hook` states the hook's whole function type,
-> `@has_hook(@format, function (ref T, ref W) nothing)`).
+> Status: done, 2026-10-26. `@has_hook` states the hook's whole
+> function type, `@has_hook(@format, function (ref T, ref W) nothing)`.
 >
 > Goal: a generic body can ask what its type arguments have, and pick
 > an implementation by the answer, **with every arm type-checked in
