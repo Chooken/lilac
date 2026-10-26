@@ -3631,3 +3631,30 @@ fn some_functions_are_not_values() {
         assert_eq!(codes_of(&check_src(&src)), [code], "{src}");
     }
 }
+
+/// A field call or access through a `ref` to a structure whose layout
+/// failed reports only the layout's error.
+#[test]
+fn a_field_of_a_failed_layout_reports_the_layout() {
+    for body in ["holder.table.run()", "b: Broken = holder.table.broken"] {
+        let diags = check_src(&format!(
+            "Broken: structure {{
+    bad: Missing
+}}
+Table[T]: structure {{
+    broken: Broken
+    run: ref function () nothing
+}}
+Holder: structure {{
+    table: ref Table[@bit8]
+}}
+go: function (holder: ref Holder) nothing {{
+    {body}
+}}
+main: function () nothing {{}}
+"
+        ));
+        assert!(has_code(&diags, "E023"), "{body}: {diags:?}");
+        assert_eq!(diags.error_count(), 1, "{body}: {diags:?}");
+    }
+}

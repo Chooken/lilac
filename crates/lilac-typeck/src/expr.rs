@@ -796,6 +796,11 @@ impl Checker<'_> {
                     },
                 };
             }
+        } else if self.is_field_member(ty, field) {
+            // The type has no layout: laying it out failed, which reported
+            // its error.
+            self.diags.already_reported();
+            return HirExpr::poison(span);
         }
         let owner = self.show_id(ty);
         let mut diagnostic = Diagnostic::error(

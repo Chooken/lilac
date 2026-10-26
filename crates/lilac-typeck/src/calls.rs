@@ -691,7 +691,10 @@ impl Checker<'_> {
         let base = self.auto_deref(receiver);
         let fields = self.fields_of(base.ty.id).unwrap_or_default();
         let Some(index) = fields.iter().position(|(name, _)| name == field) else {
-            lilac_error::bug!(member_span, "`{field}` is a member but no field");
+            // The field is a member, so its type has no layout: laying it
+            // out failed, which reported its error.
+            let error = self.diags.already_reported();
+            return Err(self.callee_failed(fcx, args, error));
         };
         let callee = HirExpr {
             ty: fields[index].1,

@@ -784,6 +784,14 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether `field` is a field of the structure `ty` is built from,
+    /// laid out or not.
+    pub(crate) fn is_field_member(&self, ty: TypeId, field: &str) -> bool {
+        self.type_parts(ty)
+            .and_then(|(def, _)| self.res.member(def, field))
+            .is_some_and(|member| matches!(self.res.def(member).kind, DefKind::Field(_)))
+    }
+
     /// The variants of an enum type.
     pub(crate) fn variants_of(&self, ty: TypeId) -> Option<Vec<(String, Option<TypeRef>)>> {
         match self.out.layouts.get(&ty)? {
