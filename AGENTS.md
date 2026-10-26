@@ -815,7 +815,9 @@
   highlighting and hovers. Every compile goes through
   `Session::begin_load` and `run_loaded`, which drop the last compile's
   analysis and report the Load stage. URIs are compared via
-  `roots::canonical_file_uri`.
+  `roots::canonical_file_uri`, which on macOS and Windows also spells the
+  path in the disk's case (`disk_case`), so an editor that kept a file's
+  old case after a case-only rename still finds its compile.
 - A diagnostic with a trace is also published at each call site in it, in
   that site's file (`convert::trace_diagnostics`), linking back to the
   error, and the error lists the sites as related information. So a
