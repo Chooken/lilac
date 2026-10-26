@@ -1307,6 +1307,59 @@ main: function () nothing {{
 }
 
 #[test]
+fn an_is_copyable_test_assumes_the_copy_where_it_holds() {
+    let item = "Handle: structure {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+    }
+}
+";
+    // A move-only `T`: two by-value uses are fine only where the test
+    // holds.
+    let twice = "a: T = value\n        b: T = value";
+    let cases = [
+        (
+            format!("if @is_copyable(T) {{\n        {twice}\n    }}"),
+            true,
+        ),
+        (
+            format!("if not @is_copyable(T) {{ }} else {{\n        {twice}\n    }}"),
+            true,
+        ),
+        (
+            format!("if 0x1 and @is_copyable(T) {{\n        {twice}\n    }}"),
+            true,
+        ),
+        (
+            format!("if @is_copyable(T) {{ }} else {{\n        {twice}\n    }}"),
+            false,
+        ),
+        (
+            format!("if @is_copyable(T) or 0x1 {{\n        {twice}\n    }}"),
+            false,
+        ),
+        (format!("if @is_copyable(T) {{ }}\n    {twice}"), false),
+    ];
+    for (body, fine) in cases {
+        let diags = check_src(&format!(
+            "{item}f[T]: function (value: T) nothing {{
+    {body}
+}}
+main: function () nothing {{
+    f[Handle](Handle {{ id = 0x0 }})
+}}
+"
+        ));
+        if fine {
+            assert!(!diags.has_errors(), "{body}: {diags:?}");
+        } else {
+            assert!(has_code(&diags, "E042"), "{body}: {diags:?}");
+        }
+    }
+}
+
+#[test]
 fn fail_outside_a_failing_function_is_e058() {
     let diags = check_src("main: function () nothing {\n    fail\n}\n");
     assert!(has_code(&diags, "E058"), "{diags:?}");

@@ -231,12 +231,14 @@ impl Checker<'_> {
         let outer = self.diags.hold();
         self.entry_unresolved = false;
         let func = self.with_env(env, |c| {
+            let tests = std::mem::take(&mut c.copyable_tests);
             let mut func = c.check_func(key, &decl, &sig, span);
             // Ownership is decided on bodies that checked: an error left
             // poison and error types it would only repeat.
             if !c.diags.holds_error() {
                 c.check_places(&mut func);
             }
+            c.copyable_tests = tests;
             func
         });
         let held = self.diags.release(outer);

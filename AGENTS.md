@@ -175,7 +175,12 @@
   `HirCallee::Assumed` checked against the stated `TypeKind::Func`
   (failure outs and flag appended, `E057` unless handled). Lowering
   `bug!`s on a stand-in: `Lower::outcome` keeps it from ever lowering
-  one.
+  one. An `@is_copyable(T)` test not known true is noted in
+  `Checker::copyable_tests` (by span, per instance body); the ownership
+  pass reads `not`/`and`/`or` over them (`Pass::copy_facts`) and pushes
+  `T` on `Checker::assumed_copyable` over the guarded code
+  (`Pass::assuming`), where `is_copyable` answers true and caches
+  nothing.
 - Globals: a top-level `name: T = constant` (or `name: T`, zeroed) is a
   `DefKind::Global` (`=>` stays a `Const`), checked into
   `HirProgram::globals` and named by `HirExprKind::Global`, a place (an

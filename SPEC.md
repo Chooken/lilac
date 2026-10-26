@@ -662,6 +662,9 @@ the one found. Moves and drops in a ruled-out arm count as a run-time
 `if`'s do (`E063` after it). Only the arm the test picks is compiled,
 so nothing assumed is ever run. Own names (a bare `NAME` in the type's
 own body) and a member's address (`ref T.name`) are never assumed.
+Where an `@is_copyable(T)` test holds and is not known true, `T`
+copies: a by-value use there copies instead of moving, so the arm it
+rules out may use a move-only `T` twice.
 
 `@size_of` and `@align_of` are computed during lowering and are always
 constants. Pointer math goes through `ref unknown`: cast a typed reference

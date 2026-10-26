@@ -14,7 +14,9 @@
 //! where it is true and where it is false; `if`, `and` and `or` push them
 //! on [`FnCx::assumed`] over the code they guard. Lowering compiles only
 //! the arm a known condition picks (`Lower::outcome`), so it never meets
-//! a stand-in.
+//! a stand-in. An `@is_copyable(T)` test not known true is noted in
+//! [`Checker::copyable_tests`], and the ownership pass assumes `T` copies
+//! where it holds (`Pass::copy_facts`).
 
 use lilac_ast::{BinOp, Expr, TypeShape};
 use lilac_error::{codes, Diagnostic, ErrorGuaranteed};
@@ -36,11 +38,23 @@ pub(crate) struct Assumption {
     pub owner: TypeId,
     /// The member's name.
     pub name: String,
-    /// The test: `@has_field`, `@has_method`, `@has_function` or
-    /// `@has_constant`.
+    /// The test: `@has_field`, `@has_method`, `@has_function`,
+    /// `@has_constant`, or `@is_copyable` (in the ownership pass only).
     pub test: Intrinsic,
     /// The stated type (a function type for the function tests).
     pub ty: TypeRef,
+}
+
+impl Assumption {
+    /// That `ty` copies, which an `@is_copyable` test of it proves.
+    pub(crate) fn copyable(ty: TypeId) -> Self {
+        Self {
+            owner: ty,
+            name: String::new(),
+            test: Intrinsic::IsCopyable,
+            ty: TypeRef::value(ty),
+        }
+    }
 }
 
 /// What a condition proves: the assumptions that hold where it is true
@@ -53,7 +67,7 @@ pub(crate) struct Facts {
 
 impl Facts {
     /// What `not` of the condition proves.
-    fn flipped(self) -> Self {
+    pub(crate) fn flipped(self) -> Self {
         Self {
             when_true: self.when_false,
             when_false: self.when_true,
@@ -62,7 +76,7 @@ impl Facts {
 
     /// What `a and b` proves: true, both sides held; false, only what
     /// either side's falsity proves alike.
-    fn both(self, right: Self) -> Self {
+    pub(crate) fn both(self, right: Self) -> Self {
         Self {
             when_true: [self.when_true, right.when_true].concat(),
             when_false: common(self.when_false, &right.when_false),
@@ -70,7 +84,7 @@ impl Facts {
     }
 
     /// What `a or b` proves, the reverse of [`Facts::both`].
-    fn either(self, right: Self) -> Self {
+    pub(crate) fn either(self, right: Self) -> Self {
         self.flipped().both(right.flipped()).flipped()
     }
 }
@@ -122,7 +136,7 @@ impl FnCx {
     }
 
     /// The `@has_field` assumed of `name` on the object `base` (through
-    /// any reference) is, if any.
+    /// any reference), if any.
     pub(crate) fn assumed_field(&self, base: &HirExpr, name: &str) -> Option<Assumption> {
         self.assumption(base.ty.id, name, Intrinsic::HasField)
     }
@@ -349,11 +363,16 @@ impl Checker<'_> {
         let answer = match intrinsic {
             Intrinsic::IsCopyable => {
                 let ty = self.test_type(fcx, &args[0])?;
-                if self.types.contains_param(ty.id) {
+                let answer = if self.types.contains_param(ty.id) {
                     None
                 } else {
                     Some(self.is_copyable(ty))
+                };
+                // Known true, it copies anyway.
+                if answer != Some(true) {
+                    self.copyable_tests.insert(span, ty.id);
                 }
+                answer
             }
             Intrinsic::IsSame => {
                 let first = self.test_type(fcx, &args[0]);

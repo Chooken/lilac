@@ -41,6 +41,7 @@ use lilac_hir::{
 use lilac_span::{BytePos, Span};
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
+use crate::reflect::{Assumption, Facts};
 use crate::{Checker, Requirement};
 
 /// What one place holds.
@@ -269,10 +270,12 @@ impl Checker<'_> {
     /// own `@on_copy` copies, its own `@on_drop` moves, and otherwise it
     /// copies when every field (or payload) does.
     pub(crate) fn is_copyable(&mut self, ty: TypeRef) -> bool {
-        if ty.is_ref {
+        if ty.is_ref || self.assumed_copyable.contains(&ty.id) {
             return true;
         }
-        if let Some(known) = self.copyable.get(&ty.id) {
+        // An assumption may change the answer, so none is cached under one.
+        let assuming = !self.assumed_copyable.is_empty();
+        if let Some(known) = self.copyable.get(&ty.id).filter(|_| !assuming) {
             return *known;
         }
         let result = match self.types.kind(ty.id).clone() {
@@ -290,7 +293,7 @@ impl Checker<'_> {
             }
             _ => return true,
         };
-        if self.out.layouts.contains_key(&ty.id) {
+        if !assuming && self.out.layouts.contains_key(&ty.id) {
             self.copyable.insert(ty.id, result);
         }
         result
@@ -541,12 +544,13 @@ impl Pass<'_, '_> {
                     HirExprKind::Local(id) => Some(id),
                     _ => None,
                 };
+                let facts = self.copy_facts(&cond);
                 let start = self.state.clone();
                 self.state = refine(start.clone(), flag, true);
-                self.block(&mut then, Vec::new());
+                self.assuming(&facts.when_true, |pass| pass.block(&mut then, Vec::new()));
                 let after_then = self.state.take();
                 self.state = refine(start, flag, false);
-                self.block(&mut els, Vec::new());
+                self.assuming(&facts.when_false, |pass| pass.block(&mut els, Vec::new()));
                 self.state = merge_states(self.c, self.locals, after_then, self.state.take());
                 out.push(HirStmt::If { cond, then, els });
             }
@@ -626,6 +630,46 @@ impl Pass<'_, '_> {
     /// at most [`Pass::round_bound`] times. A loop still changing past
     /// that broke the argument, so it is an internal error, never a
     /// guess at the drops.
+    /// What `cond` proves of copyability: the `@is_copyable(T)` tests in
+    /// it ([`Checker::copyable_tests`]) through `not`, `and` and `or`.
+    fn copy_facts(&self, cond: &HirExpr) -> Facts {
+        match &cond.kind {
+            HirExprKind::Int(_) | HirExprKind::Unanswered => {
+                let tested = self.c.copyable_tests.get(&cond.span);
+                Facts {
+                    when_true: tested
+                        .map(|ty| Assumption::copyable(*ty))
+                        .into_iter()
+                        .collect(),
+                    when_false: Vec::new(),
+                }
+            }
+            HirExprKind::Not(inner) => self.copy_facts(inner).flipped(),
+            HirExprKind::Retype(inner) => self.copy_facts(inner),
+            HirExprKind::Logic { and, lhs, rhs } => {
+                let (lhs, rhs) = (self.copy_facts(lhs), self.copy_facts(rhs));
+                if *and {
+                    lhs.both(rhs)
+                } else {
+                    lhs.either(rhs)
+                }
+            }
+            _ => Facts::default(),
+        }
+    }
+
+    /// Runs `walk` with the types `facts` name assumed to copy.
+    fn assuming<R>(&mut self, facts: &[Assumption], walk: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.c.assumed_copyable.len();
+        let types = facts
+            .iter()
+            .filter(|fact| fact.test == Intrinsic::IsCopyable);
+        self.c.assumed_copyable.extend(types.map(|fact| fact.owner));
+        let result = walk(self);
+        self.c.assumed_copyable.truncate(mark);
+        result
+    }
+
     fn lower_loop(&mut self, body: &mut HirBlock) {
         let entry = self.state.clone();
         let mut head = entry.clone();
@@ -966,17 +1010,24 @@ impl Pass<'_, '_> {
             }
             HirExprKind::If { cond, then, els } => {
                 self.expr(cond, false);
+                let facts = self.copy_facts(cond);
                 let start = self.state.clone();
-                self.expr(then, true);
+                self.assuming(&facts.when_true, |pass| pass.expr(then, true));
                 let after_then = self.state.take();
                 self.state = start;
-                self.expr(els, true);
+                self.assuming(&facts.when_false, |pass| pass.expr(els, true));
                 self.state = merge_states(self.c, self.locals, after_then, self.state.take());
             }
-            HirExprKind::Logic { lhs, rhs, .. } => {
+            HirExprKind::Logic { and, lhs, rhs } => {
                 self.expr(lhs, false);
+                let facts = self.copy_facts(lhs);
+                let held = if *and {
+                    facts.when_true
+                } else {
+                    facts.when_false
+                };
                 let start = self.state.clone();
-                self.expr(rhs, false);
+                self.assuming(&held, |pass| pass.expr(rhs, false));
                 self.state = merge_states(self.c, self.locals, start, self.state.take());
             }
             HirExprKind::Match {

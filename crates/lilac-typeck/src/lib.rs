@@ -348,6 +348,13 @@ pub(crate) struct Checker<'a> {
     pub empty_names: usize,
     /// [`Checker::is_copyable`] per laid-out type.
     pub copyable: HashMap<TypeId, bool>,
+    /// The `@is_copyable(T)` tests of the body being checked whose answer
+    /// is not known true, by span, with `T`: the ownership pass assumes
+    /// `T` copies where one holds (`reflect.rs`).
+    pub copyable_tests: HashMap<Span, TypeId>,
+    /// The types the ownership pass assumes copy over the code it walks
+    /// ([`Checker::is_copyable`] answers true for them).
+    pub assumed_copyable: Vec<TypeId>,
     /// [`Checker::needs_drop`] per laid-out type.
     pub droppable: HashMap<TypeId, bool>,
     /// [`Checker::needs_copy`] per laid-out type.
@@ -435,6 +442,8 @@ impl<'a> Checker<'a> {
             failures: Vec::new(),
             template_errors: HashMap::new(),
             copyable: HashMap::new(),
+            copyable_tests: HashMap::new(),
+            assumed_copyable: Vec::new(),
             droppable: HashMap::new(),
             copy_hooked: HashMap::new(),
             cancel: options.cancel,
