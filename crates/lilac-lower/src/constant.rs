@@ -349,6 +349,29 @@ impl<'a> Lower<'a> {
         self.constant_or_panic(expr).ok()
     }
 
+    /// Which way a branch on `cond` goes when that is known though part of
+    /// `cond` runs (`x() and @has_field(T, n, Int)` with a false test):
+    /// a constant's truth, `not c` flipped, `a and b` false when either
+    /// side is and true when both are, `a or b` the reverse. It evaluates
+    /// nothing a run would: the caller still lowers `cond` for its
+    /// effects, then only the arm it picks.
+    pub(crate) fn outcome(&mut self, cond: &HirExpr) -> Option<bool> {
+        match &cond.kind {
+            HirExprKind::Not(inner) => self.outcome(inner).map(|known| !known),
+            HirExprKind::Logic { and, lhs, rhs } => {
+                let (left, right) = (self.outcome(lhs), self.outcome(rhs));
+                if left == Some(!*and) || right == Some(!*and) {
+                    Some(!*and)
+                } else if left == Some(*and) && right == Some(*and) {
+                    Some(*and)
+                } else {
+                    None
+                }
+            }
+            _ => self.constant(cond).and_then(|value| value.truthy()),
+        }
+    }
+
     /// The value of `expr` if it is a constant expression, else why not:
     /// `Some` when evaluating it reaches a division that panics.
     pub(crate) fn constant_or_panic(

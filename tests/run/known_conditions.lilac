@@ -1,0 +1,81 @@
+// expect-stdout: 11111111 1
+// A condition whose outcome is known though part of it runs (`x() and
+// t` with a false test `t`) lowers what runs, then only the arm it
+// picks: the other is never lowered, so `@compile_error` there never
+// fires. `and`, `or` and `not` keep their order and side effects.
+
+using Standard
+using Standard.Io
+
+Counter: structure {
+    count: @bit32
+}
+
+YES: @bit8 => 0x1
+NO: @bit8 => 0x0
+
+calls: @bit32
+
+tick: function (answer: @bit8) result: @bit8 {
+    calls = @i_add_32(calls, 0x1)
+    result = answer
+}
+
+dead: function () result: @bit8 {
+    @compile_error("this call is never lowered")
+}
+
+say: function (answer: @bit8) nothing {
+    if answer {
+        print_char('1')
+    } else {
+        print_char('0')
+    }
+}
+
+main: function () nothing {
+    // An `if` statement: the left side runs, the `then` arm is gone.
+    if tick(0x1) and @has_field(Counter, missing, @bit32) {
+        @compile_error("a false test rules this arm out")
+    }
+    say(calls == 0x1)
+
+    if tick(0x0) or YES {
+        say(calls == 0x2)
+    } else {
+        @compile_error("`or YES` holds")
+    }
+
+    if not (tick(0x1) and NO) {
+        say(calls == 0x3)
+    } else {
+        @compile_error("`not (x and NO)` holds")
+    }
+
+    // An `if` value.
+    value: @bit8 = if tick(0x1) and NO then dead() else 0x1
+    say(value and calls == 0x4)
+
+    // `and`/`or` values: a known left side leaves no right side.
+    none: @bit8 = (tick(0x1) and NO) and dead()
+    say(not none and calls == 0x5)
+    some: @bit8 = (tick(0x0) or YES) or dead()
+    say(some and calls == 0x6)
+
+    // A known left side that does not decide runs the right side.
+    if (tick(0x1) and NO) or tick(0x1) {
+        say(calls == 0x8)
+    } else {
+        say(0x0)
+    }
+
+    // Unknown outcomes lower as before: both sides, in order.
+    if tick(0x1) and tick(0x0) {
+        say(0x0)
+    } else {
+        say(calls == 0xa)
+    }
+    print_char(' ')
+    say(calls == 0xa)
+    print_char('\n')
+}

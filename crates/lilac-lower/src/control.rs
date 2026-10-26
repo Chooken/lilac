@@ -121,8 +121,9 @@ impl Lower<'_> {
                 state.branch(&target, *span);
             }
             HirStmt::If { cond, then, els } => {
-                // A constant condition lowers only its live arm.
-                if let Some(taken) = self.constant(cond).and_then(|value| value.truthy()) {
+                // A known condition lowers only its live arm, after what
+                // of the condition runs.
+                if let Some(taken) = self.known_condition(state, func, cond) {
                     self.lower_block(state, func, if taken { then } else { els });
                 } else {
                     self.lower_if(state, func, cond, then, els);
@@ -159,6 +160,23 @@ impl Lower<'_> {
             }
         }
         state.scopes[scope].temps.truncate(mark);
+    }
+
+    /// Which way a branch on `cond` goes, when [`Lower::outcome`] knows:
+    /// a condition that is not constant is lowered first for its effects
+    /// (its value is not needed). `None` lowers nothing.
+    fn known_condition(
+        &mut self,
+        state: &mut FnState,
+        func: &HirFunc,
+        cond: &HirExpr,
+    ) -> Option<bool> {
+        if let Some(value) = self.constant(cond) {
+            return value.truthy();
+        }
+        let taken = self.outcome(cond)?;
+        self.value_reg(state, func, cond);
+        Some(taken)
     }
 
     pub(crate) fn lower_if(
@@ -746,7 +764,7 @@ impl Lower<'_> {
     }
 
     /// The value of an `if` expression: each branch writes the result; a
-    /// constant condition lowers only the branch it takes.
+    /// known condition lowers only the branch it takes.
     pub(crate) fn if_value(
         &mut self,
         state: &mut FnState,
@@ -758,7 +776,7 @@ impl Lower<'_> {
     ) -> LirOperand {
         let span = expr.span;
         let result = self.tmp(state, expr.ty, span);
-        if let Some(taken) = self.constant(cond).and_then(|value| value.truthy()) {
+        if let Some(taken) = self.known_condition(state, func, cond) {
             self.region(state, func, if taken { then } else { els }, &result);
             self.own_temp(state, &result, expr.ty);
             return LirOperand::Place(result);
@@ -782,7 +800,7 @@ impl Lower<'_> {
     }
 
     /// The value of `and`/`or`: the right side runs only when the left does
-    /// not decide; a constant left side lowers only what it leaves.
+    /// not decide; a known left side lowers only what it leaves.
     pub(crate) fn logic_value(
         &mut self,
         state: &mut FnState,
@@ -794,7 +812,7 @@ impl Lower<'_> {
     ) -> LirOperand {
         let span = expr.span;
         let result = self.tmp(state, expr.ty, span);
-        if let Some(left) = self.constant(lhs).and_then(|value| value.truthy()) {
+        if let Some(left) = self.known_condition(state, func, lhs) {
             if left == and {
                 self.region(state, func, rhs, &result);
             } else {

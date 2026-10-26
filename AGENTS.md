@@ -946,7 +946,10 @@ worklist of `(def, type args)` instances emitting HIR directly, then the
 ownership pass over each body that checked) →
 `lilac-lower` (HIR → LIR: the moves, drops and drop flags typeck decided,
 copies, drop/copy glue, and constant conditions: only the live arm of an
-`if`/`and`/`or`/`match` on a constant expression is lowered) → runtime
+`if`/`and`/`or`/`match` on a constant expression is lowered, and of an
+`if` or `and`/`or` whose outcome is known though part of it runs,
+`Lower::outcome`, after lowering the condition for its effects:
+`known_condition`) → runtime
 injection → DCE →
 live `@compile_error` check → stack-trace instrumentation (when on) →
 verify → backend. `Session::run` in `lilac-driver` is the only

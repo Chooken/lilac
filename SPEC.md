@@ -393,6 +393,13 @@ and nothing else. In particular:
   remainder that panics (see [Integer division](#integer-division)) is not
   constant. Neither is a `@panic` or `@trap` it reaches. Float arithmetic is never constant.
 
+A condition that is not constant can still have a known outcome: `not c`
+when `c`'s is known, `a and b` when either side is known false or both
+are known true, `a or b` when either side is known true or both are
+known false. Such a condition runs as written (`x()` in `x() and NO` is
+still called, once), then only the arm its outcome picks is compiled; an
+`and`/`or` whose left side's outcome decides compiles no right side.
+
 Not being constant is never an error: the condition is simply a runtime
 branch. The one exception is a division that would panic, which is `E060`
 wherever it is compiled ([Integer division](#integer-division)).

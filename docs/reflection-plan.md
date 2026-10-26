@@ -1,6 +1,6 @@
 # Reflection Plan
 
-> Status: phases 1 and 2 done, 2026-10-26; phases 3 to 5 open.
+> Status: phases 1 to 3 done, 2026-10-26; phases 4 and 5 open.
 >
 > Goal: a generic body can ask what its type arguments have, and pick
 > an implementation by the answer, **with every arm type-checked in
@@ -147,7 +147,7 @@ fail (`docs/function-values-plan.md`).
   type and a failing method, in an ordinary `if` whose both arms are
   valid for every `T`.
 
-## Phase 3: conditions whose outcome is known
+## Phase 3: conditions whose outcome is known (done)
 
 `and`/`or` already short-circuit: `logic_value` branches on `a` and
 runs `b` only in its own block. But the result is a temporary, and
