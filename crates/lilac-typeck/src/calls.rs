@@ -200,6 +200,9 @@ impl Checker<'_> {
                 }
                 return self.check_intrinsic(fcx, intrinsic, name, args, span, expected);
             }
+            if let Some(called) = self.stand_in_hook_call(fcx, name, args, span) {
+                return called;
+            }
             let overloads = self.overloads(name);
             if overloads.is_empty() {
                 let mut diagnostic = Diagnostic::error(
@@ -973,6 +976,54 @@ impl Checker<'_> {
             args,
             outs: hook.sig.returns,
         })
+    }
+
+    /// `@hook(args)` (or `-x`) through a stand-in a `@has_hook` assumes:
+    /// the one whose parameters are the arguments' (probed) types, a
+    /// number literal fitting any. `None` when no stand-in takes them.
+    fn stand_in_hook_call(
+        &mut self,
+        fcx: &mut FnCx,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Result<Called, ErrorGuaranteed>> {
+        let stand_ins: Vec<_> = self
+            .stand_in_hooks(name)
+            .into_iter()
+            .filter(|(_, sig)| sig.params.len() == args.len())
+            .collect();
+        if stand_ins.is_empty() {
+            return None;
+        }
+        let probed: Vec<Option<TypeRef>> = args
+            .iter()
+            .map(|arg| {
+                if matches!(arg, Expr::Number(..)) {
+                    None
+                } else {
+                    self.probe(fcx, arg)
+                }
+            })
+            .collect();
+        let (callee, sig) = stand_ins.into_iter().find(|(_, sig)| {
+            sig.params
+                .iter()
+                .zip(&probed)
+                .all(|(param, got)| match got {
+                    None => true,
+                    Some(got) if param.is_ref => got.is_ref && got.id == param.id,
+                    Some(got) => got.id == param.id,
+                })
+        })?;
+        Some(
+            self.check_exact_args(fcx, &sig.params, args, span)
+                .map(|args| Called::Call {
+                    callee,
+                    args,
+                    outs: sig.returns,
+                }),
+        )
     }
 
     /// The overload whose arity and (probed) argument types match.

@@ -1185,6 +1185,8 @@ fn reflection_tests_report_bad_operands_only() {
         "@has_constant(Point, X, @bit32)",
         "@has_variant(Point, Some, @bit32)",
         "@has_variant(@bit8, None)",
+        "@has_hook(@add, function (Point, Point) Point)",
+        "@has_hook(@format, function (ref Point, ref @bit8) nothing else nothing)",
         "@is_same(Point, ref Point)",
         "@is_copyable(@bit8)",
     ] {
@@ -1211,6 +1213,10 @@ fn reflection_tests_report_bad_operands_only() {
         ("@has_field(Point, x, Missing)", "E021"),
         ("@is_same(Point)", "E022"),
         ("@has_variant(Point)", "E022"),
+        // A hook is named by its `@`-name, and is no intrinsic.
+        ("@has_hook(add, function (Point, Point) Point)", "E022"),
+        ("@has_hook(@size_of, function (Point) @bit8)", "E022"),
+        ("@has_hook(@add, Point)", "E010"),
         // A failing function value is still `E057`.
         (
             "@is_same(ref function () nothing else nothing, Point)",
@@ -1441,6 +1447,79 @@ main: function () nothing {{
 "
     ));
     assert!(has_code(&diags, "E010"), "{diags:?}");
+}
+
+#[test]
+fn assumed_hooks_bind_operators_and_calls_by_the_stated_type() {
+    let item = "Point: structure {
+    x: @bit32
+}
+@add: function (left: Point, right: Point) out: Point {
+    out = left
+}
+";
+    // Never instantiated, and instantiated with a type whose `@add` is
+    // the stated one and a type with no hooks: the guarded code checks
+    // against the stand-in hooks every time.
+    let fine = [
+        "if @has_hook(@add, function (T, T) T) { c: T = value + value }",
+        "if @has_hook(@sub, function (T, T) T) { c: T = @sub(value, value) }",
+        "if @has_hook(@negate, function (T) T) { c: T = -value }",
+        "if @has_hook(@conversion, function (T) @bit32) { c: @bit32 = value }",
+        "if @has_hook(@less_than, function (T, T) @bit8) and value < value { }",
+        "if not @has_hook(@mul, function (T, T) T) { } else { c: T = value * value }",
+        "if @has_hook(@add, function (T, T) T) { c: T = value\n        c += value }",
+    ];
+    for body in fine {
+        for uses in [
+            "",
+            "    f[Point](Point { x = 0x0 })
+    f[@bit32](0x0)
+",
+        ] {
+            let diags = check_src(&format!(
+                "{item}f[T]: function (value: T) nothing {{
+    {body}
+}}
+main: function () nothing {{
+{uses}}}
+"
+            ));
+            assert!(!diags.has_errors(), "{body} ({uses:?}): {diags:?}");
+        }
+    }
+    let wrong = [
+        (
+            "if @has_hook(@add, function (T, T) @bit8) { c: @bit16 = value + value }",
+            "E043",
+        ),
+        (
+            "if @has_hook(@negate, function (T) @bit8) { c: @bit16 = @negate(value) }",
+            "E043",
+        ),
+    ];
+    for (body, code) in wrong {
+        let diags = check_src(&format!(
+            "{item}f[T]: function (value: T) nothing {{
+    {body}
+}}
+main: function () nothing {{}}
+"
+        ));
+        assert!(has_code(&diags, code), "{body}: {diags:?}");
+    }
+    // Outside the test, `Point` has no `-`.
+    let diags = check_src(&format!(
+        "{item}f[T]: function (value: T) nothing {{
+    if @has_hook(@sub, function (T, T) T) {{ }}
+    c: T = value - value
+}}
+main: function () nothing {{
+    f[Point](Point {{ x = 0x0 }})
+}}
+"
+    ));
+    assert!(has_code(&diags, "E042"), "{diags:?}");
 }
 
 #[test]

@@ -562,6 +562,9 @@ pub enum Intrinsic {
     /// `@has_variant(T, Name, P)`, or `@has_variant(T, Name)` for none:
     /// whether `.Name` is a variant of `T` with exactly that payload.
     HasVariant,
+    /// `@has_hook(@name, function (P...) O)`: whether the hook `@name` has
+    /// an overload of exactly that type.
+    HasHook,
     /// `@is_copyable(T)`: whether a by-value use of a `T` copies.
     IsCopyable,
     /// `@is_same(T, U)`: whether `T` and `U` are one type.
@@ -604,6 +607,8 @@ pub enum Slot {
     Message,
     /// A member's bare name (the reflection tests).
     MemberName,
+    /// A hook's `@`-name (`@has_hook`).
+    HookName,
 }
 
 impl Slot {
@@ -639,6 +644,7 @@ impl std::fmt::Display for Slot {
             Self::StringLiteral => f.write_str("\"string literal\""),
             Self::Message => f.write_str("Message"),
             Self::MemberName => f.write_str("name"),
+            Self::HookName => f.write_str("@hook"),
         }
     }
 }
@@ -670,7 +676,7 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 45] = [
+    const PLAIN: [(&'static str, Self); 46] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -714,6 +720,7 @@ impl Intrinsic {
         ("@has_function", Self::HasFunction),
         ("@has_constant", Self::HasConstant),
         ("@has_variant", Self::HasVariant),
+        ("@has_hook", Self::HasHook),
         ("@is_copyable", Self::IsCopyable),
         ("@is_same", Self::IsSame),
     ];
@@ -730,9 +737,9 @@ impl Intrinsic {
     }
 
     /// Whether this is a reflection test: `@has_field`, `@has_method`,
-    /// `@has_function`, `@has_constant`, `@has_variant`, `@is_copyable`
-    /// or `@is_same`
-    /// (checked specially, by typeck's `reflect.rs`).
+    /// `@has_function`, `@has_constant`, `@has_variant`, `@has_hook`,
+    /// `@is_copyable` or `@is_same` (checked specially, by typeck's
+    /// `reflect.rs`).
     #[must_use]
     pub fn is_reflection(self) -> bool {
         matches!(
@@ -742,6 +749,7 @@ impl Intrinsic {
                 | Self::HasFunction
                 | Self::HasConstant
                 | Self::HasVariant
+                | Self::HasHook
                 | Self::IsCopyable
                 | Self::IsSame
         )
@@ -998,6 +1006,10 @@ impl Intrinsic {
                 ],
                 Some(Builtin(Ty::Bit8)),
             ),
+            Self::HasHook => sig(
+                &[("hook", Slot::HookName), ("type", Type)],
+                Some(Builtin(Ty::Bit8)),
+            ),
             Self::IsSame => sig(
                 &[("first", Type), ("second", Type)],
                 Some(Builtin(Ty::Bit8)),
@@ -1242,6 +1254,9 @@ impl Intrinsic {
             }
             Self::HasVariant => {
                 "Whether `type` has a variant `name` with exactly the payload type `payload` (left out: none): a constant `@bit8`."
+            }
+            Self::HasHook => {
+                "Whether the hook `hook` has an overload of exactly the function type `type`, the one an operator, a hole or a call of it would bind: a constant `@bit8`."
             }
             Self::IsCopyable => "Whether a by-value use of a `type` copies: a constant `@bit8`.",
             Self::IsSame => "Whether `first` and `second` are one type: a constant `@bit8`.",

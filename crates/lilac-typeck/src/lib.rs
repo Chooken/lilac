@@ -355,6 +355,10 @@ pub(crate) struct Checker<'a> {
     /// The types the ownership pass assumes copy over the code it walks
     /// ([`Checker::is_copyable`] answers true for them).
     pub assumed_copyable: Vec<TypeId>,
+    /// The hooks a `@has_hook` test assumes over the code being checked
+    /// (`reflect.rs`), kept here rather than on the `FnCx` since a
+    /// conversion or a format slot finds its hook with none at hand.
+    pub assumed_hooks: Vec<reflect::Assumption>,
     /// [`Checker::needs_drop`] per laid-out type.
     pub droppable: HashMap<TypeId, bool>,
     /// [`Checker::needs_copy`] per laid-out type.
@@ -444,6 +448,7 @@ impl<'a> Checker<'a> {
             copyable: HashMap::new(),
             copyable_tests: HashMap::new(),
             assumed_copyable: Vec::new(),
+            assumed_hooks: Vec::new(),
             droppable: HashMap::new(),
             copy_hooked: HashMap::new(),
             cancel: options.cancel,
@@ -624,8 +629,11 @@ impl Checker<'_> {
     /// Runs `f` in `env`, restoring the previous environment after.
     pub(crate) fn with_env<T>(&mut self, env: Env, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::replace(&mut self.env, env);
+        // Another body assumes none of this one's hooks.
+        let hooks = std::mem::take(&mut self.assumed_hooks);
         let result = f(self);
         self.env = saved;
+        self.assumed_hooks = hooks;
         result
     }
 
@@ -1071,12 +1079,15 @@ impl Checker<'_> {
     /// formats it, for the editor.
     pub(crate) fn record_hole(&mut self, span: Span, hole: &lilac_hir::HirHole) {
         if !span.is_dummy() {
-            self.out.holes.push(lilac_hir::HoleSite {
-                span,
-                value: hole.value.span,
-                ty: hole.value.ty.id,
-                hook: hole.format.def,
-            });
+            // A stand-in hook has no definition to go to.
+            if let lilac_hir::HirCallee::Func(key) = &hole.format {
+                self.out.holes.push(lilac_hir::HoleSite {
+                    span,
+                    value: hole.value.span,
+                    ty: hole.value.ty.id,
+                    hook: key.def,
+                });
+            }
         }
     }
 

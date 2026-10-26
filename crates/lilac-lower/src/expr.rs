@@ -608,7 +608,10 @@ impl Lower<'_> {
         let formats: Vec<Symbol> = format
             .holes
             .iter()
-            .map(|hole| self.symbol(&hole.format))
+            .map(|hole| match &hole.format {
+                HirCallee::Func(key) => self.symbol(key),
+                _ => lilac_error::bug!(span, "a stand-in `@format` reached lowering"),
+            })
             .collect();
         self.intern_template(&format.pieces, formats, span)
     }

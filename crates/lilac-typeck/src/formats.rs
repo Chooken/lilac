@@ -188,10 +188,11 @@ impl Checker<'_> {
             return None;
         }
         let target = value.ty.id;
-        let hook = self.overloads("@format").into_iter().find(|hook| {
-            hook.sig.params == [TypeRef::reference(target), TypeRef::reference(writer)]
+        let params = [TypeRef::reference(target), TypeRef::reference(writer)];
+        let hook = self.find_hook("@format", span, |sig| {
+            sig.params == params && sig.returns.is_empty()
         });
-        let Some(hook) = hook else {
+        let Some((format, _)) = hook else {
             let (shown, into) = (self.show_id(target), self.show_id(writer));
             let diagnostic = Diagnostic::error(
                 codes::E071,
@@ -210,7 +211,6 @@ impl Checker<'_> {
             self.emit_requirement(diagnostic, Requirement::Format, &[target, writer]);
             return None;
         };
-        self.use_hook(&hook.key, span);
         let value = if value.ty.is_ref {
             value
         } else {
@@ -220,10 +220,7 @@ impl Checker<'_> {
                 kind: HirExprKind::RefOf(Box::new(value)),
             }
         };
-        Some(HirHole {
-            value,
-            format: hook.key,
-        })
+        Some(HirHole { value, format })
     }
 
     /// Whether `ty` is an object or enum declared in source, which can take

@@ -566,8 +566,10 @@ pub struct HirHole {
     /// A `ref T` to the value it formats (evaluated where the f-string
     /// is).
     pub value: HirExpr,
-    /// The `@format(ref T, ref W)` hook that formats it.
-    pub format: FuncKey,
+    /// The `@format(ref T, ref W)` hook that formats it: a function, or a
+    /// stand-in a `@has_hook` assumes ([`HirCallee::Assumed`], never
+    /// lowered).
+    pub format: HirCallee,
 }
 
 /// One value `match` arm.
@@ -621,10 +623,10 @@ pub enum HirCallee {
     Value(Box<HirExpr>),
     /// A compiler intrinsic.
     Intrinsic(Intrinsic),
-    /// A stand-in for the method or static function `name` a reflection
-    /// test assumes where it holds and is not known true: its function
-    /// type `ty` (a `TypeKind::Func`) is the test's. Code a test guards
-    /// is never lowered, so lowering never meets one.
+    /// A stand-in for the method, static function or hook `name` a
+    /// reflection test assumes where it holds and is not known true: its
+    /// function type `ty` (a `TypeKind::Func`) is the test's. Code a test
+    /// guards is never lowered, so lowering never meets one.
     Assumed {
         /// The member's name.
         name: String,

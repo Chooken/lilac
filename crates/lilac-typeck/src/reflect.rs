@@ -1,5 +1,6 @@
 //! The reflection tests: `@has_field`, `@has_method`, `@has_function`,
-//! `@has_constant`, `@has_variant`, `@is_copyable` and `@is_same`. Each
+//! `@has_constant`, `@has_variant`, `@has_hook`, `@is_copyable` and
+//! `@is_same`. Each
 //! answers by the lookup a use would take and folds to a `@bit8` literal
 //! per instance (like `@needs_drop`); a template whose answer depends on
 //! its arguments holds `HirExprKind::Unanswered`. A false test is silent:
@@ -10,10 +11,13 @@
 //! holds") and is not known true, typeck **assumes** the member: a use
 //! of it checks against a stand-in of the stated type
 //! (`HirExprKind::Assumed`, `HirCallee::Assumed`; a variant's tag is
-//! `HirExprKind::AssumedVariant` and `HirPattern::Assumed`), so every arm
+//! `HirExprKind::AssumedVariant` and `HirPattern::Assumed`; a hook is a
+//! `HirCallee::Assumed` that operators, `-`, `@hook(...)` calls, holes
+//! and conversions find through [`Checker::find_hook`]), so every arm
 //! is checked in every instance. A condition's [`Facts`] say what it proves
 //! where it is true and where it is false; `if`, `and` and `or` push them
-//! on [`FnCx::assumed`] over the code they guard. Lowering compiles only
+//! over the code they guard ([`Checker::assume`]: a hook's on
+//! [`Checker::assumed_hooks`], the rest on [`FnCx::assumed`]). Lowering compiles only
 //! the arm a known condition picks (`Lower::outcome`), so it never meets
 //! a stand-in. An `@is_copyable(T)` test not known true is noted in
 //! [`Checker::copyable_tests`], and the ownership pass assumes `T` copies
@@ -25,7 +29,7 @@ use lilac_hir::intrinsics::Intrinsic;
 use lilac_hir::{HirCallee, HirExpr, HirExprKind};
 use lilac_resolve::{DefId, DefKind};
 use lilac_span::Span;
-use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
+use lilac_ty::{Builtin, FuncSig, TypeId, TypeKind, TypeRef};
 
 use crate::body::FnCx;
 use crate::calls::Called;
@@ -35,17 +39,17 @@ use crate::Checker;
 /// A member a test assumes where it holds and is not known true.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Assumption {
-    /// The tested type, through a reference.
+    /// The tested type, through a reference (a hook's: its stated type).
     pub owner: TypeId,
-    /// The member's name.
+    /// The member's name (a hook's, `@` included).
     pub name: String,
     /// The test: `@has_field`, `@has_method`, `@has_function`,
-    /// `@has_constant`, `@has_variant`, or `@is_copyable` (in the
-    /// ownership pass only).
+    /// `@has_constant`, `@has_variant`, `@has_hook`, or `@is_copyable` (in
+    /// the ownership pass only).
     pub test: Intrinsic,
-    /// The stated type (a function type for the function tests, the
-    /// payload's for `@has_variant`); `None` only for a variant with no
-    /// payload.
+    /// The stated type (a function type for the function and hook tests,
+    /// the payload's for `@has_variant`); `None` only for a variant with
+    /// no payload.
     pub ty: Option<TypeRef>,
 }
 
@@ -122,6 +126,7 @@ pub(crate) fn is_member_test(expr: &Expr) -> bool {
                 | Intrinsic::HasFunction
                 | Intrinsic::HasConstant
                 | Intrinsic::HasVariant
+                | Intrinsic::HasHook
         )
     )
 }
@@ -139,15 +144,14 @@ pub(crate) fn stand_in_field(assumed: Assumption, base: HirExpr, span: Span) -> 
     }
 }
 
-impl FnCx {
-    /// Assumes `facts` over the code checked next; returns the mark to
-    /// truncate [`FnCx::assumed`] back to after it.
-    pub(crate) fn assume(&mut self, facts: &[Assumption]) -> usize {
-        let mark = self.assumed.len();
-        self.assumed.extend_from_slice(facts);
-        mark
-    }
+/// Where some facts start to hold: what [`Checker::unassume`] restores.
+#[derive(Clone, Copy)]
+pub(crate) struct Mark {
+    members: usize,
+    hooks: usize,
+}
 
+impl FnCx {
     /// The `@has_field` assumed of `name` on the object `base` (through
     /// any reference), if any.
     pub(crate) fn assumed_field(&self, base: &HirExpr, name: &str) -> Option<Assumption> {
@@ -194,6 +198,80 @@ impl FnCx {
 }
 
 impl Checker<'_> {
+    /// Assumes `facts` over the code checked next: a hook's on
+    /// [`Checker::assumed_hooks`], the rest on [`FnCx::assumed`].
+    pub(crate) fn assume(&mut self, fcx: &mut FnCx, facts: &[Assumption]) -> Mark {
+        let mark = Mark {
+            members: fcx.assumed.len(),
+            hooks: self.assumed_hooks.len(),
+        };
+        for fact in facts {
+            if fact.test == Intrinsic::HasHook {
+                self.assumed_hooks.push(fact.clone());
+            } else {
+                fcx.assumed.push(fact.clone());
+            }
+        }
+        mark
+    }
+
+    /// Ends the facts assumed since `mark`.
+    pub(crate) fn unassume(&mut self, fcx: &mut FnCx, mark: Mark) {
+        fcx.assumed.truncate(mark.members);
+        self.assumed_hooks.truncate(mark.hooks);
+    }
+
+    /// The hook `name` whose signature `matches`: a stand-in a `@has_hook`
+    /// assumes first, else a real overload, used at `span`.
+    pub(crate) fn find_hook(
+        &mut self,
+        name: &str,
+        span: Span,
+        matches: impl Fn(&FuncSig) -> bool,
+    ) -> Option<(HirCallee, FuncSig)> {
+        if let Some(found) = self
+            .stand_in_hooks(name)
+            .into_iter()
+            .find(|(_, sig)| matches(sig))
+        {
+            return Some(found);
+        }
+        let hook = self
+            .overloads(name)
+            .into_iter()
+            .find(|hook| matches(&hook.sig))?;
+        self.use_hook(&hook.key, span);
+        Some((HirCallee::Func(hook.key), hook.sig))
+    }
+
+    /// The stand-in hooks named `name` assumed here, innermost first.
+    pub(crate) fn stand_in_hooks(&self, name: &str) -> Vec<(HirCallee, FuncSig)> {
+        let stand_in = |assumed: &Assumption| {
+            let ty = assumed.ty?;
+            let TypeKind::Func {
+                params, returns, ..
+            } = self.types.kind(ty.id)
+            else {
+                return None;
+            };
+            let callee = HirCallee::Assumed {
+                name: assumed.name.clone(),
+                ty: ty.id,
+            };
+            let sig = FuncSig {
+                params: params.clone(),
+                returns: returns.clone(),
+            };
+            Some((callee, sig))
+        };
+        self.assumed_hooks
+            .iter()
+            .rev()
+            .filter(|assumed| assumed.name == name)
+            .filter_map(stand_in)
+            .collect()
+    }
+
     /// Checks a condition and what it proves: `not`, `and` and `or` pass
     /// on their operands' [`Facts`], a member test its assumption, and
     /// anything else proves nothing.
@@ -248,13 +326,14 @@ impl Checker<'_> {
     ) -> (HirExpr, Facts) {
         let what = if and { "and" } else { "or" };
         let (left, left_facts) = self.check_condition(fcx, lhs, what);
-        let mark = fcx.assume(if and {
+        let left_true = if and {
             &left_facts.when_true
         } else {
             &left_facts.when_false
-        });
+        };
+        let mark = self.assume(fcx, left_true);
         let (right, right_facts) = self.check_condition(fcx, rhs, what);
-        fcx.assumed.truncate(mark);
+        self.unassume(fcx, mark);
         let facts = if and {
             left_facts.both(right_facts)
         } else {
@@ -370,7 +449,7 @@ impl Checker<'_> {
     ) -> Result<Called, ErrorGuaranteed> {
         let arity = match intrinsic {
             Intrinsic::IsCopyable => 1,
-            Intrinsic::IsSame => 2,
+            Intrinsic::IsSame | Intrinsic::HasHook => 2,
             Intrinsic::HasVariant if args.len() == 2 => 2,
             _ => 3,
         };
@@ -407,6 +486,29 @@ impl Checker<'_> {
                     name: variant,
                     test: intrinsic,
                     ty: payload,
+                });
+                answer
+            }
+            Intrinsic::HasHook => {
+                let hook = self.hook_operand(&args[0]);
+                let stated = self.test_type(fcx, &args[1]);
+                let ((hook, hook_span), stated) = (hook?, stated?);
+                self.stated_function(intrinsic, stated, args[1].span())?;
+                let answer = self.has_hook(&hook, hook_span, stated);
+                // Known true, a use finds the real hook. No use of a hook
+                // handles a failure, so a failing one is never assumed.
+                let fails = matches!(
+                    self.types.kind(stated.id),
+                    TypeKind::Func {
+                        failures: Some(_),
+                        ..
+                    }
+                );
+                fcx.tested = (answer != Some(true) && !fails).then_some(Assumption {
+                    owner: stated.id,
+                    name: hook,
+                    test: intrinsic,
+                    ty: Some(stated),
                 });
                 answer
             }
@@ -497,15 +599,41 @@ impl Checker<'_> {
         ))
     }
 
-    /// `E010` unless the type a `@has_method` or `@has_function` states is
-    /// a function type (written without `ref`).
+    /// `@has_hook`'s hook: an `@`-name that is no intrinsic (`E022`
+    /// otherwise).
+    fn hook_operand(&mut self, arg: &Expr) -> Result<(String, Span), ErrorGuaranteed> {
+        if let Expr::Ident(name, span) = arg {
+            if name.starts_with('@') && Intrinsic::lookup(name).is_none() {
+                return Ok((name.clone(), *span));
+            }
+        }
+        let diagnostic = Diagnostic::error(codes::E022, "expected a hook name").label(
+            arg.span(),
+            true,
+            "write the hook's `@`-name here",
+        );
+        let diagnostic = match arg {
+            Expr::Ident(name, _) if name.starts_with('@') => {
+                diagnostic.note(format!("`{name}` is an intrinsic, not a hook"))
+            }
+            _ => diagnostic
+                .help("a hook is named with its `@`: `@has_hook(@add, function (T, T) T)`"),
+        };
+        Err(self.diags.emit(diagnostic))
+    }
+
+    /// `E010` unless the type a `@has_method`, `@has_function` or
+    /// `@has_hook` states is a function type (written without `ref`).
     fn stated_function(
         &mut self,
         intrinsic: Intrinsic,
         stated: TypeRef,
         span: Span,
     ) -> Result<(), ErrorGuaranteed> {
-        if !matches!(intrinsic, Intrinsic::HasMethod | Intrinsic::HasFunction) {
+        if !matches!(
+            intrinsic,
+            Intrinsic::HasMethod | Intrinsic::HasFunction | Intrinsic::HasHook
+        ) {
             return Ok(());
         }
         if !stated.is_ref && matches!(self.types.kind(stated.id), TypeKind::Func { .. }) {
@@ -643,6 +771,38 @@ impl Checker<'_> {
             self.record_use(name_span, member);
         }
         answer
+    }
+
+    /// `@has_hook`: whether hook `name` has an overload of exactly the
+    /// `stated` function type (a failing one never: no use of a hook
+    /// handles a failure). A found overload's name is a use of it.
+    fn has_hook(&mut self, name: &str, name_span: Span, stated: TypeRef) -> Option<bool> {
+        if self.types.contains_param(stated.id) {
+            // An instance's types may bring it (a generic type's member
+            // hooks register per instance).
+            return None;
+        }
+        let TypeKind::Func {
+            params,
+            returns,
+            failures: None,
+            ..
+        } = self.types.kind(stated.id).clone()
+        else {
+            return Some(false);
+        };
+        let found = self.overloads(name).into_iter().find(|hook| {
+            let fails = self
+                .res
+                .def(hook.key.def)
+                .func()
+                .is_some_and(|decl| decl.failures.is_some());
+            hook.sig.params == params && hook.sig.returns == returns && !fails
+        });
+        if let Some(hook) = &found {
+            self.record_use(name_span, hook.key.def);
+        }
+        Some(found.is_some())
     }
 
     /// The function type of `member`, a function of `owner` at

@@ -1,0 +1,70 @@
+// expect-stdout: 2m 2m 5 5 ? | 5m 7 0 | 1 0 0
+// Where `@has_hook(@name, function (P...) O)` holds and is not known
+// true, an operator, `-`, an f-string hole and a format slot bind a
+// stand-in hook of the stated type, so a `T` with no such hook checks
+// too. Only the arm the test picks is compiled.
+
+using Standard
+using Standard.Io
+
+Meters: structure {
+    value: Int
+
+    @add: function (left: Meters, right: Meters) sum: Meters {
+        sum = Meters { value = left.value + right.value }
+    }
+
+    @negate: function (meters: Meters) flipped: Meters {
+        flipped = Meters { value = 0 - meters.value }
+    }
+
+    @format: function (self, out: ref Formatter) nothing {
+        out.write($"{self.value}m")
+    }
+}
+
+Plain: structure {
+    id: Int
+}
+
+// A hole, then a format slot, where `T` formats.
+describe[T]: function (value: T) nothing {
+    if @has_hook(@format, function (ref T, ref Formatter) nothing) {
+        print($"{value} ")
+        print(value)
+        print(" ")
+    } else {
+        print("? ")
+    }
+}
+
+// `a + b` where `T` adds, else `fallback`.
+sum_or[T]: function (a: T, b: T, fallback: T) result: T {
+    result = fallback
+    if @has_hook(@add, function (T, T) T) {
+        result = a + b
+    }
+}
+
+// Whether `-value` compiles for `T`.
+negates[T]: function (value: T) found: Int {
+    found = 0
+    if @has_hook(@negate, function (T) T) {
+        flipped: T = -value
+        found = 1
+    }
+}
+
+main: function () nothing {
+    two: Meters = Meters { value = 2 }
+    three: Meters = Meters { value = 3 }
+    five: Int = 5
+    plain: Plain = Plain { id = 1 }
+    raw: @bit32 = 0x1
+    describe[Meters](two)
+    describe[Int](five)
+    describe[Plain](plain)
+    print($"| {sum_or[Meters](two, three, two)} {sum_or[Int](3, 4, 0)} ")
+    none: Plain = sum_or[Plain](plain, plain, Plain { id = 0 })
+    print_line($"{none.id} | {negates[Meters](two)} {negates[Plain](plain)} {negates[@bit32](raw)}")
+}

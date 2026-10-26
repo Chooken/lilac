@@ -344,19 +344,15 @@ impl Checker<'_> {
 
     /// Wraps a by-value `expr` in its `@conversion` to `to`, if one exists.
     pub(crate) fn try_convert(&mut self, expr: HirExpr, to: TypeId) -> Option<HirExpr> {
-        let hook = self.overloads("@conversion").into_iter().find(|hook| {
-            hook.sig
-                .params
-                .first()
-                .is_some_and(|p| p.id == expr.ty.id && !p.is_ref)
-                && hook.sig.returns.first().is_some_and(|r| r.id == to)
+        let (from, to) = (TypeRef::value(expr.ty.id), TypeRef::value(to));
+        let (callee, _) = self.find_hook("@conversion", expr.span, |sig| {
+            sig.params == [from] && sig.returns == [to]
         })?;
-        self.use_hook(&hook.key, expr.span);
         Some(HirExpr {
-            ty: TypeRef::value(to),
+            ty: to,
             span: expr.span,
             kind: HirExprKind::Call {
-                callee: HirCallee::Func(hook.key),
+                callee,
                 args: vec![expr],
                 rest: Vec::new(),
             },
@@ -1510,14 +1506,11 @@ impl Checker<'_> {
         compound: Option<Span>,
     ) -> HirExpr {
         let hook = hook_name(op);
-        let found = self.overloads(hook).into_iter().find(|candidate| {
-            let sig = &candidate.sig;
-            sig.params.len() == 2
-                && sig.returns.len() == 1
-                && sig.params[0] == left.ty
-                && sig.params[1] == right.ty
+        let params = [left.ty, right.ty];
+        let found = self.find_hook(hook, span, |sig| {
+            sig.params == params && sig.returns.len() == 1
         });
-        let Some(found) = found else {
+        let Some((callee, sig)) = found else {
             let mut diagnostic = Diagnostic::error(
                 codes::E043,
                 format!(
@@ -1545,12 +1538,11 @@ impl Checker<'_> {
             );
             return HirExpr::poison(span);
         };
-        self.use_hook(&found.key, span);
         HirExpr {
-            ty: found.sig.returns[0],
+            ty: sig.returns[0],
             span,
             kind: HirExprKind::Call {
-                callee: HirCallee::Func(found.key),
+                callee,
                 args: vec![left, right],
                 rest: Vec::new(),
             },
@@ -1635,14 +1627,14 @@ impl Checker<'_> {
         expected: Option<TypeId>,
     ) -> HirExpr {
         let (cond, facts) = self.check_condition(fcx, cond, "if");
-        let mark = fcx.assume(&facts.when_true);
+        let mark = self.assume(fcx, &facts.when_true);
         let then = self.check_expr(fcx, then, expected);
-        fcx.assumed.truncate(mark);
+        self.unassume(fcx, mark);
         // A `then` that failed leaves the error type: the `else` stays silent.
         let els_expected = expected.or(Some(self.types.read_type(then.ty).id));
-        let mark = fcx.assume(&facts.when_false);
+        let mark = self.assume(fcx, &facts.when_false);
         let els = self.check_expr(fcx, els, els_expected);
-        fcx.assumed.truncate(mark);
+        self.unassume(fcx, mark);
         let result = match expected {
             Some(want) => self.types.value_type(want),
             None if !then.ty.is_error() => self.types.read_type(then.ty),

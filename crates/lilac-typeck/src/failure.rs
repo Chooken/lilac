@@ -235,12 +235,12 @@ impl Checker<'_> {
         if !cond.ty.is_error() {
             self.no_captures(first_capture, &cond, "the condition");
         }
-        let mark = fcx.assume(&facts.when_true);
+        let mark = self.assume(fcx, &facts.when_true);
         let then = self.captured_block(fcx, then, captures, &[], &[]);
-        fcx.assumed.truncate(mark);
-        let mark = fcx.assume(&facts.when_false);
+        self.unassume(fcx, mark);
+        let mark = self.assume(fcx, &facts.when_false);
         let els = self.else_block(fcx, els, else_captures, &[], &[], implicit, span);
-        fcx.assumed.truncate(mark);
+        self.unassume(fcx, mark);
         out.push(HirStmt::If { cond, then, els });
     }
 

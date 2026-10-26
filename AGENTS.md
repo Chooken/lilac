@@ -148,7 +148,9 @@
 - Reflection tests (`lilac-typeck/src/reflect.rs`, `docs/reflection-plan.md`):
   `@has_field`/`@has_method`/`@has_function`/`@has_constant`
   (`T, name, type`), `@has_variant` (`T, Name`, then the payload type
-  or nothing; `has_variant` reads `variants_of`), `@is_copyable(T)` and
+  or nothing; `has_variant` reads `variants_of`), `@has_hook`
+  (`@name, function (P…) O`: an exact, non-failing overload of a
+  top-level or member hook, `has_hook`), `@is_copyable(T)` and
   `@is_same(T, U)`
   (`Intrinsic::is_reflection`) fold to a `@bit8` literal per instance,
   like `@needs_drop`. A member test answers by the lookup a use takes
@@ -178,6 +180,14 @@
   (failure outs and flag appended, `E057` unless handled), a variant
   `HirExprKind::AssumedVariant` (built by `variant_value`, from a tag,
   `T.Name` or `T.Name(p)`) and `HirPattern::Assumed` (`check_pattern`).
+  Hook assumptions live on `Checker::assumed_hooks` (conversions and
+  format slots are checked with no `FnCx`; `Checker::assume`/`unassume`
+  push both stacks, `with_env` clears it for another body), and
+  `Checker::find_hook` tries them before the real overloads: an
+  operator (`operator_call`), a hole or format slot (`hole`;
+  `HirHole::format` is a `HirCallee`), a conversion (`try_convert`)
+  and a call `@name(…)` (`stand_in_hook_call`) bind a
+  `HirCallee::Assumed`.
   Lowering
   `bug!`s on a stand-in: `Lower::outcome` keeps it from ever lowering
   one. An `@is_copyable(T)` test not known true is noted in
