@@ -40,6 +40,8 @@ pub enum ItemKind {
         members: Vec<Item>,
         /// Generic parameters (`GenObj[T]`).
         generic_params: Vec<String>,
+        /// Each generic parameter's name span, in order.
+        generic_spans: Vec<Span>,
     },
     /// `name: either { One, Two }` (payload variants like `Some: @bit32`
     /// make it the single tagged-data type).
@@ -50,6 +52,8 @@ pub enum ItemKind {
         members: Vec<Item>,
         /// Generic parameters.
         generic_params: Vec<String>,
+        /// Each generic parameter's name span, in order.
+        generic_spans: Vec<Span>,
     },
     /// `name: alias Type`: another name for a type (the same type, not a
     /// wrapper).
@@ -178,6 +182,8 @@ pub struct EnumVariant {
 pub struct FuncDecl {
     /// Generic parameters (`[T]` in `GenFunc[T]`).
     pub generic_params: Vec<String>,
+    /// Each generic parameter's name span, in order.
+    pub generic_spans: Vec<Span>,
     /// Input parameters.
     pub params: Vec<Param>,
     /// Named return slots: the success outs (empty for `nothing`).

@@ -98,6 +98,8 @@ pub struct Def {
     pub vis: Visibility,
     /// The definition's own generic parameters (`T` in `Box[T]`, `f[T]`).
     pub generic_params: Vec<String>,
+    /// Each generic parameter's name span, in order.
+    pub generic_spans: Vec<Span>,
     /// Object/enum members by name: fields, methods, and variants (not hooks).
     pub members: HashMap<String, DefId>,
     /// Object/enum member hooks, in declaration order.
@@ -539,6 +541,7 @@ impl Collector<'_> {
             name_span: leading_name_span(span, name),
             vis,
             generic_params: Vec::new(),
+            generic_spans: Vec::new(),
             members: HashMap::new(),
             hooks: Vec::new(),
             slots: Vec::new(),
@@ -602,12 +605,19 @@ impl Collector<'_> {
         let mut def = self.new_def(&item.name, kind, item.span, vis);
         def.parent = parent;
         def.doc.clone_from(&item.doc);
-        def.generic_params = match &item.kind {
-            ItemKind::Func(decl) => decl.generic_params.clone(),
-            ItemKind::Object { generic_params, .. } | ItemKind::Enum { generic_params, .. } => {
-                generic_params.clone()
+        (def.generic_params, def.generic_spans) = match &item.kind {
+            ItemKind::Func(decl) => (decl.generic_params.clone(), decl.generic_spans.clone()),
+            ItemKind::Object {
+                generic_params,
+                generic_spans,
+                ..
             }
-            _ => Vec::new(),
+            | ItemKind::Enum {
+                generic_params,
+                generic_spans,
+                ..
+            } => (generic_params.clone(), generic_spans.clone()),
+            _ => (Vec::new(), Vec::new()),
         };
         let id = self.push(def);
         match &item.kind {

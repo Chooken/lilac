@@ -47,14 +47,14 @@ impl Parser {
         in_object: bool,
     ) -> Result<Item, ErrorGuaranteed> {
         let (name, name_span) = self.parse_item_name(diags)?;
-        let generic_params = self.parse_generic_params(diags)?;
+        let (generic_params, generic_spans) = self.parse_generic_params(diags)?;
         self.expect(diags, TokenKind::Colon, "`:` after declaration name")?;
         let kind_token = self.bump();
         let function = matches!(
             kind_token.kind,
             TokenKind::KwFunction | TokenKind::KwExtern | TokenKind::KwExport
         );
-        let item = self.parse_declaration_body(
+        let mut item = self.parse_declaration_body(
             diags,
             in_object,
             name.clone(),
@@ -62,8 +62,25 @@ impl Parser {
             generic_params,
             kind_token,
         );
-        if item.is_err() {
-            self.failed_header = Some((name, function));
+        match &mut item {
+            Ok(Item {
+                kind:
+                    ItemKind::Func(FuncDecl {
+                        generic_spans: spans,
+                        ..
+                    })
+                    | ItemKind::Object {
+                        generic_spans: spans,
+                        ..
+                    }
+                    | ItemKind::Enum {
+                        generic_spans: spans,
+                        ..
+                    },
+                ..
+            }) => *spans = generic_spans,
+            Ok(_) => {}
+            Err(_) => self.failed_header = Some((name, function)),
         }
         item
     }
@@ -142,6 +159,7 @@ impl Parser {
                     kind: ItemKind::Object {
                         members,
                         generic_params,
+                        generic_spans: Vec::new(),
                     },
                 });
             }
@@ -232,6 +250,7 @@ impl Parser {
                     variants,
                     members,
                     generic_params,
+                    generic_spans: Vec::new(),
                 },
             })
         } else {
@@ -342,15 +361,17 @@ impl Parser {
     pub(crate) fn parse_generic_params(
         &mut self,
         diags: &mut lilac_error::Diags,
-    ) -> Result<Vec<String>, ErrorGuaranteed> {
+    ) -> Result<(Vec<String>, Vec<Span>), ErrorGuaranteed> {
         if self.peek().kind != TokenKind::LBracket {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         self.bump();
         let mut params = Vec::new();
+        let mut spans = Vec::new();
         loop {
             let ident = self.expect(diags, TokenKind::Ident, "generic parameter name")?;
             params.push(ident.text);
+            spans.push(ident.span);
             match self.peek().kind {
                 TokenKind::Comma => {
                     self.bump();
@@ -368,7 +389,7 @@ impl Parser {
                 }
             }
         }
-        Ok(params)
+        Ok((params, spans))
     }
 
     pub(crate) fn parse_using(
@@ -752,6 +773,7 @@ impl Parser {
         let body = self.parse_func_body(diags, is_extern)?;
         Ok(FuncDecl {
             generic_params,
+            generic_spans: Vec::new(),
             params,
             returns,
             failures,

@@ -415,6 +415,38 @@ fn ref_type_colors_only_the_name() {
 }
 
 #[test]
+fn generic_parameter_declarations_color_like_their_uses() {
+    let (client, handle) = start_server();
+    initialize(&client);
+    let uri = Url::parse("file:///c:/main.lilac").expect("uri");
+    let text = "Pair[T, U]: structure {\n    first: T\n    second: U\n    get[V]: function (self, v: V) out: T => self.first\n}\nOption[T]: either {\n    Some: T\n    None\n}\nid[T]: function (value: T) out: T => value\nmain: function () nothing {\n}\n";
+    did_open(&client, &uri, text);
+    let _ = publish_for(&client, &uri);
+
+    let decoded = decode(&semantic_tokens_at(&client, &uri));
+    // A structure's, an either's, a function's and a method's own
+    // parameters, then a use for comparison.
+    for (key, offset) in [
+        ("Pair[T, U]", 5),
+        ("Pair[T, U]", 8),
+        ("Option[T]", 7),
+        ("id[T]", 3),
+        ("get[V]", 4),
+        ("first: T", 7),
+    ] {
+        let token = token_after(&decoded, text, key, offset);
+        assert_eq!(
+            (token.token_type, token.modifiers, token.length),
+            (TYPE, 0, 1),
+            "{key:?}+{offset}"
+        );
+    }
+
+    shutdown(&client);
+    handle.join().expect("server thread");
+}
+
+#[test]
 fn syntax_error_still_returns_surviving_tokens() {
     let (client, handle) = start_server();
     initialize(&client);

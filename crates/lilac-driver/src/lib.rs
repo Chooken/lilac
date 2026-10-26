@@ -215,11 +215,21 @@ impl Analysis {
                 span,
                 kind: lilac_hir::SemanticKind::Namespace,
             });
+        // A generic parameter's declaration colors like its uses.
+        let generics = resolved
+            .defs
+            .iter()
+            .flat_map(|def| &def.generic_spans)
+            .map(|&span| lilac_hir::SemanticSite {
+                span,
+                kind: lilac_hir::SemanticKind::UserType,
+            });
         let semantics = merge_semantics(
             std::mem::take(&mut hir.semantics)
                 .into_iter()
                 .chain(conditions.semantics)
-                .chain(namespaces),
+                .chain(namespaces)
+                .chain(generics),
         );
         Self {
             resolved,
