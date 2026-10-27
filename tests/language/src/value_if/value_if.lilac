@@ -1,0 +1,10 @@
+
+program: function () code: @bit32 {
+    c: @bit8 = 0x0
+    v: @bit32 = if c then 0x4 else 0x9
+    code = v
+}
+
+test "value_if" {
+    Transcript.expect_code(program(), 0x9)
+}

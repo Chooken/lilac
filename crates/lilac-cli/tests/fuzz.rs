@@ -1,5 +1,5 @@
 //! Mutation smoke test (robustness plan 0.2): mutants of every `tests/run`
-//! program and every `lib/Standard` file are compiled in process, tolerant
+//! program, every program of the test projects and every `lib/Standard` file are compiled in process, tolerant
 //! (as the language server compiles) and strict (as `lilac build` does,
 //! without the backend). A compiler panic, or a compile still running after
 //! [`TIME_LIMIT`], fails the test and prints the mutant.
@@ -214,6 +214,24 @@ fn corpus() -> Vec<Seed> {
             text,
             host: None,
         });
+    }
+    // The test projects' programs, each compiled alone with the libraries
+    // their manifests mount.
+    let transcript = repo().join("tests/libs/Transcript");
+    for project in ["tests/language/src", "tests/standard/src"] {
+        let mut files = Vec::new();
+        lilac_files(&repo().join(project), &mut files);
+        for path in files {
+            seeds.push(Seed {
+                text: std::fs::read_to_string(&path).expect("reads a test program"),
+                path,
+                libraries: vec![
+                    ("Standard".to_owned(), standard.clone()),
+                    ("Transcript".to_owned(), transcript.clone()),
+                ],
+                host: None,
+            });
+        }
     }
     let mut library = Vec::new();
     lilac_files(&standard, &mut library);

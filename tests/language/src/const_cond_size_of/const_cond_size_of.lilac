@@ -1,0 +1,18 @@
+// `@size_of(T)` is constant per instance, so a generic guard on it decides
+// at lowering.
+
+
+size[T]: function () n: @bit32 {
+    if @size_of(T) == 0x0 {
+        @compile_error("zero-sized types are not supported")
+    }
+    n = @truncate(@size_of(T))
+}
+
+program: function () code: @bit32 {
+    code = size[@bit32]()
+}
+
+test "const_cond_size_of" {
+    Transcript.expect_code(program(), 0x4)
+}

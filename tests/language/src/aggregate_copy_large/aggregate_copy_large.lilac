@@ -1,0 +1,23 @@
+// A 64 KiB structure is copied, then passed by value; the copy keeps every
+// byte. Aggregate copies are `memcpy`s, so their size costs LLVM nothing.
+
+
+Block: structure {
+    bytes: @array(@bit8, 0x10000)
+}
+
+last: function (block: Block) value: @bit8 {
+    value = @array_at(ref block.bytes, 0xFFFF)
+}
+
+program: function () code: @bit32 {
+    x: Block = Block { bytes = @array(@bit8, 0x10000) {} }
+    slot: ref @bit8 = @array_at(ref x.bytes, 0xFFFF)
+    slot = 0x7
+    y: Block = x
+    code = @extend_zero(last(y))
+}
+
+test "aggregate_copy_large" {
+    Transcript.expect_code(program(), 0x7)
+}

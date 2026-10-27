@@ -1,0 +1,18 @@
+
+Box[T]: structure {
+    value: T
+
+    make: function (v: T) out: Box[T] {
+        out = Box[T] { value = v }
+    }
+}
+
+program: function () code: @bit32 {
+    a: Box[@bit32] = Box[@bit32] { value = 0x1 }
+    b: Box[@bit32] = Box[@bit32].make(0x3)
+    code = @i_add_32(a.value, b.value)
+}
+
+test "generic_struct_literal" {
+    Transcript.expect_code(program(), 0x4)
+}

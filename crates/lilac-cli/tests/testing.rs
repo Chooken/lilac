@@ -1,6 +1,7 @@
 //! `lilac test`: `Standard`'s own tests (`tests/standard`, a project of
-//! `test` blocks) pass in Debug and Release, and a test program's results,
-//! failures, filters and libraries are reported as they should be.
+//! `test` blocks) and the language's (`tests/language`) pass in Debug and
+//! Release, and a test program's results, failures, filters and libraries
+//! are reported as they should be.
 
 mod support;
 
@@ -73,22 +74,34 @@ fn standard_flag() -> String {
     )
 }
 
-#[test]
-fn standard_tests_pass() {
+/// Runs the test project `tests/<name>` in Debug and Release.
+fn project_tests_pass(name: &str) {
     let Some(tools) = toolchain() else { return };
-    let project = repository().join("tests/standard");
+    let project = repository().join("tests").join(name);
     let project = project.to_str().expect("UTF-8 path");
     for mode in ["--mode=debug", "--mode=release"] {
-        let dir = scratch(&format!("standard{mode}"));
+        let dir = scratch(&format!("{name}{mode}"));
         let out = lilac(&tools, &dir, &["test", "-q", mode, project]);
         let stdout = text(&out.stdout);
         assert!(
             out.status.success(),
-            "`lilac test {mode} tests/standard` failed:\n{stdout}{}",
+            "`lilac test {mode} tests/{name}` failed:\n{stdout}{}",
             text(&out.stderr)
         );
         assert!(stdout.contains("test result: ok."), "{stdout}");
     }
+}
+
+#[test]
+fn standard_tests_pass() {
+    project_tests_pass("standard");
+}
+
+/// The language's tests: programs that once were run tests checking only
+/// their output or exit code.
+#[test]
+fn language_tests_pass() {
+    project_tests_pass("language");
 }
 
 const PROGRAM: &str = r#"using Standard

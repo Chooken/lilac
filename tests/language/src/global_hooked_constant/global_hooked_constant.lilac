@@ -1,0 +1,38 @@
+// A global may be initialized from a `=>` constant of a type with a drop
+// hook: the constant's body builds the global in place, like a literal,
+// and a global never drops. The constant's private fields need no access
+// from outside the type.
+
+using Standard
+using Transcript
+
+drops: Int = 0
+
+Guarded: structure {
+    private {
+        value: Int
+        next: Optional[ref Guarded]
+    }
+
+    EMPTY: Guarded => Guarded {
+        value = 7
+        next = .None
+    }
+
+    get_value: function (self) Int => self.value
+
+    @on_drop: function (self) nothing {
+        drops = drops + 1
+    }
+}
+
+global: Guarded = Guarded.EMPTY
+
+program: function () nothing {
+    print_line($"{global.get_value()} dropped {drops}")
+}
+
+test "global_hooked_constant" {
+    program()
+    Transcript.expect_printed("7 dropped 0\n")
+}

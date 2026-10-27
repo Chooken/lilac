@@ -1,0 +1,53 @@
+// A field moves out of a structure with no `@on_drop` of its own: the rest
+// of it still drops, setting the field again makes it whole, and a field
+// moved on one branch only drops once either way.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+Pair: structure {
+    left: Leaf
+    right: Leaf
+}
+
+keep: function (leaf: Leaf) nothing {
+    print_char('k')
+}
+
+whole_again: function () nothing {
+    pair: Pair = Pair { left = Leaf { c = 'l' }, right = Leaf { c = 'r' } }
+    keep(pair.left)
+    print_char('|')
+    pair.left = Leaf { c = 'n' }
+    print_char('|')
+}
+
+maybe_keep: function (give: Bool) nothing {
+    pair: Pair = Pair { left = Leaf { c = 'l' }, right = Leaf { c = 'r' } }
+    if give {
+        keep(pair.left)
+    }
+    print_char('|')
+}
+
+program: function () nothing {
+    whole_again()
+    print_char(0xA)
+    maybe_keep(true)
+    print_char(0xA)
+    maybe_keep(false)
+    print_char(0xA)
+}
+
+test "field_moves" {
+    program()
+    Transcript.expect_printed("kl||nr\nkl|r\n|lr\n")
+}

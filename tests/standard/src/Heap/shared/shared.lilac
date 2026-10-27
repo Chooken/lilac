@@ -1,0 +1,54 @@
+// Copies of a `Shared` own one value (a change through one shows through
+// the others) and drop it once, with the last. A `Weak` gives a `Shared` while an
+// owner lives, fails after, and its copies outlive the value without
+// dropping it again.
+
+using Standard
+using Transcript
+
+Noisy: structure {
+    n: Int
+
+    @on_drop: function (self) nothing {
+        print_line($"drop {self.n}")
+    }
+}
+
+program: function () nothing {
+    weak: Weak[Noisy] = make()
+
+    if weak.to_shared() -> again: Shared[Noisy] {
+        print_line($"upgraded (wrong) {again.value().n}")
+    } else {
+        print_line("gone")
+    }
+
+    copy: Weak[Noisy] = weak
+    if copy.to_shared() -> again: Shared[Noisy] {
+        print_line($"copied weak: upgraded (wrong) {again.value().n}")
+    } else {
+        print_line("copied weak: gone")
+    }
+    print_line("done")
+}
+
+make: function () weak: Weak[Noisy] {
+    first: Shared[Noisy] = Shared[Noisy].new(Noisy { n = 7 })
+    second: Shared[Noisy] = first
+    print_line($"{first.value().n} {second.value().n}")
+
+    second.value().n = 8
+    print_line($"{first.value().n} {second.value().n}")
+
+    weak = second.new_weak()
+    if weak.to_shared() -> third: Shared[Noisy] {
+        print_line($"upgraded {third.value().n}")
+    } else {
+        print_line("gone (wrong)")
+    }
+}
+
+test "shared" {
+    program()
+    Transcript.expect_printed("7 7\n8 8\nupgraded 8\ndrop 8\ngone\ncopied weak: gone\ndone\n")
+}

@@ -1,0 +1,86 @@
+// Float `%` is C's `fmod`, exact, with no C library: the backend defines
+// it (math plan phase 0). The quotient truncates, so the result has the
+// dividend's sign; zero or NaN divisors and infinite dividends give NaN,
+// and a dividend smaller than the divisor comes back unchanged. Each
+// result is checked bit for bit, through parameters so nothing folds.
+
+using Standard
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+remainder64: function (x: @bit64, y: @bit64) bits: @bit64 {
+    left: Float64 = @bits_to_fbit_64(x)
+    right: Float64 = @bits_to_fbit_64(y)
+    result: @fbit64 = left % right
+    bits = @fbit_to_bits_64(result)
+}
+
+remainder32: function (x: @bit32, y: @bit32) bits: @bit32 {
+    left: Float32 = @bits_to_fbit_32(x)
+    right: Float32 = @bits_to_fbit_32(y)
+    result: @fbit32 = left % right
+    bits = @fbit_to_bits_32(result)
+}
+
+remainder16: function (x: @bit16, y: @bit16) bits: @bit16 {
+    bits = @fbit_to_bits_16(@f_mod_16(@bits_to_fbit_16(x), @bits_to_fbit_16(y)))
+}
+
+// Whether `bits` is a 64-bit NaN: all exponent bits set and a fraction.
+is_nan64: function (bits: @bit64) nan: @bit8 {
+    magnitude: @bit64 = @bit_and_64(bits, 0x7FFFFFFFFFFFFFFF)
+    nan = @i_greater_than_u_64(magnitude, 0x7FF0000000000000)
+}
+
+is_nan32: function (bits: @bit32) nan: @bit8 {
+    magnitude: @bit32 = @bit_and_32(bits, 0x7FFFFFFF)
+    nan = @i_greater_than_u_32(magnitude, 0x7F800000)
+}
+
+program: function () nothing {
+    // 5.5 % 2 = 1.5, with the dividend's sign.
+    check(remainder64(0x4016000000000000, 0x4000000000000000) == 0x3FF8000000000000, 0x1)
+    check(remainder64(0xC016000000000000, 0x4000000000000000) == 0xBFF8000000000000, 0x2)
+    check(remainder64(0x4016000000000000, 0xC000000000000000) == 0x3FF8000000000000, 0x3)
+    // 1 % 0.1 is exact: 1 - 9 * 0.1000000000000000055511151231257827.
+    check(remainder64(0x3FF0000000000000, 0x3FB999999999999A) == 0x3FB9999999999996, 0x4)
+    // An exact multiple is a zero of the dividend's sign.
+    check(remainder64(0x4018000000000000, 0x4008000000000000) == 0x0, 0x5)
+    check(remainder64(0xC018000000000000, 0x4008000000000000) == 0x8000000000000000, 0x6)
+    // A smaller dividend comes back, `-0.0` too.
+    check(remainder64(0x8000000000000000, 0x3FF0000000000000) == 0x8000000000000000, 0x7)
+    check(remainder64(0x3FF0000000000000, 0x7FF0000000000000) == 0x3FF0000000000000, 0x8)
+    // NaN: a zero or NaN divisor, an infinite dividend.
+    check(is_nan64(remainder64(0x3FF0000000000000, 0x0)), 0x9)
+    check(is_nan64(remainder64(0x3FF0000000000000, 0x7FF8000000000000)), 0xA)
+    check(is_nan64(remainder64(0x7FF0000000000000, 0x3FF0000000000000)), 0xB)
+    // Far exponents: 2^1000 % 3 = 1 and 2^1023 % 3 = 2.
+    check(remainder64(0x7E70000000000000, 0x4008000000000000) == 0x3FF0000000000000, 0xC)
+    check(remainder64(0x7FE0000000000000, 0x4008000000000000) == 0x4000000000000000, 0xD)
+    // Subnormals: in, out, and a remainder of nothing.
+    check(remainder64(0x3, 0x2) == 0x1, 0xE)
+    check(remainder64(0x0010000000000001, 0x0010000000000000) == 0x1, 0xF)
+    check(remainder64(0x3FF0000000000000, 0x1) == 0x0, 0x10)
+
+    check(remainder32(0x40B00000, 0x40000000) == 0x3FC00000, 0x20)
+    // -7 % 2.5 = -2.
+    check(remainder32(0xC0E00000, 0x40200000) == 0xC0000000, 0x21)
+    // 2^100 % 3 = 1.
+    check(remainder32(0x71800000, 0x40400000) == 0x3F800000, 0x22)
+    check(remainder32(0x00800001, 0x00800000) == 0x1, 0x23)
+    check(is_nan32(remainder32(0x3F800000, 0x0)), 0x24)
+
+    // `@fbit16` goes through the 32-bit remainder, which is exact.
+    check(remainder16(0x4580, 0x4000) == 0x3E00, 0x30)
+    check(remainder16(0x0401, 0x0400) == 0x0001, 0x31)
+    check(remainder16(0xC580, 0x4000) == 0xBE00, 0x32)
+}
+
+test "float_remainder" {
+    program()
+}

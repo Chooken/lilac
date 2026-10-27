@@ -1,0 +1,31 @@
+// `Box.new` moves the value into the heap (no early drop of the
+// parameter, no zero drop of the fresh slot), and dropping the box drops
+// the value exactly once. A zero drop would print `z`.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        if self.c == 0x0 {
+            print_char('z')
+        } else {
+            print_char(self.c)
+        }
+    }
+}
+
+program: function () nothing {
+    {
+        b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "box_drops_contents" {
+    program()
+    Transcript.expect_printed("|x\n")
+}

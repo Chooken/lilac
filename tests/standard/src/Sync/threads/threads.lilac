@@ -1,0 +1,77 @@
+// `Standard.Os` threads with no C library: four threads each add to a
+// shared counter atomically and set their own slot, then are joined. The
+// trace head is per thread, so a thread's calls never touch another's
+// frames. Fails with the number of the first failed check.
+
+using Standard
+using Transcript
+using Standard.Os as Os
+
+Work: structure {
+    counter: ref @bit32
+    slot: @bit32
+}
+
+check: function (ok: Bool, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+// Deep enough that the shadow stack is in use while the others run.
+add: function (counter: ref @bit32, times: @bit32) nothing {
+    if times == 0x0 {
+        return
+    }
+    @atomic_add_32(counter, 0x1)
+    Os.yield_thread()
+    add(counter, @i_sub_32(times, 0x1))
+}
+
+work: function (argument: ref unknown) nothing {
+    job: ref Work = argument as ref Work
+    add(job.counter, 0x64)
+    job.slot = 0x1
+}
+
+program: function () nothing {
+    counter: @bit32 = 0x0
+    jobs: @array(Work, 4) = @array(Work, 4) {}
+    at: ref @array(Work, 4) = ref jobs
+    threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
+    running: ref @array(Os.Thread, 4) = ref threads
+    index: @bit_native = 0x0
+    loop {
+        if index == 0x4 {
+            break
+        }
+        job: ref Work = @array_at(at, index)
+        job.counter = ref counter
+        thread: Os.Thread = Os.spawn(ref work, job as ref unknown).get() else {
+            Transcript.fail_with(0x1)
+            return
+        }
+        stored: ref Os.Thread = @array_at(running, index)
+        stored = thread
+        index = @i_add_native(index, 0x1)
+    }
+    index = 0x0
+    loop {
+        if index == 0x4 {
+            break
+        }
+        match Os.join(@array_at(running, index)) {
+            .Some => Transcript.fail_with(0x2)
+        }
+        check(@array_at(at, index).slot == 0x1, 0x3)
+        index = @i_add_native(index, 0x1)
+    }
+    check(@atomic_load_32(ref counter) == 0x190, 0x4)
+    print("joined\n")
+}
+
+test "threads" {
+    program()
+    Transcript.expect_printed("joined\n")
+}

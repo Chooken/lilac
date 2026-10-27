@@ -419,10 +419,11 @@ fn vendored_library_checks_clean() {
     assert!(error_codes(&out.stderr).is_empty(), "{}", out.stderr);
 }
 
-/// The program of `tests/run/wide_generic_types` with `n` distinct generic
-/// functions, each wrapping its argument in `P[T, T, T, T]`: the type
-/// `f{n}` takes, written out, is `4^(n-1)` `Empty`s. The last one panics,
-/// so with stack traces on, every call site and the panic name the types.
+/// The program of `tests/language/src/wide_generic_types` with `n` distinct
+/// generic functions, each wrapping its argument in `P[T, T, T, T]`: the
+/// type `f{n}` takes, written out, is `4^(n-1)` `Empty`s. The last one
+/// panics, so with stack traces on, every call site and the panic name the
+/// types.
 fn wide_generics(n: usize) -> String {
     let mut text = String::from(
         "Empty: structure {\n}\n\n\

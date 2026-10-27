@@ -1,0 +1,58 @@
+// A capture moves the payload out of an owned value (the value is used
+// up, so it does not drop again), and out of a temporary; when no arm
+// takes the payload, the temporary still drops.
+
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+Either: either {
+    One: Leaf
+    Other: Leaf
+}
+
+make: function (one: @bit8, c: @bit32) value: Either {
+    if one {
+        value = .One(Leaf { c = c })
+    } else {
+        value = .Other(Leaf { c = c })
+    }
+}
+
+program: function () nothing {
+    {
+        value: Either = .One(Leaf { c = 'a' })
+        match value {
+            .One -> leaf: Leaf {
+                print_char('<')
+            }
+        }
+        print_char('|')
+    }
+    print_char(0xA)
+    match make(0x1, 'b') {
+        .One -> leaf: Leaf {
+            print_char('>')
+        }
+    }
+    print_char('|')
+    print_char(0xA)
+    match make(0x0, 'c') {
+        .One -> leaf: Leaf {
+            print_char('>')
+        }
+    }
+    print_char('|')
+    print_char(0xA)
+}
+
+test "match_moves_payload" {
+    program()
+    Transcript.expect_printed("<a|\n>b|\nc|\n")
+}

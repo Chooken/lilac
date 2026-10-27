@@ -1,0 +1,26 @@
+// Reading a place whose type has its own `@on_drop` but no `@on_copy`
+// moves it: the handle has one owner, so it drops once.
+
+using Transcript
+
+Handle: structure {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+program: function () nothing {
+    {
+        a: Handle = Handle { id = 'a' }
+        b: Handle = a
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "drop_hook_moves" {
+    program()
+    Transcript.expect_printed("|a\n")
+}

@@ -1,0 +1,28 @@
+using Transcript
+
+Counted: structure {
+    copies: @bit32
+
+    @on_copy: function (self) out: Counted {
+        print_char('c')
+        out = Counted { copies = @i_add_32(self.copies, 0x1) }
+    }
+
+    @on_override: function (prev: ref Counted, new: ref Counted) nothing {
+        print_char('o')
+    }
+}
+
+program: function () code: @bit32 {
+    a: Counted = Counted { copies = 0x0 }
+    // `a` is read again below, so this copies (a last use would move).
+    b: Counted = a
+    a = Counted { copies = @i_add_32(a.copies, 0x5) }
+    print_char(0xA)
+    code = b.copies
+}
+
+test "copy_and_override" {
+    Transcript.expect_code(program(), 0x1)
+    Transcript.expect_printed("co\n")
+}

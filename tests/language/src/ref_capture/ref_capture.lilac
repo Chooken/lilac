@@ -1,0 +1,161 @@
+// A reference capture (`-> v: ref P` on a `P` payload) is the payload's
+// slot inside the matched value: writes through it change the value in
+// place, on a local, a global, a field, through a `ref`, and in an either
+// with its own `@on_drop`. `v = value` drops the old payload once;
+// `v = ref other` rebinds `v` and leaves the either alone. On an
+// `Optional[ref X]`, `get_ref` is the stored reference.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+Holder: structure {
+    slot: Optional[@bit32]
+}
+
+// An either with its own `@on_drop`: its payload cannot move out, but a
+// reference capture moves nothing.
+Guarded: either {
+    Held: @bit32
+    Gone
+
+    @on_drop: function (self) nothing {
+        match self {
+            .Held -> c: @bit32 {
+                print_char(@i_sub_32(c, 0x20))
+            }
+        }
+    }
+}
+
+global_leaf: Optional[Leaf] = .None
+
+show: function (optional: Optional[@bit32]) nothing {
+    match optional {
+        .Some -> c: @bit32 => print_char(c)
+    }
+    print_char(0xA)
+}
+
+bump: function (optional: ref Optional[@bit32]) nothing {
+    match optional {
+        .Some -> c: ref @bit32 {
+            c = @i_add_32(c, 0x1)
+        }
+    }
+}
+
+fill_global: function () nothing {
+    global_leaf = .Some(Leaf { c = 'c' })
+}
+
+program: function () nothing {
+    // A local.
+    local: Optional[@bit32] = .Some('a')
+    match local {
+        .Some -> c: ref @bit32 {
+            c = 'b'
+        }
+    }
+    show(local)
+
+    // A global, filled at run time from `.None`.
+    fill_global()
+    if global_leaf.get_ref() -> leaf: ref Leaf {
+        leaf.c = 'd'
+    }
+    if global_leaf.get_ref() -> leaf: ref Leaf {
+        print_char(leaf.c)
+    }
+    print_char(0xA)
+
+    // A field.
+    holder: Holder = Holder { slot = .Some('a') }
+    match holder.slot {
+        .Some -> c: ref @bit32 {
+            c = 'e'
+        }
+    }
+    show(holder.slot)
+
+    // Through a `ref`.
+    counter: Optional[@bit32] = .Some('e')
+    bump(ref counter)
+    bump(ref counter)
+    show(counter)
+
+    // `v = value` drops the old payload once; `v = ref other` rebinds.
+    {
+        other: Leaf = Leaf { c = 'o' }
+        leaf: Optional[Leaf] = .Some(Leaf { c = 'x' })
+        match leaf {
+            .Some -> v: ref Leaf {
+                v = Leaf { c = 'y' }
+                print_char('|')
+                v = ref other
+                v.c = 'p'
+            }
+        }
+        // The optional drops its `y` once, then `other` its `p`.
+        print_char(other.c)
+        print_char('|')
+    }
+    print_char(0xA)
+
+    // `Optional[ref X]`: the stored reference.
+    target: @bit32 = 'q'
+    pointer: Optional[ref @bit32] = .Some(ref target)
+    if pointer.get_ref() -> c: ref @bit32 {
+        c = 'r'
+    }
+    print_char(target)
+    print_char(0xA)
+
+    // Nested: a reference to an inner optional, then into it.
+    nested: Optional[Optional[@bit32]] = .Some(.Some('l'))
+    match nested {
+        .Some -> inner: ref Optional[@bit32] {
+            bump(inner)
+        }
+    }
+    match nested {
+        .Some -> inner: Optional[@bit32] => show(inner)
+    }
+
+    // Through `get_ref` on an `Optional` of a value.
+    plain: Optional[@bit32] = .Some('r')
+    if plain.get_ref() -> c: ref @bit32 {
+        c = 's'
+    }
+    show(plain)
+
+    // An either with its own `@on_drop`, changed in place; it drops once.
+    {
+        guarded: Guarded = .Held('t')
+        match guarded {
+            .Held -> c: ref @bit32 {
+                c = 'u'
+            }
+        }
+        match guarded {
+            .Held -> c: @bit32 => print_char(c)
+        }
+        print_char('|')
+        match guarded {
+            .Held -> c: ref @bit32 => print_char(c)
+        }
+    }
+    print_char(0xA)
+}
+
+test "ref_capture" {
+    program()
+    Transcript.expect_printed("b\nd\ne\ng\nx|p|yp\nr\nm\ns\nu|uU\n")
+}

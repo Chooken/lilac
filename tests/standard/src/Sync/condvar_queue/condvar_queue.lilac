@@ -1,0 +1,105 @@
+// `Sync.Condvar` over a bounded queue: one producer pushes 1 to 2,000
+// into an eight-slot ring a `Mutex` guards, waiting on `not_full`, and
+// three consumers take from it, waiting on `not_empty`, until the
+// producer marks it done. Every item is taken exactly once, so the sums
+// add up to 2,001,000 over 2,000 items. First a `wait_timeout` with no
+// notifier must time out. Fails with the number of the first failed
+// check.
+
+using Standard
+using Transcript
+using Standard.Os as Os
+using Standard.Sync as Sync
+
+Ring: structure {
+    items: @array(@bit32, 8)
+    head: @bit_native
+    count: @bit_native
+    done: Bool
+    taken: @bit32
+    sum: @bit64
+}
+
+queue: Sync.Mutex[Ring]
+not_empty: Sync.Condvar
+not_full: Sync.Condvar
+
+item_count: @bit32 => 0x7D0
+
+produce: function (argument: ref unknown) nothing {
+    next: @bit32 = 0x1
+    loop if @i_less_than_or_equal_u_32(next, item_count) {
+        guard: Sync.MutexGuard[Ring] = queue.lock()
+        loop if guard.value().count == 0x8 {
+            guard = @move(guard).wait(ref not_full)
+        }
+        ring: ref Ring = guard.value()
+        slot: @bit_native = @bit_and_native(@i_add_native(ring.head, ring.count), 0x7)
+        stored: ref @bit32 = @array_at(ref ring.items, slot)
+        stored = next
+        ring.count = @i_add_native(ring.count, 0x1)
+        not_empty.notify_one()
+        next = @i_add_32(next, 0x1)
+    }
+    guard: Sync.MutexGuard[Ring] = queue.lock()
+    guard.value().done = true
+    not_empty.notify_all()
+}
+
+consume: function (argument: ref unknown) nothing {
+    loop {
+        guard: Sync.MutexGuard[Ring] = queue.lock()
+        loop if guard.value().count == 0x0 and not guard.value().done {
+            guard = @move(guard).wait(ref not_empty)
+        }
+        ring: ref Ring = guard.value()
+        if ring.count == 0x0 {
+            return
+        }
+        item: @bit32 = @array_at(ref ring.items, ring.head)
+        ring.head = @bit_and_native(@i_add_native(ring.head, 0x1), 0x7)
+        ring.count = @i_sub_native(ring.count, 0x1)
+        ring.taken = @i_add_32(ring.taken, 0x1)
+        ring.sum = @i_add_64(ring.sum, @extend_zero(item))
+        not_full.notify_one()
+    }
+}
+
+program: function () nothing {
+    guard: Sync.MutexGuard[Ring], timed_out: Bool = queue.lock().wait_timeout(ref not_empty, 0x989680)
+    if timed_out {
+    } else {
+        Transcript.fail_with(0x1)
+    }
+    guard.unlock()
+
+    threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
+    running: ref @array(Os.Thread, 4) = ref threads
+    index: @bit_native = 0x0
+    loop if index != 0x4 {
+        entry: ref Os.ThreadEntry = if index == 0x0 then ref produce else ref consume
+        thread: Os.Thread = Os.spawn(entry, ref queue as ref unknown).get() else {
+            Transcript.fail_with(0x2)
+            return
+        }
+        stored: ref Os.Thread = @array_at(running, index)
+        stored = thread
+        index = @i_add_native(index, 0x1)
+    }
+    index = 0x0
+    loop if index != 0x4 {
+        match Os.join(@array_at(running, index)) {
+            .Some => Transcript.fail_with(0x3)
+        }
+        index = @i_add_native(index, 0x1)
+    }
+    ring: Sync.MutexGuard[Ring] = queue.lock()
+    sum: Uint64 = ring.value().sum as Uint64
+    taken: Uint32 = ring.value().taken as Uint32
+    print_line($"{sum} {taken}")
+}
+
+test "condvar_queue" {
+    program()
+    Transcript.expect_printed("2001000 2000\n")
+}

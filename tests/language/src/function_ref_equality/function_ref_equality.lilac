@@ -1,0 +1,33 @@
+// A function reference is its function's identity: the same function is
+// equal, a different one (even with the same body) is not, and equality
+// survives a round trip through `ref unknown`.
+
+using Transcript
+
+one: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+same: function (value: @bit32) result: @bit32 {
+    result = @i_add_32(value, 0x1)
+}
+
+bit: function (yes: @bit8) out: @bit8 {
+    out = 0x0
+    if yes == 0x1 {
+        out = 0x1
+    }
+}
+
+program: function () nothing {
+    a: ref function (@bit32) @bit32 = ref one
+    b: ref function (@bit32) @bit32 = ref same
+    erased: ref unknown = a as ref unknown
+    back: ref function (@bit32) @bit32 = erased as ref function (@bit32) @bit32
+    print_line($"{bit(a == ref one)} {bit(a == b)} {bit(back == a)} {bit(back != a)} {bit(back(0x1) == b(0x1))}")
+}
+
+test "function_ref_equality" {
+    program()
+    Transcript.expect_printed("1 0 1 0 1\n")
+}

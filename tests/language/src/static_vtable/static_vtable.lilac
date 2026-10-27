@@ -1,0 +1,94 @@
+// Static vtables: globals whose initializers hold function addresses and
+// other globals' addresses. `COUNTER_TABLE` is a table of functions, and
+// `counter_sink` an interface structure pointing at it and at its context,
+// the global `counter`. Nothing calls the implementations directly: the
+// tables alone keep them alive.
+
+using Transcript
+
+Table: structure {
+    add: ref function (context: ref unknown, amount: @bit32) nothing
+    total: ref function (context: ref unknown) total: @bit32
+}
+
+Sink: structure {
+    context: ref unknown
+    table: ref Table
+
+    feed: function (self, amount: @bit32) nothing {
+        self.table.add(self.context, amount)
+    }
+
+    report: function (self, name: @byte_buffer) nothing {
+        print_line($"{name} {self.table.total(self.context)}")
+    }
+}
+
+Counter: structure {
+    count: @bit32
+}
+
+counter_add: function (context: ref unknown, amount: @bit32) nothing {
+    counter: ref Counter = context as ref Counter
+    counter.count = @i_add_32(counter.count, amount)
+}
+
+counter_total: function (context: ref unknown) total: @bit32 {
+    counter: ref Counter = context as ref Counter
+    total = counter.count
+}
+
+doubled_total: function (context: ref unknown) total: @bit32 {
+    counter: ref Counter = context as ref Counter
+    total = @i_mul_32(counter.count, 0x2)
+}
+
+counter: Counter = Counter { count = 0x1 }
+
+COUNTER_TABLE: Table = Table {
+    add = ref counter_add
+    total = ref counter_total
+}
+
+counter_sink: Sink = Sink {
+    context = ref counter as ref unknown
+    table = ref COUNTER_TABLE
+}
+
+// A second table sharing `counter_add`, read through a chain of globals.
+DOUBLER_TABLE: Table = Table {
+    add = ref counter_add
+    total = ref doubled_total
+}
+
+doubler_sink: Sink = Sink {
+    context = ref counter as ref unknown
+    table = ref DOUBLER_TABLE
+}
+
+Step: either {
+    Nothing
+    Next: ref function (x: @bit32) @bit32
+}
+
+increment: function (x: @bit32) @bit32 => @i_add_32(x, 0x1)
+
+step: Step = .Next(ref increment)
+
+program: function () nothing {
+    counter_sink.feed(0x3)
+    counter_sink.report("counter")
+    counter_sink.feed(0x4)
+    counter_sink.report("counter")
+    doubler_sink.report("doubler")
+    match step {
+        .Next -> next: ref function (x: @bit32) @bit32 => print_line($"step {next(0x5)}")
+    } else {
+        print_line("nothing")
+    }
+}
+
+test "static_vtable" {
+    program()
+    Transcript.expect_printed("counter 4\ncounter 8\ndoubler 16\nstep 6\n")
+}

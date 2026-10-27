@@ -1,0 +1,29 @@
+// `Box.into_inner` moves the value out of the box (`@discard` skips the
+// box's `@on_drop`, `@read` moves the value out of the heap, and the
+// memory is freed): the value drops once, where its new owner ends.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+program: function () nothing {
+    {
+        box: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
+        print_char('|')
+        leaf: Leaf = box.into_inner()
+    }
+    print_char('|')
+    print_char(0xA)
+}
+
+test "box_into_inner" {
+    program()
+    Transcript.expect_printed("|x|\n")
+}

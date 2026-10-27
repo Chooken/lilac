@@ -1,0 +1,45 @@
+// `@write` moves a value into an empty slot (nothing there drops),
+// `@read` moves it out again (no copy hook: nothing prints `!`, and the
+// slot is left empty) and `@drop` drops one in place. Each value drops
+// exactly once: `a` as the statement's temporary, right after its `c` is
+// printed, the first `b` at `@drop`, the second where `moved` ends.
+
+using Standard
+using Transcript
+using Standard.Heap
+
+Leaf: structure {
+    c: @bit32
+
+    @on_copy: function (self) copy: Leaf {
+        print_char('!')
+        copy = Leaf { c = self.c }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+program: function () nothing {
+    slots: Slice[Leaf] = get_default_allocator().allocate[Leaf](2)
+    first: ref Leaf = slots.get(0)
+    second: ref Leaf = slots.get(1)
+    {
+        @write(first, Leaf { c = 'a' })
+        @write(second, Leaf { c = 'b' })
+        print_char(@read(first).c)
+        @drop(second)
+        print_char('|')
+        @write(second, Leaf { c = 'b' })
+        moved: Leaf = @read(second)
+        print_char('|')
+    }
+    get_default_allocator().deallocate[Leaf](slots)
+    print_char(0xA)
+}
+
+test "memory_write_read" {
+    program()
+    Transcript.expect_printed("aab||b\n")
+}

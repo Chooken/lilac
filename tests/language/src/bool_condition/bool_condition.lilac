@@ -1,0 +1,21 @@
+
+Bool: structure {
+    data: @bit8
+
+    @conversion: function (from: Bool) to: @bit8 {
+        to = from.data
+    }
+}
+
+program: function () code: @bit32 {
+    t: Bool = Bool { data = 0x1 }
+    if t {
+        code = 0x1
+        return
+    }
+    code = 0x0
+}
+
+test "bool_condition" {
+    Transcript.expect_code(program(), 0x1)
+}

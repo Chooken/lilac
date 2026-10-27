@@ -1,0 +1,137 @@
+// One shared `GeneralAllocator` from four threads at once: each keeps a
+// window of live allocations of many sizes (small and large), filled with
+// its own byte, and checks each is still whole when it frees it. The lock
+// keeps every slot and mapping with one owner. Fails with the number of
+// the first failed check.
+
+using Standard
+using Transcript
+using Standard.Heap
+using Standard.Os as Os
+
+Work: structure {
+    tag: @bit8
+    failed: @bit32
+    allocator: Allocator
+}
+
+check: function (ok: Bool, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+/// Whether the `size` bytes at `memory` all hold `tag`.
+holds: function (memory: ref unknown, size: Int, tag: @bit8) whole: Bool {
+    whole = true
+    index: Int = 0
+    loop {
+        if index == size {
+            break
+        }
+        if @load_u8(memory as ref @bit8, index as @bit_native) != tag {
+            whole = false
+            break
+        }
+        index = index + 1
+    }
+}
+
+Live: structure {
+    memory: ref unknown
+    size: Int
+}
+
+work: function (argument: ref unknown) nothing {
+    job: ref Work = argument as ref Work
+    allocator: Allocator = job.allocator
+    live: @array(Live, 16) = @array(Live, 16) {}
+    window: ref @array(Live, 16) = ref live
+
+    round: Int = 0
+    loop {
+        if round == 4000 as Int {
+            break
+        }
+        slot: ref Live = @array_at(window, (round % 16) as @bit_native)
+        if slot.size > 0 as Int {
+            if not holds(slot.memory, slot.size, job.tag) {
+                job.failed = 0x1
+            }
+            allocator.free_raw(slot.memory, slot.size, 16)
+        }
+        // Mostly small, now and then large.
+        size: Int = (round * 37) % 3000 + 1
+        if round % 97 == 0 as Int {
+            size = 40000 + round
+        }
+        memory: ref unknown = allocator.allocate_raw(size, 16)
+        if not holds(memory, size, 0x0) {
+            job.failed = 0x2
+        }
+        @memset(memory, job.tag, size as @bit_native)
+        slot.memory = memory
+        slot.size = size
+        round = round + 1
+    }
+
+    index: Int = 0
+    loop {
+        if index == 16 as Int {
+            break
+        }
+        slot: ref Live = @array_at(window, index as @bit_native)
+        if not holds(slot.memory, slot.size, job.tag) {
+            job.failed = 0x3
+        }
+        allocator.free_raw(slot.memory, slot.size, 16)
+        index = index + 1
+    }
+}
+
+program: function () nothing {
+    general: GeneralAllocator = GeneralAllocator.new()
+    jobs: @array(Work, 4) = @array(Work, 4) {}
+    at: ref @array(Work, 4) = ref jobs
+    threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
+    running: ref @array(Os.Thread, 4) = ref threads
+    index: @bit_native = 0x0
+    tag: @bit8 = 0x41
+    loop {
+        if index == 0x4 {
+            break
+        }
+        job: ref Work = @array_at(at, index)
+        job.tag = tag
+        job.allocator = Allocator.from[GeneralAllocator](ref general)
+        tag = @i_add_8(tag, 0x1)
+        thread: Os.Thread = Os.spawn(ref work, job as ref unknown).get() else {
+            Transcript.fail_with(0x1)
+            return
+        }
+        stored: ref Os.Thread = @array_at(running, index)
+        stored = thread
+        index = @i_add_native(index, 0x1)
+    }
+    index = 0x0
+    code: @bit32 = 0x10
+    loop {
+        if index == 0x4 {
+            break
+        }
+        match Os.join(@array_at(running, index)) {
+            .Some => Transcript.fail_with(0x2)
+        }
+        check(@array_at(at, index).failed == 0x0, code)
+        code = @i_add_32(code, 0x1)
+        index = @i_add_native(index, 0x1)
+    }
+    check(general.get_used() == 0 as Int, 0x20)
+    print("joined\n")
+}
+
+test "general_allocator_threads" {
+    program()
+    Transcript.expect_printed("joined\n")
+}

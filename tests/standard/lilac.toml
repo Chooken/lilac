@@ -1,6 +1,7 @@
 # The tests of `Standard`, run by `lilac test tests/standard` (and by
 # cargo: `crates/lilac-cli/tests/testing.rs`). Each folder of `src` is a
-# namespace of tests.
+# namespace of tests; a folder below an area is one program's namespace,
+# checked through `Transcript` like `tests/language`'s.
 
 [project]
 name = "standard"
@@ -8,3 +9,4 @@ root = "src"
 
 [libraries]
 Standard = "../../lib/Standard"
+Transcript = "../libs/Transcript"

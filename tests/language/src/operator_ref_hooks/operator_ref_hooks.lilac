@@ -1,0 +1,64 @@
+// Every operator hook may take each operand by `ref`: the operator then
+// borrows it, as a method borrows its receiver, so `==` and `+` on a type
+// whose copies run a hook copy nothing.
+
+using Standard
+using Transcript
+
+copies: Int = 0
+
+/// Counts its copies.
+Counted: structure {
+    value: Int
+
+    @on_copy: function (self) out: Counted {
+        copies = copies + 1
+        out = Counted { value = self.value }
+    }
+
+    @eql: function (lhs: ref Counted, rhs: ref Counted) Bool => lhs.value == rhs.value
+
+    @add: function (lhs: ref Counted, rhs: ref Counted) Counted => Counted { value = lhs.value + rhs.value }
+
+    @negate: function (value: ref Counted) Counted => Counted { value = -value.value }
+
+    /// The right side by value: `<` copies it.
+    @less_than: function (lhs: ref Counted, rhs: Counted) Bool => lhs.value < rhs.value
+}
+
+/// A whole number on the right, by `ref` too.
+@add: function (lhs: ref Counted, rhs: ref Int) Counted => Counted { value = lhs.value + rhs }
+
+same[T]: function (a: ref T, b: ref T) equal: Bool {
+    equal = a == b
+}
+
+program: function () nothing {
+    three: Counted = Counted { value = 3 }
+    four: Counted = Counted { value = 4 }
+    other: Counted = Counted { value = 3 }
+    seven: Counted = three + four
+    negative: Counted = -three
+    equal: Bool = three == other
+    unequal: Bool = three != other
+    print_line($"{copies} copies")
+    // A temporary operand, a `ref` one, and a generic body's `==`.
+    through: ref Counted = ref four
+    print_line($"{(three + four) == seven} {through == three} {same[Counted](ref three, ref other)}")
+    print_line($"{seven.value} {negative.value} {equal} {unequal}")
+    smaller: Bool = three < four
+    print_line($"{copies} copies")
+    total: Counted = three
+    copies = 0
+    // `x += e` is `x = x + e`: it borrows `total` for the hook.
+    five: Int = 5
+    total += five
+    total += four
+    print_line($"{total.value} {(three + five).value} {copies} copies")
+    print_line($"{smaller} {four < three}")
+}
+
+test "operator_ref_hooks" {
+    program()
+    Transcript.expect_printed("0 copies\ntrue false true\n7 -3 true false\n1 copies\n12 8 0 copies\ntrue false\n")
+}

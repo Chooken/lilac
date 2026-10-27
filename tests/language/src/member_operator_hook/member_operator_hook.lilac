@@ -1,0 +1,19 @@
+
+Num: structure {
+    data: @bit32
+
+    @add: function (lhs: Num, rhs: Num) out: Num {
+        out = Num { data = @i_add_32(lhs.data, rhs.data) }
+    }
+}
+
+program: function () code: @bit32 {
+    a: Num = Num { data = 0x2 }
+    b: Num = Num { data = 0x4 }
+    c: Num = a + b
+    code = c.data
+}
+
+test "member_operator_hook" {
+    Transcript.expect_code(program(), 0x6)
+}

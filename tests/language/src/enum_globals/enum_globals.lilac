@@ -1,0 +1,104 @@
+// A global holding each variant of an either whose payloads differ in size
+// and alignment: the initializer puts the tag at 0 and the live payload at
+// the payload area's offset (8 here, every payload's), and leaves the rest
+// zero, so each global reads back, matches, and equals the same variant
+// built at run time.
+
+using Standard
+
+Pair: structure {
+    a: @bit8
+    b: @bit32
+}
+
+// The tag at 0; every payload at 8; 16 bytes, aligned 8.
+Mixed: either {
+    Nothing
+    Byte: @bit8
+    Half: @bit16
+    Word: @bit64
+    Both: Pair
+    Maybe: Optional[@bit32]
+}
+
+nothing_global: Mixed = .Nothing
+byte_global: Mixed = .Byte(0xAB)
+half_global: Mixed = .Half(0xBEEF)
+word_global: Mixed = .Word(0x0123456789ABCDEF)
+pair_global: Mixed = .Both(Pair { a = 0x7, b = 0xDEADBEEF })
+maybe_global: Mixed = .Maybe(.Some(0x2A))
+zeroed_global: Mixed
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+// The byte at `offset` of `value`.
+byte_at: function (value: ref Mixed, offset: @bit_native) byte: @bit8 {
+    byte = @load_u8(value as ref unknown as ref @bit8, offset)
+}
+
+program: function () nothing {
+    check(@size_of(Mixed) == 0x10, 0x1)
+    check(@align_of(Mixed) == 0x8, 0x2)
+
+    check(nothing_global == .Nothing, 0x3)
+    check(zeroed_global == .Nothing, 0x4)
+
+    match byte_global {
+        .Byte -> value: @bit8 => check(value == 0xAB, 0x5)
+    } else {
+        Transcript.fail_with(0x6)
+    }
+    check(byte_global == .Byte(0xAB), 0x7)
+    check(byte_at(ref byte_global, 0x0) == 0x1, 0x8)
+    check(byte_at(ref byte_global, 0x8) == 0xAB, 0x9)
+
+    match half_global {
+        .Half -> value: @bit16 => check(value == 0xBEEF, 0xA)
+    } else {
+        Transcript.fail_with(0xB)
+    }
+    check(half_global == .Half(0xBEEF), 0xC)
+    check(byte_at(ref half_global, 0x8) == 0xEF, 0xD)
+
+    match word_global {
+        .Word -> value: @bit64 => check(value == 0x0123456789ABCDEF, 0xE)
+    } else {
+        Transcript.fail_with(0xF)
+    }
+    check(word_global == .Word(0x0123456789ABCDEF), 0x10)
+
+    match pair_global {
+        .Both -> value: Pair {
+            check(value.a == 0x7, 0x11)
+            check(value.b == 0xDEADBEEF, 0x12)
+        }
+    } else {
+        Transcript.fail_with(0x13)
+    }
+    check(pair_global == .Both(Pair { a = 0x7, b = 0xDEADBEEF }), 0x14)
+    check(byte_at(ref pair_global, 0x8) == 0x7, 0x15)
+    check(byte_at(ref pair_global, 0xC) == 0xEF, 0x16)
+
+    match maybe_global {
+        .Maybe -> value: Optional[@bit32] {
+            match value {
+                .Some -> inner: @bit32 => check(inner == 0x2A, 0x17)
+            } else {
+                Transcript.fail_with(0x18)
+            }
+        }
+    } else {
+        Transcript.fail_with(0x19)
+    }
+    check(maybe_global == .Maybe(.Some(0x2A)), 0x1A)
+    check(byte_at(ref maybe_global, 0xC) == 0x2A, 0x1B)
+}
+
+test "enum_globals" {
+    program()
+}

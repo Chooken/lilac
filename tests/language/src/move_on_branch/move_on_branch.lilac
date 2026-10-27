@@ -1,0 +1,37 @@
+// A value moved on one branch only drops once either way: in `take`
+// when it moved, at scope end when it did not.
+
+using Standard
+using Transcript
+
+Handle: structure {
+    id: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.id)
+    }
+}
+
+take: function (handle: Handle) nothing {
+    print_char('t')
+}
+
+maybe: function (give: Bool) nothing {
+    handle: Handle = Handle { id = 'h' }
+    if give {
+        take(handle)
+    }
+    print_char('|')
+}
+
+program: function () nothing {
+    maybe(true)
+    print_char(0xA)
+    maybe(false)
+    print_char(0xA)
+}
+
+test "move_on_branch" {
+    program()
+    Transcript.expect_printed("th|\n|h\n")
+}

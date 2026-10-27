@@ -1,0 +1,132 @@
+// `Standard.Heap.ArenaAllocator`: blocks are whole pages, allocations
+// are distinct, inside the arena and aligned (the address, not just the
+// size), `reallocate` grows the last allocation in place and copies others,
+// shrinking gives zeroed bytes back, a full block chains another, one too
+// big or too aligned for a block gets a custom block, and `reset`
+// starts over with zeroed memory, keeping the blocks. Fails with the
+// number of the first failed check.
+
+using Standard
+using Standard.Heap
+
+check: function (ok: Bool, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+// `memory` as bytes.
+bytes: function (memory: ref unknown) ref @bit8 => memory as ref @bit8
+
+address: function (memory: ref unknown) Int => @ptr_to_address(memory)
+
+Pair: structure {
+    a: @bit64
+    b: @bit32
+}
+
+program: function () nothing {
+    page: Int = @builtin.Target.page_size
+    four_pages: Int = page * 4
+    arena: ArenaAllocator = ArenaAllocator.new_sized(four_pages - page + 1)
+
+    // One block of four pages, less its header.
+    block: Int = arena.get_capacity()
+    check(block < four_pages and block > four_pages - page, 0x1)
+    check(arena.get_used() == 0 as Int, 0x2)
+
+    // A byte, then an 8-aligned value: the second starts aligned and past
+    // the first.
+    byte: ref unknown = arena.allocate_raw(1, 1)
+    pair: ref Pair = arena.create[Pair](Pair { a = 0x1122334455667788, b = 0x99 })
+    check(address(pair as ref unknown) > address(byte), 0x3)
+    check(@bit_and_native(@ptr_to_address(pair as ref unknown), 0x7) == 0x0, 0x4)
+    check(pair.a == 0x1122334455667788 and pair.b == 0x99, 0x5)
+    check(arena.get_used() == address(pair as ref unknown) - address(byte) + @size_of(Pair), 0x6)
+
+    // An alignment larger than the page, still in the block.
+    big: ref unknown = arena.allocate_raw(8, page * 2)
+    check(@bit_and_native(@ptr_to_address(big), (page * 2 - 1) as @bit_native) == 0x0, 0x7)
+    check(arena.get_capacity() == block, 0x8)
+    arena.reset()
+    check(arena.get_used() == 0 as Int, 0x9)
+
+    // The whole block fits exactly, without a new one.
+    all: Slice[@bit8] = arena.allocate[@bit8](block)
+    check(arena.get_used() == block and arena.get_capacity() == block, 0xA)
+    @store_u8(all.base(), (block - 1) as @bit_native, 0x5)
+    arena.reset()
+    check(@load_u8(all.base(), (block - 1) as @bit_native) == 0x0, 0xB)
+
+    // The last allocation grows in place, keeping its contents.
+    words: Slice[@bit32] = arena.allocate[@bit32](4)
+    @store_u8(bytes(words.base() as ref unknown), 0x0, 0x2A)
+    grown: Slice[@bit32] = arena.reallocate[@bit32](words, 8)
+    check(address(grown.base() as ref unknown) == address(words.base() as ref unknown), 0xC)
+    check(arena.get_used() == 32 as Int, 0xD)
+
+    // Shrinking the last one zeroes what it gives back.
+    @store_u8(bytes(grown.base() as ref unknown), 0x1F, 0x7)
+    shrunk: Slice[@bit32] = arena.reallocate[@bit32](grown, 2)
+    check(arena.get_used() == 8 as Int, 0xE)
+    check(@load_u8(bytes(shrunk.base() as ref unknown), 0x1F) == 0x0, 0xF)
+
+    // One that is not last moves, keeping its contents.
+    after: Slice[@bit8] = arena.allocate[@bit8](1)
+    moved: Slice[@bit32] = arena.reallocate[@bit32](shrunk, 4)
+    check(address(moved.base() as ref unknown) != address(shrunk.base() as ref unknown), 0x10)
+    check(@load_u8(bytes(moved.base() as ref unknown), 0x0) == 0x2A, 0x11)
+    arena.reset()
+
+    // Past the end of the block, a second block: the allocation is all
+    // inside it.
+    first_half: Slice[@bit8] = arena.allocate[@bit8](page * 3)
+    @store_u8(first_half.base(), 0x0, 0x2A)
+    spill: Slice[@bit8] = arena.allocate[@bit8](page * 3)
+    check(arena.get_capacity() == block * 2, 0x12)
+    @store_u8(spill.base(), (page * 3 - 1) as @bit_native, 0x9)
+    check(@load_u8(spill.base(), (page * 3 - 1) as @bit_native) == 0x9, 0x13)
+
+    // An allocation from the first block grows by a copy, here into a
+    // third block.
+    regrown: Slice[@bit8] = arena.reallocate[@bit8](first_half, page * 3 + 1)
+    check(@load_u8(regrown.base(), 0x0) == 0x2A and arena.get_capacity() == block * 3, 0x14)
+
+    // Too big for a block: a mapping of its own, all of it usable.
+    huge_size: Int = block * 3
+    huge: Slice[@bit8] = arena.allocate[@bit8](huge_size)
+    @store_u8(huge.base(), 0x0, 0x1)
+    @store_u8(huge.base(), (huge_size - 1) as @bit_native, 0x2)
+    check(arena.get_capacity() >= block * 3 + huge_size, 0x15)
+
+    // Too aligned for a block: a mapping of its own, aligned.
+    aligned: ref unknown = arena.allocate_raw(8, page * 8)
+    check(@bit_and_native(@ptr_to_address(aligned), (page * 8 - 1) as @bit_native) == 0x0, 0x16)
+
+    // A large allocation shrinks in place and grows by a copy.
+    smaller: Slice[@bit8] = arena.reallocate[@bit8](huge, 16)
+    check(address(smaller.base() as ref unknown) == address(huge.base() as ref unknown), 0x17)
+    larger: Slice[@bit8] = arena.reallocate[@bit8](smaller, huge_size * 2)
+    check(@load_u8(larger.base(), 0x0) == 0x1, 0x18)
+
+    // `reset` keeps the three blocks, zeroed, and unmaps the rest.
+    arena.reset()
+    check(arena.get_used() == 0 as Int and arena.get_capacity() == block * 3, 0x19)
+    check(@load_u8(spill.base(), (page * 3 - 1) as @bit_native) == 0x0, 0x1A)
+
+    // Filling them again maps nothing new.
+    again: Slice[@bit8] = arena.allocate[@bit8](page * 3)
+    again_spill: Slice[@bit8] = arena.allocate[@bit8](page * 3)
+    check(arena.get_capacity() == block * 3, 0x1B)
+    check(address(again_spill.base() as ref unknown) == address(spill.base() as ref unknown), 0x1C)
+
+    // The default arena.
+    default: ArenaAllocator = ArenaAllocator.new()
+    one: Slice[@bit32] = default.allocate[@bit32](1)
+    check(default.get_capacity() > 0 as Int, 0x1D)
+}
+
+test "arena_allocator" {
+    program()
+}

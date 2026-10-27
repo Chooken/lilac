@@ -1,0 +1,70 @@
+// A `List` copies: the copy has its own elements (each copied through
+// `@on_copy`, the `+`s) and drops them itself. The last use of a list no
+// `ref` was taken to moves it, so nothing is copied; one a method was
+// called on (which borrows it) copies. An empty list's copy allocates
+// nothing.
+
+using Standard
+using Transcript
+using Standard.Collections
+
+Leaf: structure {
+    c: @bit32
+
+    @on_copy: function (self) copy: Leaf {
+        print_char('+')
+        copy = Leaf { c = self.c }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+program: function () nothing {
+    a: List[Int] = List[Int].new()
+    a.add(1)
+    a.add(2)
+    b: List[Int] = a
+    b.get(0) = 9
+    b.add(3)
+    print_line($"{a.get(0)} {b.get(0)} {a.get_count()} {b.get_count()}")
+
+    {
+        leaves: List[Leaf] = List[Leaf].new()
+        leaves.add(Leaf { c = 'a' })
+        leaves.add(Leaf { c = 'b' })
+        copied: List[Leaf] = leaves
+        print_char('|')
+    }
+    print_char(0xA)
+
+    {
+        moved: List[Leaf] = make('c')
+        last: List[Leaf] = moved
+        print_char('|')
+    }
+    print_char(0xA)
+
+    {
+        borrowed: List[Leaf] = make('d')
+        count: Int = borrowed.get_count()
+        copied: List[Leaf] = borrowed
+        print_char('|')
+    }
+    print_char(0xA)
+
+    empty: List[Leaf] = List[Leaf].new()
+    empty_copy: List[Leaf] = empty
+    print_line($"{empty.get_capacity()} {empty_copy.get_capacity()}")
+}
+
+make: function (c: @bit32) list: List[Leaf] {
+    list = List[Leaf].new()
+    list.add(Leaf { c = c })
+}
+
+test "list_copies" {
+    program()
+    Transcript.expect_printed("1 9 2 3\n++|abab\n|c\n+|dd\n0 0\n")
+}

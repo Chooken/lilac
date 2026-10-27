@@ -1,0 +1,18 @@
+
+Num: structure {
+    data: @bit32
+
+    @negate: function (value: Num) out: Num {
+        out = Num { data = @i_sub_32(0x0, value.data) }
+    }
+}
+
+program: function () code: @bit32 {
+    a: Num = Num { data = 0xFFFFFFFD }
+    b: Num = -a
+    code = b.data
+}
+
+test "member_negate" {
+    Transcript.expect_code(program(), 0x3)
+}

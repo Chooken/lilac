@@ -1,0 +1,70 @@
+// An alias is another name for a type, the same type: of a builtin, a
+// function type, an array, a structure (its statics and struct literals
+// too), a generic instance, and another alias. Values pass between the
+// spellings with no conversion.
+
+using Transcript
+
+Byte: alias @bit8
+Callback: alias function (@bit32) @bit32
+Bytes: alias @array(@bit8, 4)
+
+Point: structure {
+    x: @bit32
+    y: @bit32
+
+    origin: function () point: Point {
+        point = Point { x = 0x0, y = 0x0 }
+    }
+}
+
+Spot: alias Point
+Place: alias Spot
+
+Holder[T]: structure {
+    value: T
+
+    make: function (value: T) holder: Holder[T] {
+        holder = Holder[T] { value = value }
+    }
+}
+
+WordHolder: alias Holder[@bit32]
+
+double: function (value: @bit32) @bit32 => @i_add_32(value, value)
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok == 0x0 {
+        Transcript.fail_with(code)
+    }
+}
+
+program: function () nothing {
+    byte: Byte = 0x7
+    check(byte == 0x7, 0x1)
+
+    callback: ref Callback = ref double
+    check(callback(0x4) == 0x8, 0x2)
+
+    bytes: Bytes = Bytes {}
+    check(@size_of(Bytes) == 0x4, 0x3)
+
+    spot: Spot = Spot { x = 0x1, y = 0x2 }
+    point: Point = spot
+    place: ref Place = ref point
+    check(place.y == 0x2, 0x4)
+    origin: Spot = Spot.origin()
+    check(origin.x == 0x0, 0x5)
+
+    holder: WordHolder = WordHolder.make(0x5)
+    check(holder.value == 0x5, 0x6)
+    plain: Holder[@bit32] = WordHolder { value = 0x6 }
+    check(plain.value == 0x6, 0x7)
+
+    print_line("ok")
+}
+
+test "type_aliases" {
+    program()
+    Transcript.expect_printed("ok\n")
+}

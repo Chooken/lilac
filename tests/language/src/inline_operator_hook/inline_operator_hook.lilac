@@ -1,0 +1,19 @@
+
+Num: structure {
+    data: @bit32
+
+    @add: function (lhs: Num, rhs: Num) out: Num => Num { data = @i_add_32(lhs.data, rhs.data) }
+    @conversion: function (from: Num) to: @bit32 => from.data
+}
+
+program: function () code: @bit32 {
+    a: Num = Num { data = 0x2 }
+    b: Num = Num { data = 0x3 }
+    c: Num = a + b
+    r: @bit32 = c
+    code = r
+}
+
+test "inline_operator_hook" {
+    Transcript.expect_code(program(), 0x5)
+}

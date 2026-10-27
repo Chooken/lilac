@@ -1,0 +1,114 @@
+// Functions that can fail (`outs else outs`), left by `fail`, and the
+// three ways a call of one is handled: a guard, a capture `if` and a
+// `loop if`. Captures bind outs by position, under any names.
+
+using Standard
+
+Pair: structure {
+    a: @bit32
+    b: @bit32
+
+    // Fails on zero, with why.
+    make: function (a: @bit32) pair: Pair else why: @bit32 {
+        if a == 0x0 {
+            why = 0x7
+            fail
+        }
+        pair = Pair { a = a, b = 0x2 }
+    }
+}
+
+// Two success outs, one failure out.
+halve: function (n: @bit32) half: @bit32, rest: @bit32 else odd: @bit32 {
+    if n == 0x9 {
+        odd = n
+        fail
+    }
+    half = @i_div_u_32(n, 0x2)
+    rest = 0x0
+}
+
+// Passes a failure on with `fail`; no failure outs.
+quarter: function (n: @bit32) value: @bit32 else nothing {
+    half: @bit32 = halve(n) else {
+        fail
+    }
+    value = @i_div_u_32(half, 0x2)
+}
+
+Countdown: structure {
+    left: @bit32
+
+    // The next number, until none are left.
+    next: function (self) number: @bit32 else nothing {
+        if self.left == 0x0 {
+            fail
+        }
+        number = self.left
+        self.left = @i_sub_32(self.left, 0x1)
+    }
+}
+
+program: function () code: @bit32 {
+    code = 0x0
+    total: @bit32 = 0x0
+
+    // A guard binds the success outs here; its `else` must leave.
+    h: @bit32, r: @bit32 = halve(0x8) else -> odd: @bit32 {
+        Transcript.fail_with(0x1)
+        return
+    }
+    total = @i_add_32(total, @i_add_32(h, r))
+
+    // A capture `if`: success outs in the block, failure outs in `else`.
+    if halve(0x9) -> unused: @bit32 {
+        Transcript.fail_with(0x2)
+    } else -> odd: @bit32 {
+        total = @i_add_32(total, odd)
+    }
+
+    // The declaration shorthand can fail too.
+    p: Pair.make(0x5) else {
+        Transcript.fail_with(0x3)
+        return
+    }
+    total = @i_add_32(total, p.a)
+    if Pair.make(0x0) -> q: Pair {
+        Transcript.fail_with(0x4)
+    } else -> why: @bit32 {
+        total = @i_add_32(total, why)
+    }
+
+    // `fail` passes a failure on.
+    if quarter(0x8) -> q: @bit32 {
+        total = @i_add_32(total, q)
+    }
+    if quarter(0x9) -> q: @bit32 {
+        Transcript.fail_with(0x5)
+    }
+
+    // A `loop if` runs until the call fails.
+    count: Countdown { left = 0x3 }
+    loop if count.next() -> n: @bit32 {
+        total = @i_add_32(total, n)
+    }
+
+    // `Optional` and `Result` can fail with `get`.
+    some: Optional[@bit32] = .Some(0x5)
+    five: @bit32 = some.get() else {
+        Transcript.fail_with(0x6)
+        return
+    }
+    total = @i_add_32(total, five)
+    none: Optional[@bit32] = .None
+    none.get() else {
+        total = @i_add_32(total, 0x4)
+        code = total
+        return
+    }
+    code = 0x7
+}
+
+test "failing_functions" {
+    Transcript.expect_code(program(), 0x2A)
+}

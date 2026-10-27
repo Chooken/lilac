@@ -1,0 +1,87 @@
+// A copyable local's last use by value moves it: no `@on_copy` (`+`)
+// runs, and it drops once, wherever it moved. A use with a later read, a
+// use in a loop that comes round again, and a use of a local a `ref` was
+// taken to still copy.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_copy: function (self) copy: Leaf {
+        print_char('+')
+        copy = Leaf { c = self.c }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+keep: function (leaf: Leaf) nothing {
+    print_char('k')
+}
+
+pass: function (leaf: Leaf) out: Leaf {
+    out = leaf
+}
+
+branch: function (flag: @bit8) nothing {
+    e: Leaf = Leaf { c = 'e' }
+    if flag {
+        keep(e)
+    }
+    print_char('|')
+}
+
+program: function () nothing {
+    {
+        a: Leaf = Leaf { c = 'a' }
+        keep(a)
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        b: Leaf = Leaf { c = 'b' }
+        keep(b)
+        keep(b)
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        c: Leaf = Leaf { c = 'c' }
+        r: ref Leaf = ref c
+        keep(c)
+        print_char(r.c)
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        d: Leaf = Leaf { c = 'd' }
+        i: @bit32 = 0x0
+        loop {
+            if @i_less_than_u_32(i, 0x2) {
+                keep(d)
+                i = @i_add_32(i, 0x1)
+            } else break
+        }
+        print_char('|')
+    }
+    print_char(0xA)
+    branch(0x1)
+    print_char(0xA)
+    branch(0x0)
+    print_char(0xA)
+    {
+        g: Leaf = Leaf { c = 'g' }
+        g = pass(g)
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "last_use_moves" {
+    program()
+    Transcript.expect_printed("ka|\n+kbkb|\n+kcc|c\n+kd+kd|d\nke|\n|e\n|g\n")
+}

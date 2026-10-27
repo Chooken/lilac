@@ -1,0 +1,14 @@
+
+inc: function (r: ref @bit32) nothing {
+    r = @i_add_32(r, 0x1)
+}
+
+program: function () code: @bit32 {
+    v: @bit32 = 0x3
+    inc(ref v)
+    code = v
+}
+
+test "ref_param_intrinsic" {
+    Transcript.expect_code(program(), 0x4)
+}

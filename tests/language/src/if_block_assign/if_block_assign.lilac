@@ -1,0 +1,11 @@
+
+program: function () code: @bit32 {
+    x: @bit8 = 0x1
+    y: @bit32 = 0x0
+    if x { y = 0x7 }
+    code = y
+}
+
+test "if_block_assign" {
+    Transcript.expect_code(program(), 0x7)
+}

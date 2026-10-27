@@ -1,0 +1,92 @@
+// Drops recurse: a structure's own hook runs before its fields, fields drop
+// in declaration order at every depth, a structure with no hook still drops
+// its fields, generic holders nest, an either drops only its live payload
+// (none for a variant without one), and `Optional` drops its payload.
+// Each hook ignores a zero value, so the output does not depend on zero
+// drops.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        if self.c == 0x0 {
+            return
+        }
+        print_char(self.c)
+    }
+}
+
+// No hook: dropped by glue alone.
+Mid: structure {
+    a: Leaf
+    b: Leaf
+}
+
+Top: structure {
+    m: Mid
+    c: Leaf
+
+    @on_drop: function (self) nothing {
+        if self.c.c == 0x0 {
+            return
+        }
+        print_char('T')
+    }
+}
+
+Holder[T]: structure {
+    value: T
+    live: Bool
+
+    @on_drop: function (self) nothing {
+        if self.live {
+            print_char('H')
+        }
+    }
+}
+
+Choice: either {
+    One: Top
+    Two: Leaf
+    Empty
+}
+
+top: function () value: Top {
+    value = Top { m = Mid { a = Leaf { c = 'a' }, b = Leaf { c = 'b' } }, c = Leaf { c = 'c' } }
+}
+
+program: function () nothing {
+    {
+        t: Top = top()
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        h: Holder[Holder[Top]] = Holder[Holder[Top]] {
+            value = Holder[Top] { value = top(), live = true },
+            live = true
+        }
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        one: Choice = .One(top())
+        two: Choice = .Two(Leaf { c = '2' })
+        empty: Choice = .Empty
+        print_char('|')
+    }
+    print_char(0xA)
+    {
+        o: Optional[Holder[Leaf]] = .Some(Holder[Leaf] { value = Leaf { c = 'o' }, live = true })
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "drop_nested" {
+    program()
+    Transcript.expect_printed("|Tabc\n|HHTabc\n|2Tabc\n|Ho\n")
+}

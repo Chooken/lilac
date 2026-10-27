@@ -1,0 +1,12 @@
+
+program: function () code: @bit32 {
+    i: @bit32 = 0x0
+    loop if @i_less_than_32(i, 0x5) {
+        i = @i_add_32(i, 0x1)
+    } else break
+    code = i
+}
+
+test "loop_if_else_break" {
+    Transcript.expect_code(program(), 0x5)
+}

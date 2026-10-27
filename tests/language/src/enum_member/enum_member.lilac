@@ -1,0 +1,21 @@
+
+Choice: either {
+    One
+    Two
+
+    code: function (self) c: @bit32 {
+        match self {
+            .One => c = 0x1
+            .Two => c = 0x2
+        }
+    }
+}
+
+program: function () code: @bit32 {
+    v: Choice = Choice.Two
+    code = v.code()
+}
+
+test "enum_member" {
+    Transcript.expect_code(program(), 0x2)
+}

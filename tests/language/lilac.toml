@@ -1,0 +1,12 @@
+# The language's tests, run by `lilac test tests/language` (and by cargo:
+# `crates/lilac-cli/tests/testing.rs`). Each folder of `src` is the
+# namespace of one program, checked by its `test`: what it prints (kept by
+# `Transcript`) and the code it computes.
+
+[project]
+name = "language"
+root = "src"
+
+[libraries]
+Standard = "../../lib/Standard"
+Transcript = "../libs/Transcript"

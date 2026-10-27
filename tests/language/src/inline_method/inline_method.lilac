@@ -1,0 +1,16 @@
+
+Num: structure {
+    data: @bit32
+
+    get: function (self) v: @bit32 => self.data
+    make: function (v: @bit32) out: Num => Num { data = v }
+}
+
+program: function () code: @bit32 {
+    a: Num = Num.make(0x7)
+    code = a.get()
+}
+
+test "inline_method" {
+    Transcript.expect_code(program(), 0x7)
+}

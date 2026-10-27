@@ -1,0 +1,18 @@
+
+Opt: either {
+    Some: @bit32
+    None
+}
+
+program: function () code: @bit32 {
+    code = 0x0
+    a: Opt = Opt.Some(0x4)
+    match a {
+        Opt.Some -> v: @bit32 { code = v }
+        Opt.None => Transcript.fail_with(0x1)
+    }
+}
+
+test "qualified_variant" {
+    Transcript.expect_code(program(), 0x4)
+}

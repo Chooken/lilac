@@ -1,0 +1,84 @@
+// A float literal is rounded once, from its exact decimal value, to the
+// type it takes, and all-literal arithmetic folds at that type's precision
+// (robustness plan phase 8). Each result is checked bit for bit, the
+// `@fbit128` ones through their two 64-bit halves (little-endian hosts).
+// Float negation flips the sign, so `-0.0` comes out of `0.0`.
+
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+Quad: structure {
+    value: @fbit128
+}
+
+Halves: structure {
+    low: @bit64
+    high: @bit64
+}
+
+// Whether `quad`'s bits are `high` then `low`.
+quad_is: function (quad: Quad, high: @bit64, low: @bit64) same: @bit8 {
+    halves: ref Halves = ref quad as ref unknown as ref Halves
+    same = 0x0
+    if halves.high == high {
+        if halves.low == low {
+            same = 0x1
+        }
+    }
+}
+
+negate64: function (value: @fbit64) out: @fbit64 {
+    out = @f_negate_64(value)
+}
+
+program: function () nothing {
+    // `@fbit16`: rounded once by the exact converter.
+    h: @fbit16 = 0.1
+    check(@fbit_to_bits_16(h) == 0x2E66, 0x1)
+    h = 65504.0
+    check(@fbit_to_bits_16(h) == 0x7BFF, 0x2)
+    h = 5.9604644775390625e-8
+    check(@fbit_to_bits_16(h) == 0x0001, 0x3)
+    // `2049` ties to the even `2048` at 11 bits.
+    h = 2048.0 + 1.0
+    check(@fbit_to_bits_16(h) == 0x6800, 0x4)
+
+    // `@fbit32`.
+    s: @fbit32 = 0.1
+    check(@fbit_to_bits_32(s) == 0x3DCCCCCD, 0x10)
+    s = 16777217.0
+    check(@fbit_to_bits_32(s) == 0x4B800000, 0x11)
+    // `1 + 0.4 ulp` is `1.0` at 24 bits before `0.2 ulp` is added.
+    s = 1.0000000476837158 + 0.00000002384185791015625
+    check(@fbit_to_bits_32(s) == 0x3F800000, 0x12)
+
+    // `@fbit64`.
+    d: @fbit64 = 0.1
+    check(@fbit_to_bits_64(d) == 0x3FB999999999999A, 0x20)
+    d = 0.1 + 0.2
+    check(@fbit_to_bits_64(d) == 0x3FD3333333333334, 0x21)
+    d = 2.2250738585072011e-308
+    check(@fbit_to_bits_64(d) == 0x000FFFFFFFFFFFFF, 0x22)
+
+    // `@fbit128`: 113 bits, never through an `@fbit64`.
+    q: Quad = Quad { value = 0.1 }
+    check(quad_is(q, 0x3FFB999999999999, 0x999999999999999A), 0x30)
+    q = Quad { value = 0.1 + 0.2 }
+    check(quad_is(q, 0x3FFD333333333333, 0x3333333333333334), 0x31)
+    q = Quad { value = 1.18973149535723176508575932662800702e4932 }
+    check(quad_is(q, 0x7FFEFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), 0x32)
+
+    // Negation is a sign flip, zeros included.
+    check(@fbit_to_bits_64(negate64(0.0)) == 0x8000000000000000, 0x41)
+    check(@fbit_to_bits_64(negate64(negate64(0.0))) == 0x0, 0x42)
+    check(@fbit_to_bits_64(negate64(1.5)) == 0xBFF8000000000000, 0x43)
+}
+
+test "float_literal_bits" {
+    program()
+}

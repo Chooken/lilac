@@ -1,0 +1,46 @@
+// Drop order: a by-value parameter is dropped by the callee, `return`
+// drops live locals, a structure drops itself before its fields (in
+// declaration order), and locals drop in reverse declaration order.
+
+using Transcript
+
+Inner: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+Outer: structure {
+    a: Inner
+    b: Inner
+
+    @on_drop: function (self) nothing {
+        print_char('O')
+    }
+}
+
+take: function (v: Inner) nothing {
+}
+
+early: function () nothing {
+    k: Inner = Inner { c = 'r' }
+    return
+}
+
+program: function () nothing {
+    {
+        x: Inner = Inner { c = 'x' }
+        o: Outer = Outer { a = Inner { c = 'a' }, b = Inner { c = 'b' } }
+        take(Inner { c = 'p' })
+        early()
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "drop_order" {
+    program()
+    Transcript.expect_printed("pr|Oabx\n")
+}

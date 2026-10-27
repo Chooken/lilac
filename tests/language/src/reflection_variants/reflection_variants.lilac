@@ -1,0 +1,55 @@
+// Where `@has_variant(T, Name, P)` holds and is not known true, a tag
+// `.Name` of `T` builds and matches as a stand-in variant with a `P`
+// payload, so a `T` with no variants checks too. Only the arm the test
+// picks is compiled.
+
+using Standard
+using Transcript
+
+Choice: either {
+    Some: Int
+    Empty
+}
+
+Plain: structure {
+    id: Int
+}
+
+answer[T]: function () Int => if @has_variant(T, Some, Int) then 1 else 0
+
+// Builds `.Some(n)` and reads it back where `T` has it.
+round_trip[T]: function (n: Int) found: Int {
+    found = 0
+    if @has_variant(T, Some, Int) {
+        value: T = .Some(n)
+        match value {
+            .Some -> got: Int {
+                found = got
+            }
+        } else {
+        }
+    }
+}
+
+// A variant with no payload, named through the type.
+empty[T]: function () found: Int {
+    found = 0
+    if @has_variant(T, Empty) {
+        value: T = T.Empty
+        match value {
+            .Empty => found = 1
+        } else {
+        }
+    }
+}
+
+program: function () nothing {
+    print($"{answer[Choice]()} {answer[Plain]()} {answer[Int]()} | ")
+    print($"{round_trip[Choice](7)} {round_trip[Plain](7)} | ")
+    print_line($"{empty[Choice]()} {empty[Plain]()}")
+}
+
+test "reflection_variants" {
+    program()
+    Transcript.expect_printed("1 0 0 | 7 0 | 1 0\n")
+}

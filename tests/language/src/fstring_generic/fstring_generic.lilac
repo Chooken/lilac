@@ -1,0 +1,61 @@
+// A generic type's `@format` formats its `T` through the `@format` for
+// `T`: the hole is checked for each instance.
+
+using Standard.Os as Os
+
+// Writes formatted text straight to standard output.
+Out: structure {
+    write: function (self, text: @format_args(Out)) nothing {
+        last: @bit_native = @format_args_holes(text)
+        index: @bit_native = 0x0
+        loop {
+            write_bytes(@format_args_piece(text, index))
+            if index == last { break }
+            @format_args_hole(text, index, self)
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
+
+// A `@bit32` in unsigned decimal.
+@format: function (value: ref @bit32, out: ref Out) nothing {
+    write_decimal(value)
+}
+
+write_decimal: function (value: @bit32) nothing {
+    if @i_greater_than_or_equal_u_32(value, 0xA) {
+        write_decimal(@i_div_u_32(value, 0xA))
+    }
+    write_digit(@i_mod_u_32(value, 0xA))
+}
+
+write_digit: function (digit: @bit32) nothing {
+    digits: ref unknown = @byte_buffer_ptr("0123456789abcdef") as ref unknown
+    at: @bit_native = @extend_zero(digit)
+    write_bytes(@byte_buffer_from(@ptr_add(digits, at) as ref @bit8, 0x1))
+}
+
+write_bytes: function (bytes: @byte_buffer) nothing {
+    Transcript.record(bytes)
+}
+
+
+Pair[T]: structure {
+    first: T
+    second: T
+
+    @format: function (self, out: ref Out) nothing {
+        out.write($"pair({self.first}, {self.second})")
+    }
+}
+
+program: function () nothing {
+    out: Out = Out {}
+    pair: Pair[@bit32] = Pair { first = 0x3, second = 0x4 }
+    out.write($"{pair}\n")
+}
+
+test "fstring_generic" {
+    program()
+    Transcript.expect_printed("pair(3, 4)\n")
+}

@@ -1,0 +1,30 @@
+// `==` on 2 MiB structures compares every byte (a `memcmp`, not one LLVM
+// integer, which caps at 2^23 bits).
+
+
+Page: structure {
+    bytes: @array(@bit8, 0x200000)
+}
+
+g: Page
+h: Page
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+program: function () nothing {
+    check(g == h, 0x1)
+    slot: ref @bit8 = @array_at(ref h.bytes, 0x1FFFFF)
+    slot = 0x1
+    if g == h {
+        Transcript.fail_with(0x2)
+    }
+}
+
+test "aggregate_equality_large" {
+    program()
+}

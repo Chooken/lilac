@@ -1,0 +1,4 @@
+// The language's tests: each folder here is one program's namespace, its
+// `program` run by its `test`. A program prints through `Transcript`
+// (in place of `Standard.Io`), which keeps the text for `expect_printed`,
+// and hands back the code it computes for `expect_code`.

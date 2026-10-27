@@ -42,7 +42,9 @@
 //! read from its `main.lilac`.
 //!
 //! Programs print with `Standard.Io` and set the exit code with
-//! `Standard.Process.exit`.
+//! `Standard.Process.exit`. A program that checks only those belongs in
+//! the test projects instead (`tests/language`, `tests/standard`: see
+//! `testing.rs`), which build once for all their programs.
 
 mod support;
 

@@ -1,0 +1,18 @@
+
+Maybe[T]: either {
+    Some: T
+    None
+}
+
+program: function () code: @bit32 {
+    code = 0x0
+    m: Maybe[@bit32] = Maybe[@bit32].Some(0x9)
+    match m {
+        .Some -> v: @bit32 { code = v }
+        .None => Transcript.fail_with(0x0)
+    }
+}
+
+test "generic_enum" {
+    Transcript.expect_code(program(), 0x9)
+}

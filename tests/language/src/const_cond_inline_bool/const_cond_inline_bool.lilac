@@ -1,0 +1,27 @@
+// `true` and `false` are inline constants, so an `if` on them is a constant
+// condition: only the live arm is lowered, and the dead arm's
+// `@compile_error` never exists.
+
+using Standard
+
+program: function () code: @bit32 {
+    if false {
+        @compile_error("dead: `false` is a constant condition")
+    }
+    if true and not_called() {
+        Transcript.fail_with(0x2)
+    }
+    if true {
+        code = 0x1
+    } else {
+        @compile_error("dead: `true` is a constant condition")
+    }
+}
+
+not_called: function () r: Bool {
+    r = false
+}
+
+test "const_cond_inline_bool" {
+    Transcript.expect_code(program(), 0x1)
+}

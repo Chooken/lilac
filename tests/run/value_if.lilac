@@ -1,9 +1,0 @@
-// expect-exit: 9
-
-using Standard.Process
-
-main: function () nothing {
-    c: @bit8 = 0x0
-    v: @bit32 = if c then 0x4 else 0x9
-    exit(v)
-}

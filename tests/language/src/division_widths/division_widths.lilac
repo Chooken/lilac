@@ -1,0 +1,67 @@
+// Division and remainder by a nonzero value read at run time, at every
+// width, signed and unsigned: the zero and overflow checks pass through,
+// and signed results truncate toward zero (the remainder takes the
+// dividend's sign).
+
+
+a8: @bit8 = 0x85
+b8: @bit8 = 0x6
+a16: @bit16 = 0x8005
+b16: @bit16 = 0x10
+a32: @bit32 = 0xFFFFFFF9
+b32: @bit32 = 0x2
+c32: @bit32 = 0x7
+d32: @bit32 = 0xFFFFFFFE
+a64: @bit64 = 0x8000000000000000
+b64: @bit64 = 0x2
+d64: @bit64 = 0xFFFFFFFFFFFFFFFE
+e64: @bit64 = 0x1
+a_native: @bit_native = 0x64
+b_native: @bit_native = 0x7
+
+check: function (ok: @bit8, code: @bit32) nothing {
+    if ok {
+    } else {
+        Transcript.fail_with(code)
+    }
+}
+
+program: function () nothing {
+    // 133 / 6 and -123 / 6.
+    check(@i_div_u_8(a8, b8) == 0x16, 0x1)
+    check(@i_mod_u_8(a8, b8) == 0x1, 0x2)
+    check(@i_div_8(a8, b8) == 0xEC, 0x3)
+    check(@i_mod_8(a8, b8) == 0xFD, 0x4)
+    // 32773 / 16 and -32763 / 16.
+    check(@i_div_u_16(a16, b16) == 0x800, 0x5)
+    check(@i_mod_u_16(a16, b16) == 0x5, 0x6)
+    check(@i_div_16(a16, b16) == 0xF801, 0x7)
+    check(@i_mod_16(a16, b16) == 0xFFF5, 0x8)
+    // 4294967289 / 2 and -7 / 2, then 7 / -2.
+    check(@i_div_u_32(a32, b32) == 0x7FFFFFFC, 0x9)
+    check(@i_mod_u_32(a32, b32) == 0x1, 0xA)
+    check(@i_div_32(a32, b32) == 0xFFFFFFFD, 0xB)
+    check(@i_mod_32(a32, b32) == 0xFFFFFFFF, 0xC)
+    check(@i_div_32(c32, d32) == 0xFFFFFFFD, 0xD)
+    check(@i_mod_32(c32, d32) == 0x1, 0xE)
+    check(@i_div_u_32(c32, d32) == 0x0, 0xF)
+    check(@i_mod_u_32(c32, d32) == 0x7, 0x10)
+    // `MIN` by 2, by -2 and by 1: only `MIN / -1` overflows.
+    check(@i_div_u_64(a64, b64) == 0x4000000000000000, 0x11)
+    check(@i_mod_u_64(a64, b64) == 0x0, 0x12)
+    check(@i_div_64(a64, b64) == 0xC000000000000000, 0x13)
+    check(@i_div_64(a64, d64) == 0x4000000000000000, 0x14)
+    check(@i_mod_64(a64, d64) == 0x0, 0x15)
+    check(@i_div_64(a64, e64) == 0x8000000000000000, 0x16)
+    check(@i_mod_64(a64, e64) == 0x0, 0x17)
+    // 100 / 7 and -100 / 7.
+    check(@i_div_u_native(a_native, b_native) == 0xE, 0x18)
+    check(@i_mod_u_native(a_native, b_native) == 0x2, 0x19)
+    minus: @bit_native = @i_negate_native(a_native)
+    check(@i_div_native(minus, b_native) == @i_negate_native(0xE), 0x1A)
+    check(@i_mod_native(minus, b_native) == @i_negate_native(0x2), 0x1B)
+}
+
+test "division_widths" {
+    program()
+}

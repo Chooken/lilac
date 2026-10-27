@@ -1,0 +1,38 @@
+// `ref` of an `export` is a C function: Lilac calls it through a local with
+// the C ABI (a wrapper structure passes and returns its field), and converts it
+// to `ref unknown` and back.
+
+
+Wrapped: structure {
+    value: @bit32
+}
+
+scale: export "lilac_scale" function (x: Wrapped, by: @bit32) result: Wrapped {
+    result = Wrapped { value = @i_mul_32(x.value, by) }
+}
+
+program: function () nothing {
+    f: ref export function (x: Wrapped, by: @bit32) result: Wrapped = ref scale
+    r: Wrapped = f(Wrapped { value = 0x6 }, 0x7)
+    if r.value == 0x2a {
+    } else {
+        Transcript.fail_with(0x1)
+    }
+    address: ref unknown = f as ref unknown
+    g: ref export function (x: Wrapped, by: @bit32) result: Wrapped = address as ref export function (x: Wrapped, by: @bit32) result: Wrapped
+    s: Wrapped = g(r, 0x2)
+    if s.value == 0x54 {
+    } else {
+        Transcript.fail_with(0x2)
+    }
+    // A direct call uses the Lilac ABI.
+    t: Wrapped = scale(s, 0x0)
+    if t.value == 0x0 {
+    } else {
+        Transcript.fail_with(0x3)
+    }
+}
+
+test "export_value" {
+    program()
+}

@@ -1,0 +1,33 @@
+// `Box.new` (an allocator's `create`) moves a copyable value into the
+// heap with no `@move`: each hand-off is the parameter's last use, so no
+// `@on_copy` (`+`) runs into the slot and no early drop of the parameter,
+// and the value drops once, with the box.
+
+using Standard
+using Transcript
+
+Leaf: structure {
+    c: @bit32
+
+    @on_copy: function (self) copy: Leaf {
+        print_char('+')
+        copy = Leaf { c = self.c }
+    }
+
+    @on_drop: function (self) nothing {
+        print_char(self.c)
+    }
+}
+
+program: function () nothing {
+    {
+        b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "box_moves_copyable" {
+    program()
+    Transcript.expect_printed("|x\n")
+}

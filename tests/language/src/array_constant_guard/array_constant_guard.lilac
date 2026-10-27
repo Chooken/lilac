@@ -1,0 +1,22 @@
+// A constant index past the end inside an arm a constant condition rules out
+// is never compiled, so it is not `E037`; the live arm runs.
+
+
+last: function (values: ref @array(@bit32, 4)) value: @bit32 {
+    if @i_greater_than_u_native(@array_len(values), 0x4) {
+        value = @array_at(values, 0x4)
+    } else {
+        value = @array_at(values, 0x3)
+    }
+}
+
+program: function () code: @bit32 {
+    values: @array(@bit32, 4) {}
+    slot: ref @bit32 = @array_at(ref values, 0x3)
+    slot = 0x3
+    code = last(ref values)
+}
+
+test "array_constant_guard" {
+    Transcript.expect_code(program(), 0x3)
+}

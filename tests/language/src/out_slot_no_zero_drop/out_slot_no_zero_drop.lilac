@@ -1,0 +1,33 @@
+// The first assignment of an out slot fills it: nothing was there, so
+// nothing drops. A zero drop would print `z`.
+
+using Transcript
+
+Tag: structure {
+    c: @bit32
+
+    @on_drop: function (self) nothing {
+        if self.c == 0x0 {
+            print_char('z')
+        } else {
+            print_char(self.c)
+        }
+    }
+}
+
+make: function () value: Tag {
+    value = Tag { c = 'x' }
+}
+
+program: function () nothing {
+    {
+        t: Tag = make()
+        print_char('|')
+    }
+    print_char(0xA)
+}
+
+test "out_slot_no_zero_drop" {
+    program()
+    Transcript.expect_printed("|x\n")
+}
