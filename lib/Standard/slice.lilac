@@ -124,3 +124,6 @@ Slice[T]: structure {
         out.write_bytes("]")
     }
 }
+
+@conversion: function (from: @byte_buffer) Slice[Byte] => Memory.byte_buffer_to_slice(from)
+@conversion: function (from: Slice[Byte]) @byte_buffer => Memory.slice_to_byte_buffer(from)

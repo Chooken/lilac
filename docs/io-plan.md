@@ -52,6 +52,12 @@ and become thin wrappers over that machinery instead of a parallel path.
    what exists (failure outs, function values, constant `Mutex` globals,
    `@discard`). If a phase finds it needs a compiler change, it stops
    and the change gets its own plan.
+8. **All blocking goes through `Os`.** Every read, write, wait and sleep
+   in `Io` calls `Standard.Os` (`read`, `write`, `wait_on_address`,
+   `sleep`, ...), and nothing makes a system call around it. Those are
+   the points where a later task scheduler can suspend a task instead
+   of the thread, so async I/O can come without changing code that uses
+   `Io` (`docs/threads-plan.md`, "Async I/O").
 
 ## The API
 

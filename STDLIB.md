@@ -498,9 +498,13 @@ exists, else a compile error):
 * **Threads:** `spawn(entry, argument) Result[Thread, Error]` runs
   `entry(argument)` (a `function (argument: ref unknown) nothing`) on a new
   thread, `join(thread) Optional[Error]` waits for it and frees it,
-  `yield_thread()`. Windows uses `CreateThread`, macOS `pthread_create`,
-  and native Linux its own `clone` thread (`@linux_thread_clone`) on a 1 MiB
-  mapping holding its stack and thread-local block. Each starts in the
+  `yield_thread()`, `available_parallelism()` (at least 1). Every thread's
+  stack is `default_stack_size` (8 MiB on 64-bit targets, 2 MiB on 32-bit,
+  reserved rather than committed) on every OS, or a size given to
+  `spawn_with(entry, argument, stack_size)`, with a guard below it so an
+  overflow crashes. Windows uses `CreateThread`, macOS `pthread_create`,
+  and native Linux its own `clone` thread (`@linux_thread_clone`) on a
+  mapping holding a guard, its stack and its thread-local block. Each starts in the
   `export` `thread_start` (C symbol `lilac_thread_start`), which every
   program mounting `Standard` keeps; under `--libc`, Linux
   uses `pthread_create`, and a native program that links a shared C

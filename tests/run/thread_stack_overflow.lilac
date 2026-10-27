@@ -1,0 +1,28 @@
+// A thread that overflows its stack runs into the guard below it and the
+// program stops, rather than writing over other memory or hanging in
+// `join`.
+// expect-exit: trap
+
+using Standard.Os as Os
+
+/// Never returns: 4 KiB of locals per frame until the stack runs out.
+forever: function (depth: @bit_native) sum: @bit_native {
+    frame: @array(@bit8, 4096) = @array(@bit8, 4096) {}
+    at: ref @array(@bit8, 4096) = ref frame
+    byte: ref @bit8 = @array_at(at, @bit_and_native(depth, 0xFFF))
+    byte = 0x1
+    sum = @i_add_native(forever(@i_add_native(depth, 0x1)), @extend_zero(byte))
+}
+
+overflow: function (argument: ref unknown) nothing {
+    sum: ref @bit_native = argument as ref @bit_native
+    sum = forever(0x0)
+}
+
+main: function () nothing {
+    sum: @bit_native = 0x0
+    thread: Os.Thread = Os.spawn(ref overflow, ref sum as ref unknown).get() else {
+        return
+    }
+    Os.join(thread)
+}

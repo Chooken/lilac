@@ -1,0 +1,64 @@
+using Standard
+using Standard.Collections
+using Standard.Testing
+using Standard.Heap
+
+test "Inlined Strings" {
+
+    inline_1: String =  $"0123456789012345678901"
+    inline_2: String =  $"01234567890123456789012"
+    heap_1: String =    $"012345678901234567890123"
+
+    expect(inline_1.is_inlined())
+    expect(inline_2.is_inlined())
+    expect(not heap_1.is_inlined())
+}
+
+test "String Equality" {
+
+    heap_1: String =    $"012345678901234567890123"
+    heap_2: String =    $"012345678901234567890123"
+
+    expect_equal[String](heap_1, heap_2)
+}
+
+test "String use in Map" {
+
+    map: Map[String, Int].new()
+
+    map.add($"Hello", 5)
+
+    value: Int = map.get($"Hello") else {
+        @panic("Map didn't find the string value.")
+    }
+
+    expect_equal[Int](value, 5)
+}
+
+test "Copied heap Strings are independent" {
+
+    original: String =  $"012345678901234567890123"
+    copy: String =      original
+
+    copy.add("456")
+
+    expect_text(original, "012345678901234567890123")
+    expect_text(copy, "012345678901234567890123456")
+}
+
+test "String new_using keeps its allocator" {
+
+    arena: ArenaAllocator = ArenaAllocator.new()
+    allocator: Allocator = Allocator.from[ArenaAllocator](ref arena)
+
+    text: String = String.new_using($"short", allocator)
+    expect(not text.is_inlined())
+
+    used: Int = arena.get_used()
+    expect(used > 0)
+
+    // A copy comes from the same allocator.
+    copy: String = text
+    expect(arena.get_used() > used)
+    expect_text(copy, "short")
+}

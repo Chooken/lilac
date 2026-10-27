@@ -3,9 +3,11 @@
 //! `WaitOnAddress` from `synchronization.lib` on Windows, `__ulock_wait2`
 //! from `libSystem` on macOS) and spin with `@spin_hint` (a `pause` or
 //! `yield` instruction, or nothing), so a missing stub or an unlowered
-//! hint shows up as a failed link.
+//! hint shows up as a failed link. Threads link the same way (`clone` and
+//! `mprotect`, `CreateThread`, the `pthread_attr_*` stack size).
 //!
-//! The program uses every lock, wait and wake once and is built for each
+//! The program uses every lock, wait and wake once, starts and joins a
+//! thread, and is built for each
 //! native target at `debug` and `release`, cross-linked with the
 //! development sysroot's `lld`. The run tests (`tests/run/mutex_*`,
 //! `condvar_queue`) run it on the host.
@@ -36,7 +38,18 @@ raw: Sync.RawMutex
 ready: Sync.Condvar
 word: @bit32
 
+work: function (argument: ref unknown) nothing {
+    Os.yield_thread()
+}
+
 main: function () nothing {
+    thread: Os.Thread = Os.spawn_with(ref work, ref word as ref unknown, Os.default_stack_size).get() else {
+        return
+    }
+    Os.join(thread)
+    if Os.available_parallelism() == 0x0 {
+        return
+    }
     guard: Sync.MutexGuard[Int] = counter.lock()
     guard.value() += 1
     again: Sync.MutexGuard[Int], timed_out: Bool = @move(guard).wait_timeout(ref ready, 0x1)

@@ -16,7 +16,7 @@ String: structure {
 
     new_using: function (format: Format, allocator: Heap.Allocator) result: String {
         result = String {
-            layout = .Inline(StringInline.new())
+            layout = .Heap(StringHeap.new_using(allocator))
         }
         result.formatter().write(format)
     }
@@ -24,13 +24,13 @@ String: structure {
     add: function (self, text: @byte_buffer) nothing {
         match self.layout {
             .Inline -> inline: ref StringInline { 
-                inline.add(text) else -> buffer: StringBuffer {
+                inline.add(text) else -> buffer: StringHeap {
                     self.layout = .Heap(buffer)
                     return
                 }
             }
 
-            .Heap -> buffer: ref StringBuffer {
+            .Heap -> buffer: ref StringHeap {
                 buffer.add(text)
             }
         }
@@ -39,6 +39,18 @@ String: structure {
     formatter: function (self) result: Formatter {
         result = Formatter.over[String](self, ref String.add)
     }
+
+    hash: function (self) @bit64 => Hash.Wyhash.hash(0x0, self.byte_slice())
+
+    is_inlined: function (self) Bool => match self.layout {
+        .Inline => true
+    } else false
+
+    @eql: function (lhs: String, rhs: String) Bool => Memory.equal_bytes(lhs.byte_slice(), rhs.byte_slice())
+
+    @eql: function (lhs: String, rhs: @byte_buffer) Bool => Memory.equal_bytes(lhs.byte_slice(), rhs)
+
+    @eql: function (lhs: @byte_buffer, rhs: String) Bool => Memory.equal_bytes(lhs, rhs.byte_slice())
 
     @conversion: function (from: Format) String => new(from)
 
@@ -53,7 +65,7 @@ String: structure {
                 ))
             }
 
-            .Heap -> buffer: ref StringBuffer {
+            .Heap -> buffer: ref StringHeap {
 
                 slice: Slice[Uint8] = buffer.list.get_slice()
 
@@ -64,11 +76,26 @@ String: structure {
             }
         }
     }
+
+    private {
+        byte_slice: function (self) slice: Slice[Byte] {
+            match self.layout {
+
+                .Inline -> inline: StringInline {
+                    slice = inline.get_slice()
+                }
+
+                .Heap -> heap: StringHeap {
+                    slice = heap.get_slice()
+                }
+            }
+        }
+    }
 }
 
 StringLayout: either {
     Inline: StringInline
-    Heap: StringBuffer
+    Heap: StringHeap
 }
 
 StringInline: structure {
@@ -85,7 +112,7 @@ StringInline: structure {
         }
     }
 
-    add: function (self, text: @byte_buffer) nothing else buffer: StringBuffer {
+    add: function (self, text: @byte_buffer) nothing else buffer: StringHeap {
 
         new_slice: Slice[Uint8] = Slice[Uint8].new(
             @byte_buffer_ptr(text) as ref unknown as ref Uint8, 
@@ -96,7 +123,7 @@ StringInline: structure {
 
         if SIZE < self.count as Int + count {
 
-            buffer = StringBuffer.new()
+            buffer = StringHeap.new()
 
             // Add existing.
             buffer.list.add_slice(
@@ -119,20 +146,25 @@ StringInline: structure {
         new_slice.move_to(buffer_slice, self.count)
         self.count += count.to_uint8_wrapping()
     }
+
+    get_slice: function (self) Slice[Byte] => Slice[Byte].new(
+        ref self.buffer as ref unknown as ref Byte,
+        self.count
+    )
 }
 
-StringBuffer: structure {
+StringHeap: structure {
 
     private {
-        list: List[Uint8]
+        list: List[Byte]
     }
 
-    new: function () result: StringBuffer {
+    new: function () result: StringHeap {
         result = new_using(Heap.get_default_allocator())
     }
 
-    new_using: function (allocator: Heap.Allocator) result: StringBuffer {
-        result = StringBuffer {
+    new_using: function (allocator: Heap.Allocator) result: StringHeap {
+        result = StringHeap {
             list = List[Uint8].new_using(allocator)
         }
     }
@@ -146,4 +178,6 @@ StringBuffer: structure {
 
         self.list.add_slice(new_slice)
     }
+
+    get_slice: function (self) Slice[Byte] => self.list.get_slice()
 }

@@ -39,6 +39,10 @@ set_tid_address: function (tidptr: ref unknown) @bit_native => @linux_syscall(ca
 
 sched_yield: function () @bit_native => @linux_syscall(call_number(24, 124), 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
 
+/// Fills `mask` with the processors thread `pid` (0: the caller) may run
+/// on, one bit each, and returns the number of bytes it wrote.
+sched_getaffinity: function (pid: @bit32, cpusetsize: @bit_native, mask: ref unknown) @bit_native => @linux_syscall(call_number(204, 123), @extend_sign(pid), cpusetsize, @ptr_to_address(mask), 0x0, 0x0, 0x0)
+
 /// `sigsetsize` is 8.
 rt_sigaction: function (signum: @bit32, act: ref unknown, oldact: ref unknown, sigsetsize: @bit_native) @bit_native => @linux_syscall(call_number(13, 134), @extend_sign(signum), @ptr_to_address(act), @ptr_to_address(oldact), sigsetsize, 0x0, 0x0)
 

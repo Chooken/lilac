@@ -15,6 +15,7 @@ exports:
                        _malloc, _memcmp, _memcpy, _memmove, _memset, _mkdir, _mmap, _mprotect,
                        _munmap, _nanosleep, _open, _os_unfair_lock_lock,
                        _os_unfair_lock_trylock, _os_unfair_lock_unlock, _pipe, _pread,
+                       _pthread_attr_destroy, _pthread_attr_init, _pthread_attr_setstacksize,
                        _pthread_create, _pthread_detach, _pthread_join, _pthread_self,
                        _pthread_threadid_np,
                        _pwrite, _read, _realloc, _rename, _rmdir, _sched_yield, _sysconf,

@@ -17,7 +17,7 @@
 
 /// The program's allocator, for `Box` and anything not given one. It is
 /// `None` until the runtime's `@entry` sets it (`Standard.Runtime` sets
-/// an arena); a program may assign another before anything allocates:
+/// a `GeneralAllocator`); a program may assign another before anything allocates:
 /// what one allocator gives must go back to the same one.
 default_allocator: Optional[Allocator] = .None
 

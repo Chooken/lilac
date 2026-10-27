@@ -13,7 +13,7 @@ Wyhash: structure {
         state: @array(@bit64, 3)
         total_length: Int
 
-        buffer: @array(@bit8, 48)
+        buffer: @array(Byte, 48)
         buffer_length: Int
     }
 
@@ -23,7 +23,7 @@ Wyhash: structure {
             b = 0x0
             state = @array(@bit64, 3) {}
             total_length = 0
-            buffer = @array(@bit8, 48) {}
+            buffer = @array(Byte, 48) {}
             buffer_length = 0
         }
 
@@ -32,10 +32,10 @@ Wyhash: structure {
         @array_at(ref hasher.state, 2) = @array_at(ref hasher.state, 0)
     }
 
-    update: function (self, input: Slice[@bit8]) nothing {
+    update: function (self, input: Slice[Byte]) nothing {
         self.total_length += input.count
 
-        buffer_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(self.buffer))
+        buffer_slice: Slice[Byte].new((ref self.buffer) as ref unknown as ref Byte, @array_len(self.buffer))
 
         if input.get_count() <= 48 - self.buffer_length {
             input.move_to(buffer_slice.slice(Range.of(self.buffer_length, self.buffer_length + input.get_count())), 0)
@@ -58,7 +58,7 @@ Wyhash: structure {
 
         }
 
-        remaining_slice: Slice[@bit8] = input.slice(Range.of(index, input.get_count()))
+        remaining_slice: Slice[Byte] = input.slice(Range.of(index, input.get_count()))
 
         if remaining_slice.get_count() < 16 and index >= 48 {
             rem: Int = 16 - remaining_slice.get_count()
@@ -71,14 +71,14 @@ Wyhash: structure {
 
     final: function (self) result: @bit64 {
 
-        input: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, self.buffer_length)
+        input: Slice[Byte].new((ref self.buffer) as ref unknown as ref Byte, self.buffer_length)
 
         new_hasher: Wyhash {
             a = self.a
             b = self.b
             state = self.state
             total_length = self.total_length
-            buffer = @array(@bit8, 48) {}
+            buffer = @array(Byte, 48) {}
             buffer_length = 0
         }
 
@@ -86,10 +86,10 @@ Wyhash: structure {
             new_hasher.small_key(input)
         } else {
             offset: Int = 0
-            scratch: @array(@bit8, 16) {}
-            scratch_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(scratch))
+            scratch: @array(Byte, 16) {}
+            scratch_slice: Slice[Byte].new((ref self.buffer) as ref unknown as ref Byte, @array_len(scratch))
 
-            buffer_slice: Slice[@bit8].new((ref self.buffer) as ref unknown as ref @bit8, @array_len(self.buffer))
+            buffer_slice: Slice[Byte].new((ref self.buffer) as ref unknown as ref Byte, @array_len(self.buffer))
 
             if self.buffer_length < 16 {
                 rem: Int = 16 - self.buffer_length
@@ -108,7 +108,7 @@ Wyhash: structure {
         result = new_hasher.final2()
     }
 
-    hash: function (seed: @bit64, input: Slice[@bit8]) result: @bit64 {
+    hash: function (seed: @bit64, input: Slice[Byte]) result: @bit64 {
 
         hasher: Wyhash.new(seed)
 
@@ -133,12 +133,12 @@ Wyhash: structure {
 
     private {
 
-        read[T]: function (input: ref @bit8) result: @bit64 {
+        read[T]: function (input: ref Byte) result: @bit64 {
             bits: T = input as ref unknown as ref T
             result = @extend_zero(bits)
         }
 
-        small_key: function (self, input: Slice[@bit8]) nothing {
+        small_key: function (self, input: Slice[Byte]) nothing {
 
             if input.get_count() >= 4 {
 
@@ -181,7 +181,7 @@ Wyhash: structure {
             }
         }
 
-        round: function (self, slice: Slice[@bit8]) nothing {
+        round: function (self, slice: Slice[Byte]) nothing {
 
             // I manually unwrapped the loop to get rid of array. as lilac can't do const arrays from my knowledge.
             
@@ -230,9 +230,9 @@ Wyhash: structure {
             )
         }
 
-        final1: function (self, input_lb: Slice[@bit8], start_position: Int) nothing {
+        final1: function (self, input_lb: Slice[Byte], start_position: Int) nothing {
 
-            input: Slice[@bit8] = input_lb.slice(Range.of(start_position, input_lb.count))
+            input: Slice[Byte] = input_lb.slice(Range.of(start_position, input_lb.count))
 
             index: Int = 0
 

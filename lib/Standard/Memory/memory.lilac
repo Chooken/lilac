@@ -32,9 +32,7 @@ Memory[T]: structure {
 
     get_count: function (self) Int => self.count
 
-    get_slice: function (self) slice: Slice[T] {
-        slice = Slice[T].new(self.ptr.data, self.count)
-    }
+    get_slice: function (self) Slice[T] => Slice[T].new(self.ptr.data, self.count)
 
     get_allocator: function (self) Heap.Allocator => self.ptr.allocator
 

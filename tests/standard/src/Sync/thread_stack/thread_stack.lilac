@@ -1,0 +1,80 @@
+// `Standard.Os` thread stacks: `spawn`'s stack is the same on every OS and
+// holds a few MiB of recursion (more than Windows' and macOS's own
+// defaults), `spawn_with` takes a size and refuses one that does not fit,
+// and `available_parallelism` is at least 1.
+
+using Standard
+using Standard.Testing
+using Standard.Os as Os
+
+/// Recurses `depth` times with 4 KiB of locals in each frame, and adds up
+/// a byte from each so no frame is optimized away: `depth + 1`.
+deep: function (depth: @bit_native) sum: @bit_native {
+    frame: @array(@bit8, 4096) = @array(@bit8, 4096) {}
+    at: ref @array(@bit8, 4096) = ref frame
+    byte: ref @bit8 = @array_at(at, @bit_and_native(depth, 0xFFF))
+    byte = 0x1
+    if depth == 0x0 {
+        sum = @extend_zero(byte)
+    } else {
+        sum = @i_add_native(deep(@i_sub_native(depth, 0x1)), @extend_zero(byte))
+    }
+}
+
+/// About 2 MiB of stack, writing the sum to `argument`.
+run_deep: function (argument: ref unknown) nothing {
+    sum: ref @bit_native = argument as ref @bit_native
+    sum = deep(0x200)
+}
+
+run_shallow: function (argument: ref unknown) nothing {
+    sum: ref @bit_native = argument as ref @bit_native
+    sum = deep(0x4)
+}
+
+test "a thread's stack holds deep recursion" {
+    sum: @bit_native = 0x0
+    thread: Os.Thread = Os.spawn(ref run_deep, ref sum as ref unknown).get() else {
+        expect_with(false, "spawn failed")
+        return
+    }
+    match Os.join(thread) {
+        .Some => expect_with(false, "join failed")
+    }
+    expect(sum == 0x201)
+}
+
+test "spawn_with takes a small stack" {
+    sum: @bit_native = 0x0
+    // Rounded up to the 128 KiB smallest.
+    thread: Os.Thread = Os.spawn_with(ref run_shallow, ref sum as ref unknown, 0x0).get() else {
+        expect_with(false, "spawn_with failed")
+        return
+    }
+    match Os.join(thread) {
+        .Some => expect_with(false, "join failed")
+    }
+    expect(sum == 0x5)
+}
+
+test "spawn_with refuses a size that does not fit" {
+    sum: @bit_native = 0x0
+    refused: Bool = false
+    match Os.spawn_with(ref run_shallow, ref sum as ref unknown, @bit_not_native(0x0)) {
+        .Ok -> thread: Os.Thread {
+            Os.join(thread)
+        }
+        .Error -> why: Os.Error {
+            match why {
+                .InvalidInput => {
+                    refused = true
+                }
+            }
+        }
+    }
+    expect(refused)
+}
+
+test "available_parallelism is at least 1" {
+    expect(@i_greater_than_or_equal_u_native(Os.available_parallelism(), 0x1))
+}
