@@ -23,7 +23,7 @@ use crate::calls::Called;
 use crate::literals::is_foldable_literal;
 use crate::paths::{path_expr, path_tail, shadowed_alias_note};
 use crate::reflect::{stand_in_field, Assumption};
-use crate::sigs::BINARY_HOOKS;
+use crate::sigs::{BINARY_HOOKS, EQL_HOOK, NEGATE_HOOK};
 use crate::{Checker, Env, Requirement};
 
 /// The trailing `name` token inside a member-access span.
@@ -1472,6 +1472,8 @@ impl Checker<'_> {
             BinOp::EqEq => return self.check_equality(fcx, lhs, rhs, span, "=="),
             BinOp::NotEq => {
                 let eq = self.check_equality(fcx, lhs, rhs, span, "!=");
+                // An `@eql` hook's out (a `Bool`) is a condition here.
+                let eq = self.cond_of(eq, "!=");
                 if eq.ty.is_error() {
                     return eq;
                 }
@@ -1494,8 +1496,8 @@ impl Checker<'_> {
         self.operator_call(op, left, right, span, None)
     }
 
-    /// `left op right` through the operator's hook, found by exact
-    /// signature (`E043` at `label` when there is none). `compound` is the
+    /// `left op right` through the operator's hook ([`Self::operator_hook`];
+    /// `E043` at `span` when there is none). `compound` is the
     /// compound assignment's operator span, which the error labels instead.
     pub(crate) fn operator_call(
         &mut self,
@@ -1506,51 +1508,118 @@ impl Checker<'_> {
         compound: Option<Span>,
     ) -> HirExpr {
         let hook = hook_name(op);
-        let params = [left.ty, right.ty];
+        match self.operator_hook(hook, [left, right], span) {
+            Ok(call) => call,
+            Err([left, right]) => self.no_operator_hook(op, &left, &right, span, compound),
+        }
+    }
+
+    /// The call of the operator hook `hook` on `operands`, found by their
+    /// exact types: each parameter takes its operand by value, or by `ref`,
+    /// which borrows it as a method borrows its receiver. The operands come
+    /// back when no overload takes them.
+    pub(crate) fn operator_hook<const N: usize>(
+        &mut self,
+        hook: &str,
+        operands: [HirExpr; N],
+        span: Span,
+    ) -> Result<HirExpr, [HirExpr; N]> {
+        let types = operands.each_ref().map(|operand| operand.ty);
         let found = self.find_hook(hook, span, |sig| {
-            sig.params == params && sig.returns.len() == 1
+            sig.returns.len() == 1
+                && sig.params.len() == types.len()
+                && sig
+                    .params
+                    .iter()
+                    .zip(&types)
+                    .all(|(param, ty)| param.id == ty.id && (param.is_ref || !ty.is_ref))
         });
         let Some((callee, sig)) = found else {
-            let mut diagnostic = Diagnostic::error(
-                codes::E043,
-                format!(
-                    "no {hook} for ({}, {})",
-                    self.show_id(left.ty.id),
-                    self.show_id(right.ty.id)
-                ),
-            )
-            .label(compound.unwrap_or(span), true, "no exact operator overload");
-            if compound.is_some() {
-                let symbol = op_symbol(op);
-                diagnostic = diagnostic.note(format!("`x {symbol}= e` is `x = x {symbol} e`"));
-            }
-            if left.ty == right.ty && !left.ty.is_ref {
-                if let Some(help) = raw_operator_help(hook, left.ty.id) {
-                    diagnostic = diagnostic.help(help);
-                }
-            }
-            self.emit_requirement(
-                diagnostic,
-                Requirement::Mismatch {
-                    expected_ref: false,
-                },
-                &[left.ty.id, right.ty.id],
-            );
-            return HirExpr::poison(span);
+            return Err(operands);
         };
-        HirExpr {
+        let args = sig
+            .params
+            .iter()
+            .zip(operands)
+            .map(|(param, operand)| operand_arg(*param, operand))
+            .collect();
+        Ok(HirExpr {
             ty: sig.returns[0],
             span,
             kind: HirExprKind::Call {
                 callee,
-                args: vec![left, right],
+                args,
                 rest: Vec::new(),
             },
+        })
+    }
+
+    /// `E043` for `left op right` with no hook that takes them.
+    fn no_operator_hook(
+        &mut self,
+        op: BinOp,
+        left: &HirExpr,
+        right: &HirExpr,
+        span: Span,
+        compound: Option<Span>,
+    ) -> HirExpr {
+        let hook = hook_name(op);
+        let mut diagnostic = Diagnostic::error(
+            codes::E043,
+            format!(
+                "no {hook} for ({}, {})",
+                self.show_id(left.ty.id),
+                self.show_id(right.ty.id)
+            ),
+        )
+        .label(compound.unwrap_or(span), true, "no exact operator overload");
+        if compound.is_some() {
+            let symbol = op_symbol(op);
+            diagnostic = diagnostic.note(format!("`x {symbol}= e` is `x = x {symbol} e`"));
+        }
+        if left.ty == right.ty && !left.ty.is_ref {
+            if let Some(help) = raw_operator_help(hook, left.ty.id) {
+                diagnostic = diagnostic.help(help);
+            }
+        }
+        self.emit_requirement(
+            diagnostic,
+            Requirement::Mismatch {
+                expected_ref: false,
+            },
+            &[left.ty.id, right.ty.id],
+        );
+        HirExpr::poison(span)
+    }
+
+    /// `-operand` (`@negate(operand)`): the `@negate` hook of the operand's
+    /// type, as [`Self::operator_hook`] finds it (`E043` when none).
+    pub(crate) fn negate_call(&mut self, operand: HirExpr, span: Span) -> HirExpr {
+        let operand = self.auto_deref(operand);
+        match self.operator_hook(NEGATE_HOOK, [operand], span) {
+            Ok(call) => call,
+            Err([operand]) => {
+                let id = operand.ty.id;
+                let ty = self.show_id(id);
+                let diagnostic = Diagnostic::error(codes::E043, format!("no @negate for {ty}"))
+                    .label(span, true, "no exact operator overload")
+                    .help(format!(
+                        "`-` needs a `@negate: function (value: {ty}) {ty}` hook"
+                    ));
+                self.emit_requirement(
+                    diagnostic,
+                    Requirement::Mismatch {
+                        expected_ref: false,
+                    },
+                    &[id],
+                );
+                HirExpr::poison(span)
+            }
         }
     }
 
-    /// `lhs == rhs` (or `!=`, named by `what`): strict bit-equality of two
-    /// values of one type, never a hook.
+    /// `lhs == rhs` (or `!=`, named by `what`): the `@eql` hook of the
+    /// exact operand types, else bit equality of two values of one type.
     fn check_equality(
         &mut self,
         fcx: &mut FnCx,
@@ -1564,16 +1633,35 @@ impl Checker<'_> {
             return HirExpr::poison(span);
         }
         let (left, right) = (self.auto_deref(left), self.auto_deref(right));
+        match self.operator_hook(EQL_HOOK, [left, right], span) {
+            Ok(call) => call,
+            Err([left, right]) => self.bit_equality(left, right, span, what),
+        }
+    }
+
+    /// `left == right` as bits (`==` without an `@eql` hook, and
+    /// `@mem_eql`, named by `what`): both sides need one type.
+    pub(crate) fn bit_equality(
+        &mut self,
+        left: HirExpr,
+        right: HirExpr,
+        span: Span,
+        what: &str,
+    ) -> HirExpr {
         if left.ty.id != right.ty.id {
             let (l, r) = (self.show_id(left.ty.id), self.show_id(right.ty.id));
-            self.diags.emit(
-                Diagnostic::error(
-                    codes::E010,
-                    format!("mismatched types: `{what}` needs identical types, found {l} and {r}"),
-                )
-                .label(left.span, false, format!("left side `{l}` here"))
-                .label(right.span, true, format!("right side `{r}` here")),
-            );
+            let mut diagnostic = Diagnostic::error(
+                codes::E010,
+                format!("mismatched types: `{what}` needs identical types, found {l} and {r}"),
+            )
+            .label(left.span, false, format!("left side `{l}` here"))
+            .label(right.span, true, format!("right side `{r}` here"));
+            if what != "@mem_eql" {
+                diagnostic = diagnostic.help(format!(
+                    "to compare them, define `@eql: function (lhs: {l}, rhs: {r}) @bit8`"
+                ));
+            }
+            self.diags.emit(diagnostic);
             return HirExpr::poison(span);
         }
         HirExpr {
@@ -2147,6 +2235,24 @@ impl Checker<'_> {
         }
         stack.pop();
         done.insert(def);
+    }
+}
+
+/// `operand` as an operator hook's `param`: a borrow of it for a `ref`
+/// parameter (unless it is one already), else the value itself.
+fn operand_arg(param: TypeRef, operand: HirExpr) -> HirExpr {
+    if !param.is_ref || operand.ty.is_ref {
+        return operand;
+    }
+    let HirExpr { ty, span, kind } = operand;
+    match kind {
+        // `auto_deref` read it through a `ref`: pass that on.
+        HirExprKind::Deref(inner) => *inner,
+        kind => HirExpr {
+            ty: TypeRef::reference(ty.id),
+            span,
+            kind: HirExprKind::RefOf(Box::new(HirExpr { ty, span, kind })),
+        },
     }
 }
 

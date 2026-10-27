@@ -33,11 +33,61 @@ impl Parser {
             }
             return self.parse_conditional_item(diags);
         }
+        if self.at_test() {
+            if in_object {
+                return Err(Self::err(
+                    diags,
+                    self.peek().span,
+                    "a `test` is declared only at the top level of a file",
+                ));
+            }
+            let doc = self.peek().doc.as_deref().cloned();
+            let mut item = self.parse_test(diags)?;
+            item.doc = doc;
+            return Ok(item);
+        }
         self.failed_header = None;
         let doc = self.peek().doc.as_deref().cloned();
         let mut item = self.parse_declaration(diags, in_object)?;
         item.doc = doc;
         Ok(item)
+    }
+
+    /// Whether a test starts here: `test` is a keyword only before a
+    /// string, so it stays an ordinary name (`test: function …`).
+    pub(crate) fn at_test(&self) -> bool {
+        let token = self.peek();
+        token.kind == TokenKind::Ident
+            && token.text == "test"
+            && self.peek_at(1).kind == TokenKind::StringLit
+    }
+
+    /// `test "name" { … }` (the doc comment is the caller's).
+    fn parse_test(&mut self, diags: &mut lilac_error::Diags) -> Result<Item, ErrorGuaranteed> {
+        let keyword = self.bump();
+        let literal = self.bump();
+        let name = match String::from_utf8(literal.bytes) {
+            Ok(name) if !name.trim().is_empty() && !name.contains(char::is_control) => name,
+            _ => {
+                return Err(diags.emit(
+                    Diagnostic::error(
+                        codes::E001,
+                        "a test's name is text on one line: not empty, no control characters",
+                    )
+                    .label(literal.span, true, String::new()),
+                ));
+            }
+        };
+        let body = self.parse_block(diags)?;
+        Ok(Item {
+            doc: None,
+            span: join_spans(keyword.span, body.span),
+            name,
+            kind: ItemKind::Test {
+                name_span: literal.span,
+                body,
+            },
+        })
     }
 
     /// `name: …`, an item, member or field (the doc comment is the caller's).

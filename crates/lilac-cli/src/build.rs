@@ -114,25 +114,38 @@ fn absolute(path: &Path) -> PathBuf {
 }
 
 pub fn cmd_build(args: &[String]) -> ExitCode {
+    match build(args, false) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
+}
+
+/// A linked executable.
+pub struct Built {
+    /// Where it is.
+    pub exe: PathBuf,
+    /// The compile's session (a test build's [`Session::tests`]).
+    pub session: Session,
+    /// The reporter the build printed through.
+    pub reporter: Reporter,
+}
+
+/// Compiles and links the program `args` name; with `testing`, its test
+/// executable (`<name>-test`), whose entry runs the tests.
+pub fn build(args: &[String], testing: bool) -> Result<Built, ExitCode> {
     let mut overrides = Overrides::default();
     let (output, rest) = match parse_build_flags(args, &mut overrides) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}\n{}", crate::HELP_HINT);
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
-    let mut common = match crate::parse_common(&rest, false) {
-        Ok(common) => common,
-        Err(code) => return code,
-    };
+    let mut common = crate::parse_common(&rest, false)?;
     common.overrides.build_dir = overrides.build_dir;
     common.overrides.linker = overrides.linker;
     common.overrides.link_args = overrides.link_args;
-    let (settings, input) = match common.configure() {
-        Ok(configured) => configured,
-        Err(code) => return code,
-    };
+    let (settings, input) = common.configure()?;
     let verbosity = common
         .verbosity(Some(Verbosity::Normal))
         .unwrap_or(Verbosity::Normal);
@@ -144,17 +157,21 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         session.target = session.host;
     }
     let triple = session.target.to_triple();
+    let command = if testing { "test" } else { "build" };
     let Some(info) = session.target.link_info() else {
-        eprintln!("error: `lilac build` cannot link executables for `{triple}`");
-        return ExitCode::from(2);
+        eprintln!("error: `lilac {command}` cannot link executables for `{triple}`");
+        return Err(ExitCode::from(2));
     };
     let reporter = Reporter::new(verbosity, session.opts.color);
 
     let is_dir = crate::is_dir(&input);
-    let name = settings
+    let mut name = settings
         .name
         .clone()
         .unwrap_or_else(|| program_name(&input, is_dir));
+    if testing {
+        name.push_str("-test");
+    }
     let mode = session.optimize.name();
     let cross = (session.target != session.host).then_some(triple.as_str());
     let build_dir = settings.build_dir.clone().unwrap_or_else(|| {
@@ -180,25 +197,23 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
         &format!("{name} ({}) [{mode}, {triple}]", common.file),
     );
     session.require_entry = true;
+    session.testing = testing;
     if settings.libc.is_none() {
         session.entry = Entry::Native;
     }
     let hook = reporter.clone();
     session.progress = Some(Progress::new(move |stage, event| hook.stage(stage, event)));
     let (result, dump_err) =
-        match crate::compile_input(&mut session, &input, common.dump_lir.as_deref()) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
+        crate::compile_input(&mut session, &input, common.dump_lir.as_deref())?;
     reporter.end();
     eprint!("{}", session.render_diagnostics());
     let Ok(module) = result else {
         could_not_compile(&session, &reporter, &name);
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     };
     if let Some(err) = &dump_err {
         eprintln!("{err}");
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     }
 
     let link = Link {
@@ -209,11 +224,15 @@ pub fn cmd_build(args: &[String]) -> ExitCode {
     };
     if let Err(err) = emit_and_link(&module, &session, &link, &reporter) {
         reporter.error(&err);
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     }
     let shown = std::fs::canonicalize(&paths.exe).unwrap_or_else(|_| paths.exe.clone());
     reporter.finished(mode, &display_path(&shown));
-    ExitCode::SUCCESS
+    Ok(Built {
+        exe: paths.exe,
+        session,
+        reporter,
+    })
 }
 
 /// The closing line of a build that did not compile (human output only).
@@ -346,7 +365,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// A path for messages, without Windows' `\\?\` verbatim prefix.
-fn display_path(path: &Path) -> String {
+pub fn display_path(path: &Path) -> String {
     let text = path.display().to_string();
     text.strip_prefix(r"\\?\")
         .map_or(text.clone(), str::to_owned)

@@ -32,6 +32,7 @@ mod reflect;
 mod sigs;
 mod sink;
 mod suggest;
+mod testing;
 mod types;
 
 #[cfg(test)]

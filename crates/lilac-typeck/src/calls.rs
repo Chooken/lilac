@@ -17,6 +17,7 @@ use crate::body::{local_expr, FnCx};
 use crate::expr::{tail_span, Receiver};
 use crate::literals::is_foldable_literal;
 use crate::paths::shadowed_alias_note;
+use crate::sigs::NEGATE_HOOK;
 use crate::{Checker, Hook, Requirement};
 
 /// A checked call.
@@ -177,10 +178,22 @@ impl Checker<'_> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<Called, ErrorGuaranteed> {
-        if name == "@negate" && generic_args.is_empty() && args.len() == 1 {
+        // `-x` is `@negate(x)`, an operator either way.
+        if name == NEGATE_HOOK && generic_args.is_empty() && args.len() == 1 {
             if let Some(folded) = self.fold_negative(&args[0], span, expected) {
                 return Ok(Called::Value(folded));
             }
+            let operand = self.check_expr(fcx, &args[0], expected);
+            if operand.ty.is_error() {
+                // `check_expr` reported it.
+                return Err(self.diags.already_reported());
+            }
+            let value = self.negate_call(operand, span);
+            if value.ty.is_error() {
+                // `negate_call` reported `E043`.
+                return Err(self.diags.already_reported());
+            }
+            return Ok(Called::Value(value));
         }
         if let Some(local) = fcx.lookup(name) {
             self.record_local_use(fcx, local, name_span);
@@ -1306,6 +1319,25 @@ impl Checker<'_> {
                 self.check_memory(fcx, intrinsic, name, args, span, expected)
             }
             Intrinsic::Panic => self.check_panic(fcx, name, args, span),
+            Intrinsic::TestCount | Intrinsic::TestName | Intrinsic::TestFunction => {
+                self.check_test_intrinsic(fcx, intrinsic, name, args, span)
+            }
+            Intrinsic::MemEql => {
+                let arity = self.intrinsic_arity(name, 2, args.len(), span);
+                self.callee(fcx, args, arity)?;
+                let (left, right) = self.check_sides(fcx, &args[0], &args[1]);
+                if left.ty.is_error() || right.ty.is_error() {
+                    // `check_expr` reported it.
+                    return Err(self.diags.already_reported());
+                }
+                let (left, right) = (self.auto_deref(left), self.auto_deref(right));
+                let value = self.bit_equality(left, right, span, name);
+                if value.ty.is_error() {
+                    // `bit_equality` reported the mismatch.
+                    return Err(self.diags.already_reported());
+                }
+                Ok(Called::Value(value))
+            }
             Intrinsic::CompileError => {
                 self.intrinsic_arity(name, 1, args.len(), span)?;
                 let Expr::Str(msg, msg_span) = &args[0] else {

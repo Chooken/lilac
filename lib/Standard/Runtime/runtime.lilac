@@ -1,24 +1,32 @@
 // The platform hooks a Lilac executable needs: the compiler's entry stub
-// calls `@entry` and then `@exit(0)`, and its panic handler writes through
-// `@compiler_print` and then calls `@exit(101)`. Mounting Standard supplies
-// all three.
+// calls `@entry` (in a test build `@test_entry`) and then `@exit(0)`, and
+// its panic handler writes through `@compiler_print` and then calls
+// `@exit(101)`. Mounting Standard supplies them all.
 
 using Standard.Os as Os
 using Standard.Io as Io
 using Standard.Heap as Heap
+using Standard.Testing as Testing
 
-/// Records the process arguments in `Standard.Os`, sets
-/// `Heap.default_allocator` to a general allocator that lives as long as the program,
-/// then runs the program: its root-namespace `main`.
+/// Records the process arguments (`record_arguments`), sets
+/// `Heap.default_allocator` to a general allocator that lives as long as
+/// the program, then runs the program: its root-namespace `main`.
 @entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
-    Os.argument_count = count
-    Os.argument_vector = arguments
-    Os.environment_vector = environment
-
+    record_arguments(count, arguments, environment)
     general_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.new()
     Heap.default_allocator = .Some(general_allocator.allocator())
 
     main()
+}
+
+/// Sets the process up as `@entry` does, then runs the program's tests
+/// (`Testing.run`).
+@test_entry: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
+    record_arguments(count, arguments, environment)
+    general_allocator: Heap.GeneralAllocator = Heap.GeneralAllocator.new()
+    Heap.default_allocator = .Some(general_allocator.allocator())
+
+    Testing.run()
 }
 
 @exit: function (code: @bit32) nothing {
@@ -29,4 +37,13 @@ using Standard.Heap as Heap
 /// `Format`, so `@panic($"index {i} past {n}")` formats.
 @compiler_print: function (text: Format) nothing {
     Io.print_error(text)
+}
+
+private {
+    /// Records the process arguments in `Standard.Os`.
+    record_arguments: function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing {
+        Os.argument_count = count
+        Os.argument_vector = arguments
+        Os.environment_vector = environment
+    }
 }

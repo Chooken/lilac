@@ -1,0 +1,60 @@
+// The conversion matrix (math plan phase 2): `as` only where every value
+// converts exactly, `to_X()` that fails out of range, `to_X_wrapping()`,
+// a float's saturating `to_X_truncated()` (NaN is 0) and an integer's
+// `to_floatN_rounded()`.
+
+using Standard
+using Standard.Testing
+
+zero: Float64 = 0.0
+
+test "exact" {
+    // Widening, and unsigned into a wider signed.
+    small: Int8 = -100
+    byte: Uint8 = 200
+    float: Float32 = 3.25
+    expect_text($"{small as Int16} {byte as Int16} {small as Int64} {(small as Float64).to_int8_truncated()} {(float as Float64).to_int8_truncated()}", "-100 200 -100 -100 3")
+}
+
+test "checked: in range or failing" {
+    a: Int8 = (127 as Int16).to_int8() else { @panic("127 is not an Int8") }
+    b: Uint8 = (255 as Int16).to_uint8() else { @panic("255 is not a Uint8") }
+    c: Int8 = (-128 as Int16).to_int8() else { @panic("-128 is not an Int8") }
+    expect_text($"{a} {b} {c}", "127 255 -128")
+    if (128 as Int16).to_int8() -> v: Int8 { @panic($"128 became {v}") }
+    if (256 as Int16).to_uint8() -> v: Uint8 { @panic($"256 became {v}") }
+    if (-1 as Int16).to_uint8() -> v: Uint8 { @panic($"-1 became {v}") }
+    if (200 as Uint8).to_int8() -> v: Int8 { @panic($"200 became {v}") }
+}
+
+test "wrapping: the low bits" {
+    wide: Int32 = 300
+    byte: Uint8 = 200
+    expect_text($"{wide.to_uint8_wrapping()} {byte.to_int8_wrapping()} {wide.wrapping_negate().to_uint16_wrapping()} {Uint64.MAX.to_int_wrapping()}", "44 -56 65236 -1")
+}
+
+test "truncating: toward zero, saturating, NaN is 0" {
+    third: Float64 = 3.9
+    huge: Float64 = 1e300
+    nan: Float64 = zero / zero
+    expect_text($"{third.to_int32_truncated()} {(-third).to_int32_truncated()} {huge.to_int32_truncated()} {(-huge).to_int32_truncated()} {nan.to_int32_truncated()} {huge.to_uint8_truncated()} {(-huge).to_uint8_truncated()}", "3 -3 2147483647 -2147483648 0 255 0")
+}
+
+test "checked from a float: integral and in range" {
+    three: Float64 = 3.0
+    largest: Float16 = 65504.0
+    value: Int32 = three.to_int32() else { @panic("3.0 is not an Int32") }
+    top: Uint16 = largest.to_uint16() else { @panic("65504.0 is not a Uint16") }
+    expect_text($"{value} {top}", "3 65504")
+    if (3.9 as Float64).to_int32() -> v: Int32 { @panic($"3.9 became {v}") }
+    if (1e300 as Float64).to_int64() -> v: Int64 { @panic($"1e300 became {v}") }
+    if (zero / zero).to_int8() -> v: Int8 { @panic($"NaN became {v}") }
+    if (largest as Float32 * 2.0).to_uint16() -> v: Uint16 { @panic($"131008.0 became {v}") }
+}
+
+test "rounding to nearest, ties to even" {
+    odd: Int32 = 16777217
+    odd64: Int64 = 9007199254740993
+    over: Int32 = 2049
+    expect_text($"{odd.to_float32_rounded().to_int32_truncated()} {odd64.to_float64_rounded().to_int64_truncated()} {over.to_float16_rounded().to_int32_truncated()}", "16777216 9007199254740992 2048")
+}

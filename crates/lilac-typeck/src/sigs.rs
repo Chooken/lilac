@@ -13,7 +13,7 @@ use lilac_ty::{Builtin, FuncSig, TypeId, TypeRef};
 
 use crate::{Checker, Hook};
 
-/// Operator hooks: the binary ones and `@negate`.
+/// The binary operators' hooks (`+` to `>=`).
 pub(crate) const BINARY_HOOKS: [&str; 9] = [
     "@add",
     "@sub",
@@ -25,6 +25,25 @@ pub(crate) const BINARY_HOOKS: [&str; 9] = [
     "@less_than_or_equal",
     "@greater_than_or_equal",
 ];
+
+/// `==`'s hook. Unlike the other operators', a pair of one type without
+/// one compares bits (`@mem_eql`).
+pub(crate) const EQL_HOOK: &str = "@eql";
+
+/// `-x`'s hook.
+pub(crate) const NEGATE_HOOK: &str = "@negate";
+
+/// Whether `name` is an operator's hook: its parameters take the
+/// operands, each by value or by `ref` (a borrow), and an overload is
+/// known by its operand types alone.
+pub(crate) fn is_operator_hook(name: &str) -> bool {
+    BINARY_HOOKS.contains(&name) || name == EQL_HOOK || name == NEGATE_HOOK
+}
+
+/// Whether two operator hooks take the same operand types (`ref` or not).
+fn same_operands(a: &FuncSig, b: &FuncSig) -> bool {
+    a.params.len() == b.params.len() && a.params.iter().zip(&b.params).all(|(a, b)| a.id == b.id)
+}
 
 impl Checker<'_> {
     /// Resolves the declared signature of a function or hook: a template whose
@@ -145,8 +164,14 @@ impl Checker<'_> {
         let overloads = self.hooks.entry(name.clone()).or_default();
         // A platform hook has one definition, whatever its signature.
         let platform = is_platform_hook(&name);
+        let operator = is_operator_hook(&name);
         if let Some(previous) = overloads.iter().find(|hook| {
-            platform || (hook.sig.params == sig.params && hook.sig.returns == sig.returns)
+            platform
+                || if operator {
+                    same_operands(&hook.sig, &sig)
+                } else {
+                    hook.sig.params == sig.params && hook.sig.returns == sig.returns
+                }
         }) {
             let previous = previous.span;
             let diagnostic = if platform {
@@ -158,9 +183,18 @@ impl Checker<'_> {
                 .label(previous, false, "first defined here")
                 .note("a program has one of each platform hook; mount at most one runtime library")
             } else {
-                Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
-                    .label(span, true, "redefined here")
-                    .label(previous, false, "first defined here")
+                let diagnostic =
+                    Diagnostic::error(codes::E020, format!("duplicate definition of `{name}`"))
+                        .label(span, true, "redefined here")
+                        .label(previous, false, "first defined here");
+                if operator {
+                    diagnostic.note(
+                        "an operator's overloads differ in their operand types; \
+                         taking one by `ref` or returning another type does not count",
+                    )
+                } else {
+                    diagnostic
+                }
             };
             self.diags.emit(diagnostic);
             return;
@@ -172,7 +206,8 @@ impl Checker<'_> {
         });
     }
 
-    /// Checks the fixed shapes of `@conversion` and the RAII hooks.
+    /// Checks the fixed shapes of `@conversion`, `@format`, `@eql` and the
+    /// RAII hooks.
     fn hook_shape_ok(&mut self, name: &str, key: &FuncKey, sig: &FuncSig) -> bool {
         let def = self.res.def(key.def);
         let span = def.span;
@@ -192,33 +227,10 @@ impl Checker<'_> {
         if is_platform_hook(name) {
             return self.platform_hook_shape_ok(name, key, sig);
         }
+        if let Some((msg, label)) = signature_shape_problem(name, sig) {
+            return fail(self, msg, label);
+        }
         match name {
-            "@conversion" => {
-                let shaped = sig.params.len() == 1
-                    && sig.returns.len() == 1
-                    && by_value(&sig.params[0])
-                    && by_value(&sig.returns[0]);
-                if !shaped {
-                    return fail(
-                        self,
-                        "`@conversion` needs exactly one by-value parameter and one by-value return",
-                        "bad conversion shape",
-                    );
-                }
-            }
-            "@format" => {
-                let shaped = sig.params.len() == 2
-                    && sig.returns.is_empty()
-                    && sig.params.iter().all(|param| param.is_ref)
-                    && sig.params[0].id != Builtin::Unknown.id();
-                if !shaped {
-                    return fail(
-                        self,
-                        "`@format` needs exactly two parameters, `ref T` (not `unknown`) and `ref W`, and no returns",
-                        "bad `@format` shape",
-                    );
-                }
-            }
             "@init" => {
                 self.diags.emit(
                     Diagnostic::error(codes::E056, "there is no `@init` hook")
@@ -274,8 +286,9 @@ impl Checker<'_> {
     }
 
     /// Checks a platform hook: top-level, with its fixed signature
-    /// (`@entry()`, `@exit(@bit32)`, `@compiler_print(M)`, where `M` is
-    /// `@byte_buffer` or an `@format_args(W)`, no returns), else `E022`.
+    /// (`@entry(count, arguments, environment)`, `@test_entry` alike,
+    /// `@exit(@bit32)`, `@compiler_print(M)`, where `M` is `@byte_buffer`
+    /// or an `@format_args(W)`, no returns), else `E022`.
     fn platform_hook_shape_ok(&mut self, name: &str, key: &FuncKey, sig: &FuncSig) -> bool {
         let def = self.res.def(key.def);
         let span = def.span;
@@ -287,6 +300,15 @@ impl Checker<'_> {
         } else {
             // Each parameter: its builtin type, and whether it is a `ref`.
             let (expected, want): (&[(Builtin, bool)], _) = match name {
+                "@test_entry" => (
+                    &[
+                        (Builtin::BitNative, false),
+                        (Builtin::Unknown, true),
+                        (Builtin::Unknown, true),
+                    ],
+                    "`@test_entry: function(count: @bit_native, arguments: ref unknown, \
+                     environment: ref unknown) nothing`",
+                ),
                 "@entry" => (
                     &[
                         (Builtin::BitNative, false),
@@ -344,6 +366,45 @@ impl Checker<'_> {
     pub(crate) fn overloads(&self, name: &str) -> Vec<Hook> {
         self.hooks.get(name).cloned().unwrap_or_default()
     }
+}
+
+/// What is wrong with the signature of a `@conversion`, `@format` or
+/// `@eql` hook (the shapes that need no owner): the message and label.
+fn signature_shape_problem(name: &str, sig: &FuncSig) -> Option<(&'static str, &'static str)> {
+    let by_value = |ty: &TypeRef| !ty.is_ref;
+    let (shaped, problem) = match name {
+        "@conversion" => (
+            sig.params.len() == 1
+                && sig.returns.len() == 1
+                && by_value(&sig.params[0])
+                && by_value(&sig.returns[0]),
+            (
+                "`@conversion` needs exactly one by-value parameter and one by-value return",
+                "bad conversion shape",
+            ),
+        ),
+        "@format" => (
+            sig.params.len() == 2
+                && sig.returns.is_empty()
+                && sig.params.iter().all(|param| param.is_ref)
+                && sig.params[0].id != Builtin::Unknown.id(),
+            (
+                "`@format` needs exactly two parameters, `ref T` (not `unknown`) and `ref W`, and no returns",
+                "bad `@format` shape",
+            ),
+        ),
+        // A misshapen `@eql` would never bind, and `==` would compare bits
+        // without a word.
+        EQL_HOOK => (
+            sig.params.len() == 2 && sig.returns.len() == 1,
+            (
+                "`@eql` needs exactly two parameters and one return",
+                "bad `@eql` shape",
+            ),
+        ),
+        _ => return None,
+    };
+    (!shaped).then_some(problem)
 }
 
 /// The leading `len(name)` bytes of a slot span (slots begin at their name).

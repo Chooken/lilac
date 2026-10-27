@@ -569,6 +569,15 @@ pub enum Intrinsic {
     IsCopyable,
     /// `@is_same(T, U)`: whether `T` and `U` are one type.
     IsSame,
+    /// `@mem_eql(left, right)`: bit equality of two values of one type,
+    /// what `==` does without an `@eql` hook (a `@bit8`).
+    MemEql,
+    /// `@test_count()`: how many tests `lilac test` runs, a constant.
+    TestCount,
+    /// `@test_name(index)`: the name of test `index`.
+    TestName,
+    /// `@test_function(index)`: test `index`, a `ref function ()`.
+    TestFunction,
 }
 
 /// A parameter or result type in an intrinsic signature.
@@ -609,6 +618,11 @@ pub enum Slot {
     MemberName,
     /// A hook's `@`-name (`@has_hook`).
     HookName,
+    /// `ref function ()` (`@test_function`).
+    TestFunction,
+    /// A `@bit_native` that picks one of the program's tests
+    /// (`@test_name`, `@test_function`).
+    TestIndex,
 }
 
 impl Slot {
@@ -645,6 +659,8 @@ impl std::fmt::Display for Slot {
             Self::Message => f.write_str("Message"),
             Self::MemberName => f.write_str("name"),
             Self::HookName => f.write_str("@hook"),
+            Self::TestFunction => f.write_str("ref function ()"),
+            Self::TestIndex => f.write_str("@bit_native"),
         }
     }
 }
@@ -676,7 +692,7 @@ impl Signature {
 
 impl Intrinsic {
     /// The intrinsics with a fixed name.
-    const PLAIN: [(&'static str, Self); 46] = [
+    const PLAIN: [(&'static str, Self); 50] = [
         ("@truncate", Self::Truncate),
         ("@extend_zero", Self::ExtendZero),
         ("@extend_sign", Self::ExtendSign),
@@ -723,6 +739,10 @@ impl Intrinsic {
         ("@has_hook", Self::HasHook),
         ("@is_copyable", Self::IsCopyable),
         ("@is_same", Self::IsSame),
+        ("@mem_eql", Self::MemEql),
+        ("@test_count", Self::TestCount),
+        ("@test_name", Self::TestName),
+        ("@test_function", Self::TestFunction),
     ];
 
     /// Whether this is a memory builtin: `@move`, `@write`, `@read`, `@drop`,
@@ -920,8 +940,10 @@ impl Intrinsic {
     /// a type or literal operand (`@size_of`, `@align_of`, `@array_len`,
     /// `@needs_drop`, `@compile_error`), any array (`@array_at`), any format
     /// (the `@format_args_*` consumers), a place or `ref` of any type (the
-    /// memory builtins), the panic hook's message (`@panic`), or types and
-    /// member names (the reflection tests). Their
+    /// memory builtins), two values of any one type (`@mem_eql`), the panic
+    /// hook's message (`@panic`), types and member names (the reflection
+    /// tests), or the program's tests (`@test_count`, `@test_name`,
+    /// `@test_function`). Their
     /// signatures only describe the operands, with slots that are not
     /// [`Slot::is_checked`].
     #[must_use]
@@ -939,6 +961,10 @@ impl Intrinsic {
                     | Self::FormatArgsHoles
                     | Self::FormatArgsPiece
                     | Self::FormatArgsHole
+                    | Self::MemEql
+                    | Self::TestCount
+                    | Self::TestName
+                    | Self::TestFunction
             )
     }
 
@@ -993,7 +1019,14 @@ impl Intrinsic {
             Self::CompileError => sig(&[("message", StringLiteral)], None),
             Self::Panic => sig(&[("message", Message)], None),
             Self::Move => sig(&[("place", Slot::Param("T"))], Some(Slot::Param("T"))),
+            Self::MemEql => sig(
+                &[("left", Slot::Param("T")), ("right", Slot::Param("T"))],
+                Some(Builtin(Ty::Bit8)),
+            ),
             Self::Discard => sig(&[("place", Slot::Param("T"))], None),
+            Self::TestCount => sig(&[], Some(native)),
+            Self::TestName => sig(&[("index", Slot::TestIndex)], Some(Builtin(Ty::ByteBuffer))),
+            Self::TestFunction => sig(&[("index", Slot::TestIndex)], Some(Slot::TestFunction)),
             Self::HasField | Self::HasMethod | Self::HasFunction | Self::HasConstant => sig(
                 &[("type", Type), ("name", Slot::MemberName), ("member", Type)],
                 Some(Builtin(Ty::Bit8)),
@@ -1260,6 +1293,18 @@ impl Intrinsic {
             }
             Self::IsCopyable => "Whether a by-value use of a `type` copies: a constant `@bit8`.",
             Self::IsSame => "Whether `first` and `second` are one type: a constant `@bit8`.",
+            Self::MemEql => {
+                "Whether `left` and `right`, two values of one type, have the same bits: what `==` does for a type with no `@eql` hook. Neither is moved or copied."
+            }
+            Self::TestCount => {
+                "How many tests `lilac test` runs: the project's `test` blocks, not a mounted library's. A constant `@bit_native`."
+            }
+            Self::TestName => {
+                "The name of test `index` (below `@test_count()`), as its `test \"name\"` writes it; traps past the last."
+            }
+            Self::TestFunction => {
+                "Test `index` (below `@test_count()`) as a function to call; traps past the last."
+            }
         };
         text.to_owned()
     }
@@ -1493,6 +1538,11 @@ mod tests {
         assert_eq!(Intrinsic::lookup("@needs_drop"), Some(Intrinsic::NeedsDrop));
         assert_eq!(Intrinsic::lookup("@has_method"), Some(Intrinsic::HasMethod));
         assert_eq!(Intrinsic::lookup("@is_same"), Some(Intrinsic::IsSame));
+        assert_eq!(Intrinsic::lookup("@mem_eql"), Some(Intrinsic::MemEql));
+        assert_eq!(
+            Intrinsic::lookup("@test_function"),
+            Some(Intrinsic::TestFunction)
+        );
         assert_eq!(Intrinsic::lookup("@has_member"), None);
     }
 

@@ -397,6 +397,12 @@ impl Lower<'_> {
         if func.body.is_none() {
             return extern_symbol(self.res, func.key.def);
         }
+        // A test's name is text, so its symbol is its place in the list:
+        // `.root.test.0`, `A.B.test.2`.
+        if let Some(index) = self.res.test_index(func.key.def) {
+            let prefix = namespace_prefix(self.res.namespace_path(def.ns), "");
+            return format!("{prefix}.test.{index}");
+        }
         let is_hook = matches!(def.kind, DefKind::Hook(_));
         if let (true, None, Some(symbol)) = (
             is_hook,

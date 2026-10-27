@@ -1,0 +1,10 @@
+# The tests of `Standard`, run by `lilac test tests/standard` (and by
+# cargo: `crates/lilac-cli/tests/testing.rs`). Each folder of `src` is a
+# namespace of tests.
+
+[project]
+name = "standard"
+root = "src"
+
+[libraries]
+Standard = "../../lib/Standard"

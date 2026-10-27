@@ -371,7 +371,7 @@ An expression is constant when it is one of:
 | a `@builtin` constant (`@builtin.Target.os`) | the target or build fact it states |
 | a structure or variant literal | if every field / the payload is constant |
 | `value.field` | the field of a constant structure |
-| `a == b` | bit equality of two constant values of one type (integers, structures, either variants with their payloads) |
+| `a == b` | bit equality of two constant values of one type (integers, structures, either variants with their payloads), or its `@eql` hook's `=>` body |
 | `a != b` | the negation of `a == b` |
 | `not c` | `0x1` when a constant `c` is zero, else `0x0` |
 | `if c then x else y` | the arm a constant `c` selects (the other is not evaluated) |
@@ -559,6 +559,10 @@ Numeric intrinsic names are width-suffixed: `_8`/`_16`/`_32`/`_64` select the `@
 | **`@has_hook`** | `(@name, function (P...) O)` | Whether the hook `@name` has an overload of exactly that function type (an operator, `@format`, `@conversion`, ...), as a `@bit8` constant. |
 | **`@is_copyable`** | `(T)` or `(value)` | Whether a by-value use of a `T` copies (§1), as a `@bit8` constant. |
 | **`@is_same`** | `(T, U)` | Whether `T` and `U` are one type (aliases are their types; `ref` counts), as a `@bit8` constant. |
+| **`@mem_eql`** | `(left: T, right: T): @bit8` | Bit equality of two values of one type: what `==` does for a type with no `@eql` hook, whatever hook it has (so an `@eql` body can use it). Neither side is moved or copied; different types are `E010`. |
+| **`@test_count`** | `(): @bit_native` | How many tests the program runs (its own `test` blocks, not a mounted library's; [Tests](#tests)), as a constant. |
+| **`@test_name`** | `(index: @bit_native): @byte_buffer` | The name of test `index`, counting from 0 in declaration order. Past the last traps. |
+| **`@test_function`** | `(index: @bit_native): ref function () nothing` | Test `index`'s body as a function value. Past the last traps. |
 
 Atomics are sequentially consistent unless the name carries an ordering
 before the width: `@atomic_<op>_<order>_W` and `@atomic_fence_<order>`, with
@@ -1649,7 +1653,9 @@ without them only the explicit intrinsic form works:
 }
 ```
 
-**Equality (`==`) is strictly bit-equality and cannot be overridden.** Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an either's payload area past its live payload, since a variant is built whole in a zeroed structure), bitwise comparison is 100% deterministic. Custom comparison logic must be implemented as regular named methods to prevent hidden runtime complexity. `!=` is its negation, `not (lhs == rhs)`, and is just as strict. On floating-point values, `==` compares the IEEE 754 bit patterns directly: `0.0 == -0.0` is `0x0` (their sign bits differ) and two `NaN`s with identical bits are `0x1` (`Standard`'s float types provide `equals` for IEEE equality, `approximately_equals` for a tolerance and `total_compare` for `totalOrder` sorting).
+**Equality (`==`) is `@eql(lhs, rhs)`, and bit-equality without one.** Like the other operators, `lhs == rhs` calls the `@eql` overload of exactly the operand types (two parameters and one out, else `E022`), but unlike them a miss is not `E043`: two values of one type are compared bit for bit (`@mem_eql`), and values of different types are `E010`. Because universal zero-initialization guarantees that unused memory and struct padding are always zeroed (and an either's payload area past its live payload, since a variant is built whole in a zeroed structure), bitwise comparison is 100% deterministic. An `@eql` body that means bit equality writes `@mem_eql(lhs, rhs)`, since `lhs == rhs` there calls itself. Bit-equality reads both sides in place; an `@eql` takes each by value or by `ref`, like any operator hook (below). `!=` is its negation, `not (lhs == rhs)`: an `@eql` out that is not a `@bit8` needs a `@conversion` to `@bit8`, as a condition does. On floating-point values (which have no `@eql` in `Standard`), `==` compares the IEEE 754 bit patterns directly: `0.0 == -0.0` is `0x0` (their sign bits differ) and two `NaN`s with identical bits are `0x1` (`Standard`'s float types provide `equals` for IEEE equality, `approximately_equals` for a tolerance and `total_compare` for `totalOrder` sorting).
+
+**An operator hook takes each operand by value or by `ref`.** Each parameter of an operator's hook (every one in the table below that is not built in) says how it takes its operand: `lhs: T` reads it (a copy, or a move on a last use, §1), and `lhs: ref T` borrows it, as a method borrows its receiver, so `a == b` on a type whose copies run a hook (a `List`) copies nothing when its `@eql` takes `ref`s. A temporary operand is borrowed in place, and an operand that is already a `ref` is passed on. A borrow lasts the rest of the operand's scope, as a method call's does, so a later implicit move of it is `E079`. Overloads are told apart by their operand types alone: two of one name whose parameters differ only in `ref` (or whose outs differ) are `E020`. A `=>` hook that takes a `ref` does not fold as a constant (a constant has no address), so `Standard`'s numeric hooks take their operands by value. Only the operator borrows: a direct `@add(a, b)` call is an ordinary call, whose `ref` parameter takes a `ref` argument (`@add(ref a, ref b)`); `-x` is `@negate(x)`, the operator, either way.
 
 List of operators:
 | op | function |
@@ -1664,7 +1670,7 @@ List of operators:
 | **`lhs <= rhs`** | `@less_than_or_equal(lhs, rhs) output` |
 | **`lhs >= rhs`** | `@greater_than_or_equal(lhs, rhs) output` |
 | **`-value`** | `@negate(value) output` |
-| **`lhs == rhs`** | built in: bit-equality, `@bit8` |
+| **`lhs == rhs`** | `@eql(lhs, rhs) output`, else bit-equality, `@bit8` |
 | **`lhs != rhs`** | built in: `not (lhs == rhs)` |
 | **`not value`** | built in: `@bit8` 1 when `value` is 0, else 0 |
 | **`x op= rhs`** | `x = x op rhs` for `+=`, `-=`, `*=`, `/=`, `%=` |
@@ -1717,8 +1723,9 @@ Resolution order (normative):
    No transitive chains in v1 (`u32 -> u16 -> u8` does not chain); chain requests
    are future work with a cycle guard.
 3. **Operators and direct hook calls match exactly.** `a + b` requires an exact
-   `@add(typeof(a), typeof(b))` overload; no operand conversion is attempted, so
-   a miss is `E043` naming the exact pair. A direct `@hook(a)` call likewise
+   `@add(typeof(a), typeof(b))` overload (each parameter by value or by `ref`);
+   no operand conversion is attempted, so a miss is `E043` naming the exact
+   pair. A direct `@hook(a)` call likewise
    requires an exact overload: a non-`ref` argument whose type is not the
    parameter type is `E010`. Numeric literals and tags (`.None`, `.Some(x)`)
    still take the parameter/operand type (literal typing, not conversion), so
@@ -1726,7 +1733,7 @@ Resolution order (normative):
    (let/assign/return) and ordinary function-call arguments
    still convert as in step 2.
 
-`==` never converts: equality is always direct bit-equality.
+`==` never converts: its `@eql` binds exactly, and without one it is direct bit-equality.
 
 ### Explicit casts with `as`
 
@@ -1822,7 +1829,7 @@ Buffer: structure {
 
 ### Platform hooks
 
-Three top-level hooks connect a program to its platform. The compiler calls
+Four top-level hooks connect a program to its platform. The compiler calls
 them; a runtime library (normally `Standard`, through `Standard.Runtime`)
 defines them:
 
@@ -1831,6 +1838,7 @@ defines them:
 | **`@entry`** | `function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing` | By the process entry stub, with the process's argument count and argument and environment vectors (C's `argc`, `argv` and `envp`; zero and null on native Windows, whose command line comes from `GetCommandLineW`). It runs the program. |
 | **`@exit`** | `function (code: @bit32) nothing` | After `@entry` returns (code 0), and by the panic handler (code 101). It must end the process. |
 | **`@compiler_print`** | `function (text: M) nothing`, where `M` is `@byte_buffer` or an `@format_args(W)` | By the panic handler, for the message and each stack-trace line, each as an `M`. `@panic` takes an `M` too. |
+| **`@test_entry`** | `function (count: @bit_native, arguments: ref unknown, environment: ref unknown) nothing` | In place of `@entry` when the program is built to run its tests (`lilac test`, [Tests](#tests)). It runs them. |
 
 - **The entry stub** (`.lilac.start`, called from the C `main` under
   `--libc` and from the native entry otherwise) makes no OS call: it calls
@@ -1857,9 +1865,11 @@ defines them:
   runtime library may enter the program under any name.
 - **Each hook is defined at most once** in the program (`E034`, whatever
   the signatures), at the top level, with exactly its signature (`E022`). Hooks are unit-global and carry
-  no namespace prefix; they are emitted as `.lilac.entry`, `.lilac.exit` and
+  no namespace prefix; they are emitted as `.lilac.entry`, `.lilac.test_entry`, `.lilac.exit` and
   `.lilac.compiler_print`, and user code may call them (`@exit(0x1)`).
-- **An executable** (`lilac build`) needs all three: a missing one is
+- **An executable** (`lilac build`) needs `@entry`, `@exit` and
+  `@compiler_print`, and a test executable (`lilac test`) `@test_entry`
+  in place of `@entry`: a missing one is
   `E033`, and an `@entry` that names a missing `main` is `E032`. The stub
   roots reachability.
 - **Anything else** (`check`, `emit-*`, and static libraries later) needs
@@ -1867,6 +1877,36 @@ defines them:
   is left out silently. A missing `@exit` or `@compiler_print` is declared as
   an external symbol under its fixed name, so the panics of code linked into
   another program resolve against that program's hooks.
+
+### Tests
+
+A `test` item is a named block of code that `lilac test` runs:
+
+```lilac
+using Standard.Testing
+
+test "adding two numbers" {
+    x: Int32 = 1
+    expect_equal[Int32](x + 2, 3)
+}
+```
+
+- **A test is a top-level item** of its namespace: `test`, a string
+  literal naming it, then a block. Its body is checked like a function's
+  with no parameters and no outs, and nothing can name it (it is not a
+  value or a member of its namespace). The name is not empty, not blank
+  and holds no control character (`E001`); two tests of one namespace may
+  not share a name (`E020`). A test inside a type's body is `E001`.
+- **A test passes when its body returns** and fails when it panics. A
+  panic is an abort, so a test runner runs each test in its own process.
+- **`lilac build` leaves tests out**, and `lilac test` builds the program
+  with `@test_entry` in place of `@entry` (§8, "Platform hooks"), with no
+  `main` required. The runtime library's `@test_entry` runs them through
+  `@test_count`, `@test_name` and `@test_function` (§3), which count only
+  the program's own tests in declaration order, not those of mounted
+  libraries. `Standard.Runtime`'s calls `Standard.Testing.run`, which
+  runs the test the environment variable `LILAC_TEST` gives by index, or
+  every test when it is unset.
 
 ## 9. Foreign functions and async
 

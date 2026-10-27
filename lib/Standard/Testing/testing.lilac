@@ -1,0 +1,123 @@
+// Running tests. `lilac test` builds the program's `test "name" { … }`
+// blocks into an executable whose `@test_entry` (`Standard.Runtime`)
+// calls `run`, and runs it once per test, naming the test in the
+// environment variable `LILAC_TEST`. A test passes when it returns and
+// fails when it panics: the expectations here panic with what went wrong,
+// and `@panic(message)` fails a test outright.
+
+using Standard.Os as Os
+using Standard.Io as Io
+
+/// Runs the tests: only the one `LILAC_TEST` names (its index, counting
+/// from 0), or, when it is not set, every test in order, each reported on
+/// its own line. A failing test ends the run (a panic is an abort), so
+/// `lilac test`, which runs each test alone, is the way to run all of them.
+run: function () nothing {
+    count: @bit_native = @test_count()
+    text: @array(@bit8, 32) = @array(@bit8, 32) {}
+    found: Optional[@bit_native] = Os.environment_variable("LILAC_TEST", (ref text) as ref unknown as ref @bit8, @array_len(text))
+    match found {
+        .Some -> length: @bit_native {
+            index: @bit_native = test_index((ref text) as ref unknown as ref @bit8, length, count)
+            test: ref function () nothing = @test_function(index)
+            test()
+            return
+        }
+    }
+    index: @bit_native = 0x0
+    loop if @i_less_than_u_native(index, count) {
+        Io.print($"test \"{@test_name(index)}\" ... ")
+        test: ref function () nothing = @test_function(index)
+        test()
+        Io.print_line("ok")
+        index = @i_add_native(index, 0x1)
+    }
+    Io.print_line($"{count} passed")
+}
+
+/// Fails the test unless `condition` holds.
+expect: function (condition: Bool) nothing {
+    if not condition {
+        @panic("expectation failed")
+    }
+}
+
+/// Fails the test with `message` unless `condition` holds.
+expect_with: function (condition: Bool, message: Format) nothing {
+    if not condition {
+        @panic(message)
+    }
+}
+
+/// Fails the test unless `actual == expected`, showing both: a `T` needs
+/// an `@format`.
+expect_equal[T]: function (actual: T, expected: T) nothing {
+    if actual != expected {
+        @panic($"expected {expected}, found {actual}")
+    }
+}
+
+/// Fails the test unless `actual` writes exactly the text `expected`
+/// (`expect_text($"{x} {y}", "1 2")`), showing both. The text is compared
+/// as it is written, so nothing is allocated.
+expect_text: function (actual: Format, expected: @byte_buffer) nothing {
+    matcher: TextMatcher = TextMatcher { expected = expected, at = 0x0, same = true }
+    out: Formatter = Formatter.over[TextMatcher](ref matcher, ref TextMatcher.compare)
+    out.write(actual)
+    if not matcher.same or matcher.at != @byte_buffer_len(expected) {
+        @panic($"expected `{expected}`, found `{actual}`")
+    }
+}
+
+private {
+    /// Compares written text with `expected`, from `at` on.
+    TextMatcher: structure {
+        expected: @byte_buffer
+        at: @bit_native
+        same: Bool
+
+        /// The sink: matches `bytes` against the next part of `expected`.
+        compare: function (self, bytes: @byte_buffer) nothing {
+            length: @bit_native = @byte_buffer_len(bytes)
+            if not self.same {
+                return
+            }
+            if @i_greater_than_u_native(@i_add_native(self.at, length), @byte_buffer_len(self.expected)) {
+                self.same = false
+                return
+            }
+            text: ref @bit8 = @byte_buffer_ptr(bytes)
+            wanted: ref @bit8 = @byte_buffer_ptr(self.expected)
+            index: @bit_native = 0x0
+            loop if @i_less_than_u_native(index, length) {
+                if @load_u8(text, index) != @load_u8(wanted, @i_add_native(self.at, index)) {
+                    self.same = false
+                    return
+                }
+                index = @i_add_native(index, 0x1)
+            }
+            self.at = @i_add_native(self.at, length)
+        }
+    }
+
+    /// The decimal index `LILAC_TEST` holds (`length` bytes at `text`),
+    /// which must name a test.
+    test_index: function (text: ref @bit8, length: @bit_native, count: @bit_native) index: @bit_native {
+        index = 0x0
+        if length == 0x0 or @i_greater_than_u_native(length, 0x13) {
+            @panic("`LILAC_TEST` is not a test's index")
+        }
+        at: @bit_native = 0x0
+        loop if @i_less_than_u_native(at, length) {
+            digit: @bit8 = @i_sub_8(@load_u8(text, at), 0x30)
+            if @i_greater_than_u_8(digit, 0x9) {
+                @panic("`LILAC_TEST` is not a test's index")
+            }
+            index = @i_add_native(@i_mul_native(index, 0xA), @extend_zero(digit))
+            at = @i_add_native(at, 0x1)
+        }
+        if not @i_less_than_u_native(index, count) {
+            @panic($"`LILAC_TEST` names test {index}, but there are {count}")
+        }
+    }
+}

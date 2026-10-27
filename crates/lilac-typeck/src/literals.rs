@@ -11,6 +11,7 @@ use lilac_hir::{HirExpr, HirExprKind, HirPattern};
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeRef};
 
+use crate::sigs::NEGATE_HOOK;
 use crate::Checker;
 
 /// Whether a number literal's source text names a float (`3.14`, `1e3`). A
@@ -457,11 +458,11 @@ impl Checker<'_> {
         )
     }
 
-    /// Whether `ty` has a `@negate(ty) ty` hook.
+    /// Whether `ty` has a `@negate` hook (taking it by value or by `ref`).
     fn can_negate(&self, ty: TypeId) -> bool {
-        self.overloads("@negate").iter().any(
-            |hook| matches!(hook.sig.params.as_slice(), [param] if param.id == ty && !param.is_ref),
-        )
+        self.overloads(NEGATE_HOOK)
+            .iter()
+            .any(|hook| matches!(hook.sig.params.as_slice(), [param] if param.id == ty))
     }
 
     /// The bit type and two's-complement bits of `-magnitude`, grown to the

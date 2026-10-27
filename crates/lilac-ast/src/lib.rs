@@ -104,6 +104,15 @@ pub enum ItemKind {
     /// condition selects exists: the driver splices it in place before the
     /// program is resolved.
     Conditional(Conditional),
+    /// `test "name" { … }`: a test, checked like a function with no
+    /// parameters or outs, which nothing can name. The item's `name` is the
+    /// string's text; `lilac test` runs the project's tests.
+    Test {
+        /// The span of the name's string literal.
+        name_span: Span,
+        /// The body.
+        body: Block,
+    },
     /// An item that failed to parse; its `span` covers the consumed tokens.
     /// Its `name` is the declared name when the parser read the header
     /// (`name: kind`) before failing, else empty. It defines nothing
@@ -717,9 +726,9 @@ pub enum BinOp {
     LtEq,
     /// `>=` is `@greater_than_or_equal`.
     GtEq,
-    /// `==` (strict bit-equality, never converted or overridden).
+    /// `==` is `@eql`, else bit-equality (never converted).
     EqEq,
-    /// `!=` (strict bit-inequality, never converted or overridden).
+    /// `!=` is `not (lhs == rhs)`.
     NotEq,
     /// `and` (short-circuit conjunction over `@bit8`, no hook).
     And,

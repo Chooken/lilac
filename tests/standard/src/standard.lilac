@@ -1,0 +1,11 @@
+// `Standard`'s tests: `lilac test tests/standard` builds every `test`
+// block under this folder and runs each one. A folder is a namespace, so
+// the tests and helpers of one topic share it.
+
+using Standard.Testing
+
+test "a hex escape is one byte" {
+    text: @byte_buffer = "\xFF"
+    expect(@byte_buffer_len(text) == 0x1)
+    expect(@load_u8(@byte_buffer_ptr(text), 0x0) == 0xFF)
+}

@@ -1,0 +1,36 @@
+// Integer powers and roots (math plan phase 3): `pow`, `isqrt`, `ilog2` and
+// `ilog10`.
+
+using Standard
+using Standard.Testing
+
+test "pow" {
+    expect_text($"{(5 as Int32).pow(0)} {(2 as Int32).pow(10)} {(-2 as Int8).pow(7)} {(-1 as Int32).pow(100)} {(-1 as Int32).pow(99)} {(0 as Int32).pow(5)} {(2 as Uint8).pow(7)}", "1 1024 -128 1 -1 0 128")
+}
+
+test "isqrt" {
+    expect_text($"{(0 as Uint8).isqrt()} {(1 as Uint8).isqrt()} {(143 as Uint8).isqrt()} {Uint8.MAX.isqrt()} {Uint64.MAX.isqrt()} {(0 as Int8).isqrt()} {(1 as Int8).isqrt()} {Int8.MAX.isqrt()}", "0 1 11 15 4294967295 0 1 11")
+}
+
+test "ilog2" {
+    l0: Int8 = (1 as Int8).ilog2() else { @panic("no ilog2 of 1") }
+    l1: Int8 = (2 as Int8).ilog2() else { @panic("no ilog2 of 2") }
+    l2: Int8 = (3 as Int8).ilog2() else { @panic("no ilog2 of 3") }
+    l3: Int8 = Int8.MAX.ilog2() else { @panic("no ilog2 of Int8.MAX") }
+    l4: Uint8 = Uint8.MAX.ilog2() else { @panic("no ilog2 of Uint8.MAX") }
+    expect_text($"{l0} {l1} {l2} {l3} {l4}", "0 1 1 6 7")
+    if (0 as Int8).ilog2() -> v: Int8 { @panic($"ilog2 of 0 is {v}") }
+    if (-1 as Int8).ilog2() -> v: Int8 { @panic($"ilog2 of -1 is {v}") }
+}
+
+test "ilog10" {
+    d0: Uint64 = (1 as Uint64).ilog10() else { @panic("no ilog10 of 1") }
+    d1: Uint64 = (9 as Uint64).ilog10() else { @panic("no ilog10 of 9") }
+    d2: Uint64 = (10 as Uint64).ilog10() else { @panic("no ilog10 of 10") }
+    d3: Uint64 = (999 as Uint64).ilog10() else { @panic("no ilog10 of 999") }
+    d4: Int8 = Int8.MAX.ilog10() else { @panic("no ilog10 of Int8.MAX") }
+    d5: Uint64 = Uint64.MAX.ilog10() else { @panic("no ilog10 of Uint64.MAX") }
+    expect_text($"{d0} {d1} {d2} {d3} {d4} {d5}", "0 0 1 2 2 19")
+    if (0 as Uint64).ilog10() -> v: Uint64 { @panic($"ilog10 of 0 is {v}") }
+    if Int64.MIN.ilog10() -> v: Int64 { @panic($"ilog10 of Int64.MIN is {v}") }
+}

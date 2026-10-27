@@ -226,7 +226,8 @@
   C entry).
 - **Platform hooks** (`lilac_hir::PLATFORM_HOOKS`): the top-level
   `@entry`, `@exit` and `@compiler_print`, emitted as `.lilac.entry`,
-  `.lilac.exit` and `.lilac.compiler_print`. Typeck checks their shapes
+  `.lilac.exit` and `.lilac.compiler_print`, and `@test_entry`
+  (`.lilac.test_entry`), which replaces `@entry` in a test build. Typeck checks their shapes
   (`E022`, `sigs::platform_hook_shape_ok`) and duplicates (`E034`); an
   `@entry` body falls back to the root namespace for names
   (`Checker::in_entry`, `Resolved::root_item`), so `Standard`'s `@entry`
@@ -710,6 +711,35 @@
   state every `SETTINGS` key with its flag and the true defaults
   (`settings_tests::the_template_*` read the repository's file), so a
   new setting needs a line there.
+- Tests: `test "name" { … }` (`ItemKind::Test`, `Parser::parse_test`;
+  an empty, blank or control-character name, or a test in a type body,
+  is `E001`) is a private `DefKind::Func` named `test "name"` that no
+  namespace binds, listed in `Resolved::tests` (`Test`: its def, name
+  and `run`; `test_index`), a duplicate per namespace `E020`
+  (`check_tests`). Its symbol is `<namespace>.test.<index>`
+  (`lilac_lower` symbols). `@test_count`, `@test_name(i)` and
+  `@test_function(i)` (`lilac-typeck/src/testing.rs`) fold over the run
+  set, the tests outside mounted libraries (`Session::select_tests`,
+  also `Session::tests`, a `TestInfo` each): the count a constant, the
+  others a `match` on the index that traps past the last.
+  `Session::testing` swaps `@entry` for `@test_entry` in the required
+  hooks and the entry stub (`lilac_ir::test_entry_point`), so `main` is
+  not required; otherwise a test is dead code DCE drops. `lilac test`
+  (`lilac-cli/src/test.rs`) builds through `build::build(args, true)`
+  (the executable is `<name>-test`), then runs it once per test, in
+  parallel, naming the test by index in `LILAC_TEST` (an environment
+  variable, since native Windows passes no arguments), and prints the
+  results in order, each failure's output and a summary
+  (`--filter=TEXT`, repeatable, on the name or namespace).
+  `Standard.Runtime`'s `@test_entry` calls `Standard.Testing.run`
+  (`expect`, `expect_with`, `expect_equal[T]`, `expect_text`: a
+  `Format` compared as it is written, allocating nothing), which reads
+  the variable through `Os.environment_variable`. `Standard`'s tests
+  are the project `tests/standard` (one namespace per area), run by
+  `crates/lilac-cli/tests/testing.rs` in Debug and Release; prefer a
+  test there over a stdout run test for library behavior. The editor
+  never fades a test as unused (`hints.rs`).
+
 - The build folder is the manifest's `build.dir` (`build` beside it),
   else `<project>/build` (folder project) or `./build` (single file), with
   one folder per mode (`debug`, `release`, `release-small`) and a
@@ -1068,9 +1098,22 @@ Where things live:
   owns into a capture or a hidden local (`bind_captures`, `bind_rest`):
   the ownership pass tracks a hidden out as full only on its side of the
   flag (`Own::Cond`, refined by `if flag`), so none is left to drop.
-- `!=` and `not` are built in (no hook): typeck emits `HirExprKind::Not`
-  (`a != b` is `Not(Eq(a, b))`), lowering `c == 0`, and the constant
-  evaluator folds it. A compound assignment (`Stmt::CompoundAssign`,
+- Operators (`+` to `>=`, `-x`, `==`) find their hook by
+  `Checker::operator_hook`: the operand types exactly, each parameter
+  taking its operand by value or by `ref` (`operand_arg` borrows it with
+  `RefOf`, as a method borrows `self`, or passes on a `ref` operand), so
+  the ownership pass sees an ordinary borrow. An operator's overloads are
+  keyed by operand types alone (`sigs::is_operator_hook`, `E020` in
+  `add_hook`). `-x` is the call `@negate(x)`, routed to `negate_call`
+  after `fold_negative`; a direct `@add(a, b)` is an ordinary hook call.
+- `==` calls the `@eql` overload of the operand types
+  (`Checker::check_equality`; shape checked in `hook_shape_ok`, `E022`),
+  and without one is `HirExprKind::Eq`, bit equality of one type
+  (`bit_equality`, which `@mem_eql` always takes, so an `@eql` body can
+  compare bits). `!=` and `not` are built in (no hook): typeck emits
+  `HirExprKind::Not` (`a != b` is `Not(Eq(a, b))`, or `Not` of the hook's
+  out as a condition), lowering `c == 0`, and the constant evaluator
+  folds it. A compound assignment (`Stmt::CompoundAssign`,
   `x += e`) is desugared in typeck, not the parser
   (`check_compound_assign`): the target is checked once and its place is
   the left operand of `operator_call`, then `assign_checked` stores the

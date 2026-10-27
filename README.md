@@ -203,6 +203,34 @@ args = ["-lm", "vendor/libgreet.a"]
   read, `E076` for an unknown setting or a wrong value), and nothing
   builds until it is fixed.
 
+## Testing a program
+
+A `test` block is a named piece of code that `lilac test` runs; it passes
+when it returns and fails when it panics. `Standard.Testing` has the
+expectations:
+
+```lilac
+using Standard
+using Standard.Testing
+
+test "adding two numbers" {
+    x: Int32 = 1
+    expect_equal[Int32](x + 2, 3)
+}
+```
+
+```bash
+lilac test --filter=adding
+```
+
+`lilac test [<file-or-dir>]` builds the program's tests (no `main`
+needed; `lilac build` leaves them out) with `lilac build`'s options, runs
+each in its own process, in parallel, and prints each result, the output
+of every failure and a summary; it exits 1 when one fails. `--filter=TEXT`
+(repeatable) runs only the tests whose name or namespace contains a
+`TEXT`. Tests of mounted libraries are not run. `Standard`'s own tests
+are `tests/standard`.
+
 ## Checking a program
 
 `lilac check [<file-or-dir>]` reports errors without building, and takes the

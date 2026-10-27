@@ -2237,3 +2237,46 @@ fn compound_assignment_is_a_statement() {
     let (_, diags, _) = parse(&in_main("f(x += 0x1)"));
     assert!(diags.has_errors());
 }
+
+#[test]
+fn test_blocks_parse() {
+    let src = "/// Doubles.\ntest \"adds two numbers\" {\n    value: @bit32 = 0x1\n}\n\ntest: function () nothing {\n    test: @bit32 = 0x1\n}\n";
+    let (program, diags, sm) = parse(src);
+    assert!(!diags.has_errors(), "{diags:?}");
+    assert_eq!(program.items.len(), 2);
+    let item = &program.items[0];
+    let ItemKind::Test { name_span, body } = &item.kind else {
+        panic!("expected a test");
+    };
+    assert_eq!(item.name, "adds two numbers");
+    assert_eq!(sm.span_text(*name_span), Some("\"adds two numbers\""));
+    assert_eq!(body.stmts.len(), 1);
+    assert!(item.doc.is_some());
+    // `test` without a string after it is still a name.
+    assert!(matches!(program.items[1].kind, ItemKind::Func(_)));
+    assert_eq!(program.items[1].name, "test");
+}
+
+#[test]
+fn bad_test_names_are_e001() {
+    for src in [
+        "test \"\" {\n}\n",
+        "test \"  \" {\n}\n",
+        "test \"a\nb\" {\n}\n",
+    ] {
+        let (_, diags, _) = parse(src);
+        assert!(
+            diags.diagnostics().iter().any(|d| d.code == "E001"),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn a_test_in_a_type_body_is_e001() {
+    let (_, diags, _) = parse("Point: structure {\n    x: @bit32\n    test \"x\" {\n    }\n}\n");
+    assert!(
+        diags.diagnostics().iter().any(|d| d.code == "E001"),
+        "{diags:?}"
+    );
+}

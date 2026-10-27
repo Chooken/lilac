@@ -70,7 +70,20 @@ pub fn build_runtime(target: &Target) -> Vec<LirFunc> {
 /// wrapper (the C `main`, or the native entry) calls it.
 #[must_use]
 pub fn entry_point() -> LirFunc {
-    let mut insts = vec![call(ENTRY_HOOK, &ENTRY_PARAMS.map(|(name, _)| name), &[])];
+    start_calling(ENTRY_HOOK)
+}
+
+/// The entry stub of a test build: [`entry_point`], calling the
+/// `@test_entry` hook (`.lilac.test_entry`), which runs the tests, in
+/// place of `@entry`.
+#[must_use]
+pub fn test_entry_point() -> LirFunc {
+    start_calling(TEST_ENTRY_HOOK)
+}
+
+/// `.lilac.start`, calling `hook` with the process's arguments.
+fn start_calling(hook: &str) -> LirFunc {
+    let mut insts = vec![call(hook, &ENTRY_PARAMS.map(|(name, _)| name), &[])];
     insts.extend(const_place("code", 0, LirTy::Bit(32)));
     insts.push(call(EXIT_HOOK, &["code"], &[]));
     insts.push(call_builtin("@lilac_abort", &[], &[]));
@@ -104,6 +117,7 @@ fn entry_params() -> Vec<(&'static str, LirTy)> {
 
 /// The platform hooks' fixed symbols (`lilac_hir::PLATFORM_HOOKS`).
 const ENTRY_HOOK: &str = ".lilac.entry";
+const TEST_ENTRY_HOOK: &str = ".lilac.test_entry";
 const EXIT_HOOK: &str = ".lilac.exit";
 const PRINT_HOOK: &str = ".lilac.compiler_print";
 

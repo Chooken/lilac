@@ -27,11 +27,13 @@ use lilac_ty::{TypeId, TypeRef};
 pub use intrinsics::Intrinsic;
 
 /// The platform hooks the compiler calls on the program's behalf, with the
-/// fixed symbols they are emitted under: the entry stub calls `@entry` then
-/// `@exit(0)`, and the panic handler writes through `@compiler_print` then
-/// calls `@exit(101)`. Each is top-level and defined at most once.
-pub const PLATFORM_HOOKS: [(&str, &str); 3] = [
+/// fixed symbols they are emitted under: the entry stub calls `@entry` (in
+/// a test build `@test_entry`, which runs the tests) then `@exit(0)`, and
+/// the panic handler writes through `@compiler_print` then calls
+/// `@exit(101)`. Each is top-level and defined at most once.
+pub const PLATFORM_HOOKS: [(&str, &str); 4] = [
     ("@entry", ".lilac.entry"),
+    ("@test_entry", ".lilac.test_entry"),
     ("@exit", ".lilac.exit"),
     ("@compiler_print", ".lilac.compiler_print"),
 ];

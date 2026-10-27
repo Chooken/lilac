@@ -3502,6 +3502,147 @@ fn not_equal_is_not_of_equality() {
     );
 }
 
+/// `P` with an `@eql` hook comparing only `x`.
+const EQL_POINT: &str = "P: structure {\n    x: @bit8\n    y: @bit8\n\n    \
+                         @eql: function (a: P, b: P) same: @bit8 {\n        same = @mem_eql(a.x, b.x)\n    }\n}\n";
+
+#[test]
+fn equality_calls_the_eql_hook() {
+    let (diags, hir, _) = check(&format!(
+        "{EQL_POINT}main: function () nothing {{\n    p: P = P {{ x = 0x1, y = 0x2 }}\n    \
+         c: @bit8 = p == p\n    d: @bit8 = p != p\n    e: @bit8 = @mem_eql(p, p)\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "c");
+    let stmts = &main.body.as_ref().expect("body").stmts;
+    let value = |index: usize| {
+        let HirStmt::Let { value, .. } = &stmts[index] else {
+            panic!("expected a let");
+        };
+        value.clone()
+    };
+    assert!(
+        matches!(value(1).kind, HirExprKind::Call { .. }),
+        "{:?}",
+        value(1).kind
+    );
+    let HirExprKind::Not(inner) = value(2).kind else {
+        panic!("expected `Not`");
+    };
+    assert!(matches!(inner.kind, HirExprKind::Call { .. }));
+    // `@mem_eql` compares bits whatever hook the type has.
+    assert!(matches!(value(3).kind, HirExprKind::Eq(..)));
+}
+
+#[test]
+fn equality_without_an_eql_hook_compares_bits() {
+    // No overload of the exact pair: `@eql(P, P)` does not bind `@bit8`s.
+    let (diags, hir, _) = check(&format!(
+        "{EQL_POINT}main: function () nothing {{\n    a: @bit8 = 0x1\n    c: @bit8 = a == a\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "c");
+    let HirStmt::Let { value, .. } = &main.body.as_ref().expect("body").stmts[1] else {
+        panic!("expected a let");
+    };
+    assert!(matches!(value.kind, HirExprKind::Eq(..)));
+    let diags = check_src(
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit32 = 0x2\n    c: @bit8 = a == b\n}\n",
+    );
+    assert!(has_code(&diags, "E010"), "{diags:?}");
+    let diags = check_src(
+        "main: function () nothing {\n    a: @bit8 = 0x1\n    b: @bit32 = 0x2\n    c: @bit8 = @mem_eql(a, b)\n}\n",
+    );
+    assert!(
+        messages(&diags)
+            .iter()
+            .any(|m| m.contains("`@mem_eql` needs identical types")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn eql_hook_takes_two_operands_and_returns_one() {
+    for shape in ["(a: @bit32) same: @bit8", "(a: @bit32, b: @bit32) nothing"] {
+        let diags = check_src(&format!(
+            "@eql: function {shape} {{\n}}\nmain: function () nothing {{\n}}\n"
+        ));
+        assert!(has_code(&diags, "E022"), "{shape}: {diags:?}");
+    }
+}
+
+/// `P` with `ref` operator hooks: `==`, `+` and `-` borrow it.
+const REF_OPERATORS: &str = "P: structure {
+    x: @bit8
+
+         @eql: function (a: ref P, b: ref P) same: @bit8 => @mem_eql(a.x, b.x)
+         @add: function (a: ref P, b: P) sum: P => P { x = @i_add_8(a.x, b.x) }
+         @negate: function (a: ref P) negated: P => P { x = @i_negate_8(a.x) }
+}
+";
+
+#[test]
+fn operator_hooks_borrow_ref_operands() {
+    let (diags, hir, _) = check(&format!(
+        "{REF_OPERATORS}main: function () nothing {{
+    p: P = P {{ x = 0x1 }}
+             c: @bit8 = p == p
+    d: P = p + p
+    e: P = -p
+    r: ref P = ref p
+             f: @bit8 = r == p
+}}
+"
+    ));
+    assert!(!diags.has_errors(), "{:?}", messages(&diags));
+    let main = body_of(&hir, "c");
+    let stmts = &main.body.as_ref().expect("body").stmts;
+    let args = |index: usize| {
+        let HirStmt::Let { value, .. } = &stmts[index] else {
+            panic!("expected a let");
+        };
+        let HirExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected a call, found {:?}", value.kind);
+        };
+        args.iter()
+            .map(|arg| (arg.ty.is_ref, matches!(arg.kind, HirExprKind::RefOf(_))))
+            .collect::<Vec<_>>()
+    };
+    // Each `ref` parameter borrows its operand; a by-value one reads it.
+    assert_eq!(args(1), [(true, true), (true, true)]);
+    assert_eq!(args(2), [(true, true), (false, false)]);
+    assert_eq!(args(3), [(true, true)]);
+    // A `ref` operand is passed on, not borrowed again.
+    assert_eq!(args(5), [(true, false), (true, true)]);
+}
+
+#[test]
+fn an_operator_hook_by_value_and_by_ref_is_e020() {
+    for second in [
+        "@eql: function (a: ref P, b: ref P) same: @bit8 => 0x1",
+        "@eql: function (a: P, b: ref P) same: @bit8 => 0x1",
+        "@add: function (a: ref P, b: ref P) sum: @bit8 => 0x1",
+        "@negate: function (a: ref P) negated: P => a",
+    ] {
+        let first = match &second[..4] {
+            "@eql" => "@eql: function (a: P, b: P) same: @bit8 => 0x1",
+            "@add" => "@add: function (a: P, b: P) sum: P => a",
+            _ => "@negate: function (a: P) negated: P => a",
+        };
+        let diags = check_src(&format!(
+            "P: structure {{
+    x: @bit8
+}}
+{first}
+{second}
+main: function () nothing {{
+}}
+"
+        ));
+        assert!(has_code(&diags, "E020"), "{second}: {diags:?}");
+    }
+}
+
 #[test]
 fn not_takes_a_condition() {
     let diags = check_src(

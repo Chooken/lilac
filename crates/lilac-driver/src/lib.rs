@@ -259,6 +259,17 @@ fn merge_semantics(
     sites
 }
 
+/// One test of the run set ([`Session::tests`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestInfo {
+    /// Its name, the text of `test "name"`.
+    pub name: String,
+    /// The dotted path of its namespace (`""` for the root).
+    pub namespace: String,
+    /// Where it is declared (`file:line:col`).
+    pub location: String,
+}
+
 /// Compilation session: source map + diagnostics + targets + options.
 ///
 /// Threaded explicitly through every pass (no globals, unlike the old Zig
@@ -296,6 +307,14 @@ pub struct Session {
     /// platform hooks (`E033`), its `@entry` must find what it calls
     /// (`E032`), and the entry stub `.lilac.start` is added as the root.
     pub require_entry: bool,
+    /// Whether this is a test build (`lilac test`): the entry stub calls
+    /// `@test_entry`, which runs the tests, in place of `@entry`, so an
+    /// executable needs `@test_entry`, `@exit` and `@compiler_print`, and
+    /// `main` may be missing (the `@entry` that calls it is dropped).
+    pub testing: bool,
+    /// The last compile's run set: the project's tests, in the order
+    /// `@test_name` and `@test_function` number them.
+    pub tests: Vec<TestInfo>,
     /// How the program enters: [`Entry::Native`] (`lilac build` without
     /// `--libc`) enters at `.lilac.start`; [`Entry::CMain`] has the C
     /// `main` call it, and sets `@builtin.Target.libc`.
@@ -333,6 +352,8 @@ impl Default for Session {
             analysis: None,
             keep_analysis: Keep::Nothing,
             require_entry: false,
+            testing: false,
+            tests: Vec::new(),
             entry: Entry::CMain,
             progress: None,
             stack_traces: false,
@@ -550,7 +571,8 @@ impl Session {
         }
         self.report(Stage::Parse, DONE);
         self.report(Stage::Resolve, StageEvent::Begin);
-        let resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
+        let mut resolved = lilac_resolve::resolve(project, &programs, &mut self.diags);
+        self.select_tests(&mut resolved);
         if self.cancelled() {
             return Err(stopped());
         }
@@ -562,7 +584,8 @@ impl Session {
         let mut types = lilac_ty::Types::new();
         let options = lilac_typeck::Options {
             target: self.target,
-            require_entry: self.require_entry,
+            // A test build may have no `main`: its `@entry` is dropped.
+            require_entry: self.require_entry && !self.testing,
             cancel: self.cancel.clone(),
         };
         let checked = lilac_typeck::check(&resolved, &mut types, &mut self.diags, options);
@@ -736,11 +759,47 @@ impl Session {
 }
 
 impl Session {
+    /// Keeps the project's own tests in the run set (a mounted library's
+    /// and `@builtin`'s are checked, never run) and records them in
+    /// [`Session::tests`].
+    fn select_tests(&mut self, resolved: &mut lilac_resolve::Resolved) {
+        let libraries: HashSet<&str> = self
+            .libraries
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        self.tests.clear();
+        for index in 0..resolved.tests.len() {
+            let def = resolved.def(resolved.tests[index].def);
+            let path = resolved.namespace_path(def.ns).to_owned();
+            let head = path.split('.').next().unwrap_or_default();
+            let run = !libraries.contains(head) && !head.starts_with('@');
+            let location = self.source_map.location(def.name_span).unwrap_or_default();
+            resolved.tests[index].run = run;
+            if run {
+                self.tests.push(TestInfo {
+                    name: resolved.tests[index].name.clone(),
+                    namespace: path,
+                    location,
+                });
+            }
+        }
+    }
+
     /// `E033` for each platform hook (`lilac_hir::PLATFORM_HOOKS`) the
-    /// program does not define. An executable needs all three; duplicates
-    /// are `E034` in the checker.
+    /// program does not define. An executable needs `@exit`,
+    /// `@compiler_print` and `@entry`, or a test build `@test_entry`;
+    /// duplicates are `E034` in the checker.
     fn check_platform_hooks(&mut self, resolved: &lilac_resolve::Resolved) {
+        let skipped = if self.testing {
+            "@entry"
+        } else {
+            "@test_entry"
+        };
         for (hook, _) in lilac_hir::PLATFORM_HOOKS {
+            if hook == skipped {
+                continue;
+            }
             let defined = resolved.hooks.iter().any(|&id| {
                 let def = resolved.def(id);
                 def.name == hook && def.parent.is_none()
@@ -751,7 +810,7 @@ impl Session {
                         codes::E033,
                         format!("the program defines no `{hook}`; an executable needs one"),
                     )
-                    .note("a runtime library supplies `@entry`, `@exit` and `@compiler_print`")
+                    .note("a runtime library supplies `@entry`, `@test_entry`, `@exit` and `@compiler_print`")
                     .help("mount `Standard` (`--lib=Standard=<dir>`), or define the hook yourself"),
                 );
             }
@@ -772,7 +831,9 @@ impl Session {
             }
         }
         lilac_ir::panic_runtime(message).add_to(lir);
-        if self.require_entry {
+        if self.require_entry && self.testing {
+            lir.funcs.push(lilac_ir::test_entry_point());
+        } else if self.require_entry {
             lir.funcs.push(lilac_ir::entry_point());
         }
     }

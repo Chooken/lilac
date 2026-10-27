@@ -1,0 +1,13 @@
+// expect-error: E022
+// `@eql` takes two operands (each by value or by `ref`) and returns one
+// value: one with a single parameter would never bind, and `==` would
+// quietly compare bits.
+Point: structure {
+    x: @bit32
+
+    @eql: function (only: Point) equal: @bit8 {
+        equal = 0x1
+    }
+}
+
+main: function () nothing {}

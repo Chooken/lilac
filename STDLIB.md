@@ -489,7 +489,10 @@ exists, else a compile error):
   Result[ref unknown, Error]` and `unmap_pages(memory, size)
   Optional[Error]` (always the OS), `page_size()`.
 * **Process:** `exit(code)`; `argument_count`, `argument_vector`,
-  `environment_vector` (stored by `@entry`).
+  `environment_vector` (stored by `@entry`);
+  `environment_variable(name, buffer, capacity) Optional[@bit_native]`
+  (copies a variable's value into `buffer` and gives its length, past
+  `capacity` when it does not fit; `.None` when unset).
 * **Time:** `monotonic_nanos()`, `wall_clock_nanos()`, `sleep(nanos)`.
 * **Random:** `fill_random(buffer, length)`.
 * **Threads:** `spawn(entry, argument) Result[Thread, Error]` runs
@@ -696,8 +699,21 @@ the same bits on every target in every build mode.
 
 ### 3.10 `Standard.Testing`
 
-| Type | Purpose | Key methods |
-|---|---|---|
+The library side of `test "name" { … }` blocks (SPEC §8, "Tests").
+`Standard.Runtime`'s `@test_entry` calls `run`; a test fails by panicking.
+
+| Function | Purpose |
+|---|---|
+| `run()` | runs the test `LILAC_TEST` names by index, else every test in order |
+| `expect(condition)` | fails unless `condition` holds |
+| `expect_with(condition, message)` | the same, with a `Format` message |
+| `expect_equal[T](actual, expected)` | fails unless `actual == expected`, showing both (`T` needs an `@format`) |
+| `expect_text(actual, expected)` | fails unless the `Format` `actual` writes exactly the bytes `expected`; compares as it writes, allocating nothing |
+
+`Standard`'s own tests are the project `tests/standard` (`lilac test
+tests/standard`).
+
+---|---|---|
 | `Test` | one test case | `new(name)`, `run()`, `expect(cond)`, `expect_eq(a, b)`, `expect_err` |
 | `TestSuite` | collection + runner | `add(test)`, `run_all() TestReport` |
 | `TestReport` | results | `passed`, `failed`, `failures() List[TestFailure]` |

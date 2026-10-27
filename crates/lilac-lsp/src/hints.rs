@@ -148,6 +148,8 @@ fn unused_private_items(retained: &Retained, hints: &mut Vec<Hint>) {
             && def.vis == Visibility::Private
             && !def.name_span.is_dummy()
             && !used.contains(&id)
+            // `lilac test` runs a test; nothing names it.
+            && analysis.resolved.test_index(id).is_none()
         {
             hints.push(Hint {
                 span: def.name_span,

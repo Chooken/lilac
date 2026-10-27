@@ -346,7 +346,8 @@ Tests:
   panic, so no `FAILS_` prefix), and `FAILS_integer_overflow_constant.lilac`
   (`E060`).
 - `integer_overflow_release.lilac` (`// build-arg: --release`, wraps).
-- `integer_wrapping.lilac`: the `wrapping_*` methods wrap in Debug.
+- `tests/standard/src/Integers/wrapping.lilac`: the `wrapping_*`
+  methods wrap in Debug.
 - `FAILS_lossy_as.lilac` (`E043` for `Int64 as Float64` that names the
   method to use, through a fix-it if the conversion search can suggest
   one).
@@ -401,10 +402,9 @@ is a keyword) and `@format`, plus `compare` on every numeric type
 (on floats it fails when either operand is a NaN).
 
 Tests:
-- `integer_basics.lilac`, `integer_division.lilac`,
-  `integer_powers_roots.lilac`, `integer_bits.lilac` and
-  `integer_overflow_methods.lilac`, printing boundary values (`MIN`,
-  `MAX`, 0, ±1, powers of two).
+- `test` blocks in `tests/standard/src/Integers/` (`basics`,
+  `division`, `powers_roots`, `bits` and `overflow`), checking boundary
+  values (`MIN`, `MAX`, 0, ±1, powers of two).
 - `checked_*` exercised through `if … -> sum` and guards.
 
 ## Phase 4: float core
@@ -463,8 +463,8 @@ Tests:
   - `inverse_lerp`, `remap`, `smooth_step`.
 
 Tests:
-- `float_constants_classify.lilac`, `float_exact_ops.lilac`,
-  `float_bits_ulps.lilac` and `float_comparison_lerp.lilac`.
+- `test` blocks in `tests/standard/src/Floats/` (`constants`, `exact`,
+  `bits` and `comparison`).
 - The NaN, ±0, ±∞ and subnormal rows, on every function.
 
 ## Phase 5: elementary functions
@@ -719,8 +719,8 @@ Tests:
   generated `Float64` and `Float32` bit patterns.
 - `float_fixed_scientific.lilac`: fixed and scientific rounding cases
   (`0.125` to 2 digits, `1e23`, ties to even, rollover).
-- `numeric_parse.lilac`: integer and float parsing, `ParseError`
-  variants, and IEEE halfway points.
+- `tests/standard/src/Numbers/parse.lilac`: integer and float parsing,
+  `ParseError` variants, and IEEE halfway points.
 
 ## Phase 7: `Standard.Math.Random`
 

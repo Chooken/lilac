@@ -53,6 +53,7 @@
     "keywords": {
       "patterns": [
         { "match": "\\b(structure|function|either|alias|extern|export)\\b", "name": "storage.type.lilac" },
+        { "match": "^\\s*(test)(?=\\s*\")", "captures": { "1": { "name": "storage.type.lilac" } } },
         { "match": "\\b(using)\\b", "name": "keyword.control.import.lilac" },
         { "match": "\\b(private)\\b", "name": "storage.modifier.lilac" },
         { "match": "\\b(ref|unknown|nothing|self)\\b", "name": "storage.type.lilac" },

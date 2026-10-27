@@ -1,0 +1,55 @@
+// Float exact operations (math plan phase 4): `abs`, `copy_sign`, `floor`,
+// `ceil`, `trunc`, `round`, `round_even`, `fract`, `sqrt`, `multiply_add`,
+// `min`, `max`, `min_number`, `max_number`, `clamp`, `recip`, `to_radians`
+// and `to_degrees`, on finite values, NaN, ±0, ±∞ and in global
+// initializers.
+
+using Standard
+using Standard.Testing
+
+const_sqrt2: Float64 = (2.0 as Float64).sqrt()
+const_fma: Float64 = (2.0 as Float64).multiply_add(3.0, 1.0)
+
+test "abs and copy_sign" {
+    a: Float64 = -1.5
+    pos_zero: Float64 = 0.0
+    neg_zero: Float64 = -0.0
+    nan: Float64 = Float64.NAN
+    expect_text($"{a.abs().hex()} {a.abs().copy_sign(a).hex()} {neg_zero.abs().hex()} {pos_zero.copy_sign(neg_zero).hex()} {nan.abs().is_nan()}", "3ff8000000000000 bff8000000000000 0 8000000000000000 true")
+}
+
+test "rounding" {
+    p: Float64 = 2.5
+    n: Float64 = -2.5
+    expect_text($"{p.floor().hex()} {p.ceil().hex()} {p.trunc().hex()} {p.round().hex()} {p.round_even().hex()} {p.fract().hex()}", "4000000000000000 4008000000000000 4000000000000000 4008000000000000 4000000000000000 3fe0000000000000")
+    expect_text($"{n.floor().hex()} {n.ceil().hex()} {n.trunc().hex()} {n.round().hex()} {n.round_even().hex()} {n.fract().hex()}", "c008000000000000 c000000000000000 c000000000000000 c008000000000000 c000000000000000 bfe0000000000000")
+}
+
+test "sqrt, multiply_add, recip and angles" {
+    nine: Float64 = 9.0
+    four: Float64 = 4.0
+    deg180: Float64 = 180.0
+    expect_text($"{nine.sqrt().hex()} {(2.0 as Float64).multiply_add(3.0, 1.0).hex()} {four.recip().hex()} {deg180.to_radians().hex()} {Float64.PI.to_degrees().hex()}", "4008000000000000 401c000000000000 3fd0000000000000 400921fb54442d18 4066800000000000")
+}
+
+test "min and max" {
+    pos_zero: Float64 = 0.0
+    neg_zero: Float64 = -0.0
+    nan: Float64 = Float64.NAN
+    one: Float64 = 1.0
+    two: Float64 = 2.0
+    expect_text($"{one.min(nan).is_nan()} {nan.max(one).is_nan()} {pos_zero.min(neg_zero).hex()} {pos_zero.max(neg_zero).hex()} {one.min_number(nan).hex()} {nan.min_number(one).hex()} {two.max_number(nan).hex()} {nan.max_number(two).hex()}", "true true 8000000000000000 0 3ff0000000000000 3ff0000000000000 4000000000000000 4000000000000000")
+}
+
+test "clamp" {
+    pos_zero: Float64 = 0.0
+    neg_zero: Float64 = -0.0
+    nan: Float64 = Float64.NAN
+    one: Float64 = 1.0
+    two: Float64 = 2.0
+    expect_text($"{(-5.0 as Float64).clamp(2.0, 10.0).hex()} {(20.0 as Float64).clamp(2.0, 10.0).hex()} {neg_zero.clamp(pos_zero, one).hex()} {nan.clamp(one, two).is_nan()}", "4000000000000000 4024000000000000 0 true")
+}
+
+test "exact operations in global initializers" {
+    expect_text($"{const_sqrt2.hex()} {const_fma.hex()}", "3ff6a09e667f3bcd 401c000000000000")
+}

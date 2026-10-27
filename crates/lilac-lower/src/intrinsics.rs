@@ -223,7 +223,7 @@ impl Lower<'_> {
             Intrinsic::FormatArgsPiece | Intrinsic::FormatArgsHole => {
                 self.lower_format_consumer(state, func, intrinsic, args, ty, span)
             }
-            Intrinsic::ArrayLen | Intrinsic::Move | Intrinsic::NeedsDrop => {
+            Intrinsic::ArrayLen | Intrinsic::Move | Intrinsic::NeedsDrop | Intrinsic::MemEql => {
                 lilac_error::bug!(span, "`{intrinsic:?}` is rewritten in typeck")
             }
             Intrinsic::Write => {

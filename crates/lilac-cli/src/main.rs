@@ -1,11 +1,12 @@
 //! The `lilac` binary: `check` / `emit-ir` / `emit-llvm` / `build` /
-//! `init` / `explain` / `demangle`.
+//! `test` / `init` / `explain` / `demangle`.
 
 mod build;
 mod init;
 mod link;
 mod progress;
 mod std_fs;
+mod test;
 
 use lilac_codegen::Backend as _;
 use lilac_driver::{ErrorFormat, OptimizeMode, Progress, Session, Target};
@@ -18,11 +19,12 @@ use std::process::ExitCode;
 use std_fs::StdFs;
 
 /// The commands, for did-you-mean.
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
     "check",
     "emit-ir",
     "emit-llvm",
     "build",
+    "test",
     "init",
     "explain",
     "demangle",
@@ -30,7 +32,7 @@ const COMMANDS: [&str; 8] = [
 ];
 
 /// Every flag any command takes (without its `=value`), for did-you-mean.
-const FLAGS: [&str; 20] = [
+const FLAGS: [&str; 21] = [
     "--error-format",
     "--color",
     "--target",
@@ -49,6 +51,7 @@ const FLAGS: [&str; 20] = [
     "--libc",
     "--linker",
     "--link-arg",
+    "--filter",
     "-h",
     "--help",
 ];
@@ -80,13 +83,16 @@ fn unknown_flag(arg: &str) -> String {
 fn usage() -> &'static str {
     "usage:\n  lilac check [<file-or-dir>] [--error-format=human|json] [--color=auto|always|never] [--target=<triple>|host] [--verbose] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-ir [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]\n  lilac emit-llvm [<file-or-dir>] [--check] [--target=<triple>|host] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--dump-lir=<dir>] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--timings] [-q|--quiet]
   lilac build [<file-or-dir>] [-o <path>] [--build-dir=<dir>] [--mode=debug|release|release-small] [--release] [--stack-traces=on|off] [--target=<triple>|host] [--lib=<Name>=<dir>]... [--libc[=on|off]] [--linker=<path>] [--link-arg=<arg>]... [--timings] [-q|--quiet] [--error-format=human|json] [--color=auto|always|never] [--dump-lir=<dir>]
+  lilac test [<file-or-dir>] [--filter=<text>]... and `lilac build`'s options
   lilac init [<dir>] [-q|--quiet]
   lilac explain <code>
   lilac demangle [<symbol>...]
 
 A folder with a lilac.toml is a project: its settings apply, and a flag
 overrides its setting for one run. The folder defaults to `.`. `lilac init`
-starts a project from the install's template (lilac.toml, src/main.lilac)."
+starts a project from the install's template (lilac.toml, src/main.lilac).
+`lilac test` builds the program's `test \"name\" { … }` blocks and runs each;
+`--filter` runs those whose name contains its text."
 }
 
 /// Maps the driver's [`OptimizeMode`] onto the backend's
@@ -122,6 +128,7 @@ fn run() -> ExitCode {
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "emit-llvm" => cmd_emit_llvm(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
+        "test" => test::cmd_test(&args[1..]),
         "init" => init::cmd_init(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
         "demangle" => cmd_demangle(&args[1..]),

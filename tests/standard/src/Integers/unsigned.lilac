@@ -1,0 +1,29 @@
+// The unsigned integer types (math plan phase 2): their operators, limits,
+// wrapping methods and formats. `Byte` is `Uint8`.
+
+using Standard
+using Standard.Testing
+
+test "unsigned operators" {
+    a: Uint8 = 200
+    b: Uint8 = 50
+    expect_text($"{a + b} {a / 33} {a - b + b} {a % 3 - 1} {b / 12} {a > b} {a < b}", "250 6 200 1 4 true false")
+}
+
+test "unsigned limits" {
+    expect_text($"{Uint8.MAX} {Uint16.MAX} {Uint32.MAX} {Uint64.MAX} {Uint.MIN}", "255 65535 4294967295 18446744073709551615 0")
+}
+
+test "unsigned wrapping methods" {
+    a: Uint8 = 200
+    b: Uint8 = 50
+    expect_text($"{a.wrapping_add(100)} {a.wrapping_negate()} {b.wrapping_subtract(51)} {b.wrapping_multiply(0)}", "44 56 255 0")
+}
+
+test "unsigned formats" {
+    a: Uint8 = 200
+    expect_text($"{a.hex()} {a.binary()} {Uint64.MAX.hex()}", "c8 11001000 ffffffffffffffff")
+    c: Byte = 0x41
+    d: Uint = 10
+    expect_text($"{c} {d}", "65 10")
+}

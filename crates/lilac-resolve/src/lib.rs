@@ -206,6 +206,21 @@ pub struct Resolved {
     /// its path that names a loaded one, and each alias name. The editor
     /// colors these.
     pub namespace_sites: Vec<Span>,
+    /// Every `test "name" { … }`, in declaration order.
+    pub tests: Vec<Test>,
+}
+
+/// One `test "name" { … }`: a function with no parameters or outs that no
+/// name reaches. `lilac test` runs the tests with [`Test::run`] set.
+#[derive(Clone, Debug)]
+pub struct Test {
+    /// Its function definition, named `test "name"`.
+    pub def: DefId,
+    /// The test's name, the string's text.
+    pub name: String,
+    /// Whether it is in the run set: the driver clears it for a mounted
+    /// library's tests, so a project runs its own.
+    pub run: bool,
 }
 
 impl Resolved {
@@ -359,6 +374,16 @@ impl Resolved {
         }
     }
 
+    /// The index in [`Resolved::tests`] of the test `def` is, if it is one.
+    #[must_use]
+    pub fn test_index(&self, def: DefId) -> Option<usize> {
+        // Only a test's name holds a `"`.
+        if !self.def(def).name.starts_with("test \"") {
+            return None;
+        }
+        self.tests.iter().position(|test| test.def == def)
+    }
+
     /// A member of type `owner` by name (fields, methods, variants).
     #[must_use]
     pub fn member(&self, owner: DefId, name: &str) -> Option<DefId> {
@@ -405,6 +430,7 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
         collector.top_level(&program.items, Visibility::Public);
     }
     check_exports(&resolved, diags);
+    check_tests(&resolved, diags);
 
     for unit in &project.files {
         let ns = ns_id(unit.ns);
@@ -426,6 +452,24 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
         );
     }
     resolved
+}
+
+/// `E020`: two tests of one namespace share a name.
+fn check_tests(resolved: &Resolved, diags: &mut Diags) {
+    let mut seen: HashMap<(NsId, &str), Span> = HashMap::new();
+    for test in &resolved.tests {
+        let def = resolved.def(test.def);
+        if let Some(previous) = seen.get(&(def.ns, test.name.as_str())) {
+            diags.emit(
+                Diagnostic::error(codes::E020, format!("duplicate test \"{}\"", test.name))
+                    .label(def.name_span, true, "redefined here")
+                    .label(*previous, false, "first defined here")
+                    .help("give each test of a namespace its own name"),
+            );
+        } else {
+            seen.insert((def.ns, test.name.as_str()), def.name_span);
+        }
+    }
 }
 
 /// `E055`: an `export` is a top-level, non-generic function whose C
@@ -557,6 +601,10 @@ impl Collector<'_> {
                 self.top_level(items, Visibility::Private);
                 continue;
             }
+            if let ItemKind::Test { name_span, body } = &item.kind {
+                self.test(item, *name_span, body);
+                continue;
+            }
             let is_hook = item.name.starts_with('@');
             let vis = if is_hook { Visibility::Public } else { vis };
             let Some(id) = self.item(item, vis, None) else {
@@ -575,6 +623,37 @@ impl Collector<'_> {
                     .insert(item.name.clone(), id);
             }
         }
+    }
+
+    /// Collects a test: a function definition no namespace names.
+    fn test(&mut self, item: &Item, name_span: Span, body: &lilac_ast::Block) {
+        let decl = FuncDecl {
+            generic_params: Vec::new(),
+            generic_spans: Vec::new(),
+            params: Vec::new(),
+            returns: Vec::new(),
+            failures: None,
+            body: Some(lilac_ast::FuncBody::Block(body.clone())),
+            is_extern: false,
+            is_export: false,
+            link_name: None,
+            variadic: false,
+        };
+        let name = format!("test \"{}\"", item.name);
+        let mut def = self.new_def(
+            &name,
+            DefKind::Func(Arc::new(decl)),
+            item.span,
+            Visibility::Private,
+        );
+        def.name_span = name_span;
+        def.doc.clone_from(&item.doc);
+        let id = self.push(def);
+        self.resolved.tests.push(Test {
+            def: id,
+            name: item.name.clone(),
+            run: true,
+        });
     }
 
     /// Collects one item (and its members); `None` for non-definitions.
@@ -600,6 +679,7 @@ impl Collector<'_> {
             ItemKind::Using { .. }
             | ItemKind::Private { .. }
             | ItemKind::Conditional(_)
+            | ItemKind::Test { .. }
             | ItemKind::Error { .. } => return None,
         };
         let mut def = self.new_def(&item.name, kind, item.span, vis);
@@ -977,6 +1057,64 @@ mod tests {
         let (_, _, diags) =
             resolve_one("get: function () nothing {}\nget: function () nothing {}\n");
         assert_eq!(e020(&diags), 1);
+    }
+
+    #[test]
+    fn tests_are_listed_but_not_named() {
+        let (resolved, file, diags) = resolve_one(
+            "test \"adds\" {
+}
+
+test \"subtracts\" {
+}
+
+test: function () nothing {}
+",
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let names: Vec<&str> = resolved.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["adds", "subtracts"]);
+        let first = resolved.tests[0].def;
+        assert_eq!(resolved.def(first).name, "test \"adds\"");
+        assert_eq!(resolved.test_index(first), Some(0));
+        assert!(resolved.lookup(file, "test \"adds\"").is_none());
+        // A function named `test` is an ordinary item.
+        let function = one(&resolved, file, "test");
+        assert_eq!(resolved.test_index(function), None);
+    }
+
+    #[test]
+    fn duplicate_tests_are_e020_per_namespace() {
+        let (_, _, diags) = resolve_one(
+            "test \"a\" {
+}
+
+test \"a\" {
+}
+",
+        );
+        assert_eq!(e020(&diags), 1);
+        let (resolved, _, diags) = resolve_files(
+            &["", "Other"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "test \"a\" {
+}
+",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    src: "test \"a\" {
+}
+",
+                    usings: &[],
+                },
+            ],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(resolved.tests.len(), 2);
     }
 
     #[test]

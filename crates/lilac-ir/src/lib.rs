@@ -28,7 +28,8 @@ pub use dce::{prune_unreachable, reach, CallGraph, Edge, EdgeKind, Reach};
 pub use lilac_float::{FloatBits, FloatWidth};
 pub use names::{Label, PlaceName, Reg, Symbol};
 pub use runtime::{
-    build_runtime, entry_point, hook_externs, panic_runtime, Entry, PanicMessage, PanicRuntime,
+    build_runtime, entry_point, hook_externs, panic_runtime, test_entry_point, Entry, PanicMessage,
+    PanicRuntime,
 };
 pub use ty::LirTy;
 pub use verify::{check_live_compile_errors, check_live_syscalls, check_live_wide_floats, verify};

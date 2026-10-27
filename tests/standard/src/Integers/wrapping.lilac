@@ -1,0 +1,20 @@
+// The `wrapping_*` methods wrap around in every build mode, so code that
+// means to wrap (hashes, address arithmetic) says so; in a Debug build
+// `+` would panic.
+
+using Standard
+using Standard.Testing
+
+largest: Int8 = 127
+smallest: Int8 = -128
+top: Uint8 = 255
+
+test "signed wrapping" {
+    expect_text($"{largest.wrapping_add(1)} {smallest.wrapping_subtract(1)} {smallest.wrapping_negate()} {largest.wrapping_multiply(2)}", "-128 127 -128 -2")
+    big: Int64 = Int64.MAX
+    expect_text($"{big.wrapping_add(1)} {Int.MIN.wrapping_add(Int.MIN)}", "-9223372036854775808 0")
+}
+
+test "unsigned wrapping" {
+    expect_text($"{top.wrapping_add(1)} {top.wrapping_multiply(1)} {top.wrapping_multiply(2)} {top.wrapping_negate().wrapping_add(top)}", "0 255 254 0")
+}

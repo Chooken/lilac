@@ -1,0 +1,101 @@
+// The environment: one variable's value by name. Windows asks the system
+// (`GetEnvironmentVariableW`); elsewhere the value is read from the
+// environment vector the entry passed (`environment_vector`), so a bare
+// target, which has none, sees no variable.
+
+using Standard.Os.Windows as Windows
+
+/// Copies the value of the environment variable `name`, as UTF-8, into
+/// `buffer`, which holds `capacity` bytes: its length in bytes, or `.None`
+/// when the variable is not set. A length past `capacity` says the value
+/// does not fit, and `buffer` then holds nothing of it.
+environment_variable: function (name: @byte_buffer, buffer: ref @bit8, capacity: @bit_native) length: Optional[@bit_native] {
+    match @builtin.Target.os {
+        .Windows => {
+            length = windows_environment_variable(name, buffer, capacity)
+        }
+        .Linux => {
+            length = vector_environment_variable(name, buffer, capacity)
+        }
+        .MacOs => {
+            length = vector_environment_variable(name, buffer, capacity)
+        }
+    } else {
+        length = .None
+    }
+}
+
+private {
+    /// `GetEnvironmentVariableW` into UTF-16 pages, then UTF-8 into
+    /// `buffer`. The value fits in at most `capacity` UTF-16 units when it
+    /// fits in `capacity` bytes.
+    windows_environment_variable: function (name: @byte_buffer, buffer: ref @bit8, capacity: @bit_native) length: Optional[@bit_native] {
+        length = .None
+        wide_name: ref @bit16 = wide_path(name).get() else -> why: Error {
+            return
+        }
+        units: @bit_native = @i_add_native(capacity, 0x1)
+        value_size: @bit_native = @i_mul_native(units, 0x2)
+        memory: ref unknown = map_pages(value_size).get() else -> why: Error {
+            unmap_pages(wide_name as ref unknown, wide_path_size(name))
+            return
+        }
+        value: ref @bit16 = memory as ref @bit16
+        found: @bit32 = Windows.GetEnvironmentVariableW(wide_name, value, @truncate(units))
+        found_units: @bit_native = @extend_zero(found)
+        if found == 0x0 {
+            if Windows.GetLastError() != Windows.ERROR_ENVVAR_NOT_FOUND {
+                length = .Some(0x0)
+            }
+        } else if @i_greater_than_u_native(found_units, capacity) {
+            // Too long: `found` counts its NUL too.
+            length = .Some(found_units)
+        } else {
+            written: @bit32 = Windows.WideCharToMultiByte(Windows.CP_UTF8, 0x0, value, found, buffer, @truncate(capacity), null(), null())
+            if written == 0x0 {
+                length = .Some(@i_add_native(capacity, 0x1))
+            } else {
+                length = .Some(@extend_zero(written))
+            }
+        }
+        unmap_pages(memory, value_size)
+        unmap_pages(wide_name as ref unknown, wide_path_size(name))
+    }
+
+    /// Finds `name=` among the `environment_vector`'s NUL-terminated
+    /// entries (a null address ends it) and copies what follows.
+    vector_environment_variable: function (name: @byte_buffer, buffer: ref @bit8, capacity: @bit_native) length: Optional[@bit_native] {
+        length = .None
+        if @ptr_to_address(environment_vector) == 0x0 {
+            return
+        }
+        name_length: @bit_native = @byte_buffer_len(name)
+        name_text: ref @bit8 = @byte_buffer_ptr(name)
+        index: @bit_native = 0x0
+        loop {
+            slot: ref @bit_native = @ptr_add(environment_vector, @i_mul_native(index, @size_of(@bit_native))) as ref @bit_native
+            address: @bit_native = slot
+            if address == 0x0 {
+                return
+            }
+            entry: ref @bit8 = @address_to_ptr(address) as ref @bit8
+            at: @bit_native = 0x0
+            loop if @i_less_than_u_native(at, name_length) and @load_u8(entry, at) == @load_u8(name_text, at) {
+                at = @i_add_native(at, 0x1)
+            }
+            if at == name_length and @load_u8(entry, at) == 0x3D {
+                value: ref @bit8 = @ptr_add(entry as ref unknown, @i_add_native(at, 0x1)) as ref @bit8
+                size: @bit_native = 0x0
+                loop if @load_u8(value, size) != 0x0 {
+                    size = @i_add_native(size, 0x1)
+                }
+                if not @i_greater_than_u_native(size, capacity) {
+                    @memcpy(buffer as ref unknown, value as ref unknown, size)
+                }
+                length = .Some(size)
+                return
+            }
+            index = @i_add_native(index, 0x1)
+        }
+    }
+}
