@@ -9,8 +9,8 @@ pub mod toml;
 
 pub use lilac_module::MANIFEST_FILE;
 pub use settings::{
-    bundled_dir, bundled_libraries, default_name, is_program_name, Kind, Library, Manifest,
-    Overrides, Setting, Settings, Spanned, TargetChoice, LIB_DIR_VAR, SECTIONS, SETTINGS,
+    bundled_dir, bundled_libraries, default_name, is_program_name, GlobalUsings, Kind, Library,
+    Manifest, Overrides, Setting, Settings, Spanned, TargetChoice, LIB_DIR_VAR, SECTIONS, SETTINGS,
 };
 pub use template::{fill, read_template, template_dir, Fill, PROJECT_TEMPLATE, TEMPLATE_DIR_VAR};
 

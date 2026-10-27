@@ -296,6 +296,10 @@ pub struct Session {
     /// namespace; `None` means `<root>/build`. A manifest names it
     /// (`lilac_manifest::Settings::apply`).
     pub build_dir: Option<PathBuf>,
+    /// The project's global `using`s (`lilac.toml`'s `project.usings`,
+    /// their spans in [`Session::source_map`]): a folder compile gives
+    /// them to every project file ([`lilac_module::Project::usings`]).
+    pub usings: Vec<lilac_module::Using>,
     /// The last compile's analysis, when [`Session::keep_analysis`] keeps
     /// one and the compile got through type checking (a later failure
     /// keeps it).
@@ -349,6 +353,7 @@ impl Default for Session {
             project_files: Vec::new(),
             libraries: Vec::new(),
             build_dir: None,
+            usings: Vec::new(),
             analysis: None,
             keep_analysis: Keep::Nothing,
             require_entry: false,
@@ -415,6 +420,7 @@ impl Session {
             root,
             &self.libraries,
             self.build_dir.as_deref(),
+            &self.usings,
             fs,
             &mut self.source_map,
             &mut self.diags,

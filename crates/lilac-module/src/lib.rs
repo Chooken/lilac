@@ -70,10 +70,13 @@ pub struct FileUnit {
     pub src: String,
     /// The file's `using` directives, in source order.
     pub usings: Vec<Using>,
+    /// Whether [`Project::usings`] apply to this file: a project file, not
+    /// a mounted library's (or `@builtin`'s).
+    pub global_usings: bool,
 }
 
 /// One `using` directive.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Using {
     /// Dotted path from the root (a relative `using *.X` is stored already
     /// joined to the file's namespace path).
@@ -109,6 +112,9 @@ pub struct Project {
     pub namespaces: Vec<Namespace>,
     /// All source files, in load order.
     pub files: Vec<FileUnit>,
+    /// The global `using`s (`lilac.toml`'s `project.usings`): every file
+    /// whose [`FileUnit::global_usings`] is set has them after its own.
+    pub usings: Vec<Using>,
 }
 
 /// Loads the folder tree rooted at `root`, emitting `E025` for bad `using`s.
@@ -125,7 +131,7 @@ pub fn load(
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> Result<Project, ErrorGuaranteed> {
-    let (project, failed) = load_with_status(root, &[], None, fs, sources, diags);
+    let (project, failed) = load_with_status(root, &[], None, &[], fs, sources, diags);
     if failed {
         Err(diags.already_reported())
     } else {
@@ -138,11 +144,14 @@ pub fn load(
 /// before a bad `using`. `libraries` mounts each `(name, dir)` as the
 /// top-level namespace `name` (`using name.X` loads `dir/X`). The build
 /// folder `build_dir` (`<root>/build` when `None`) is not loaded when it
-/// is in the project's tree.
+/// is in the project's tree. `usings` are the global `using`s
+/// ([`Project::usings`]): each target is loaded (`E025` at the `using`
+/// when it is missing), and every project file has them.
 pub fn load_with_status(
     root: &Path,
     libraries: &[(String, PathBuf)],
     build_dir: Option<&Path>,
+    usings: &[Using],
     fs: &mut dyn Fs,
     sources: &mut SourceMap,
     diags: &mut Diags,
@@ -157,6 +166,7 @@ pub fn load_with_status(
                 root: root.to_path_buf(),
                 namespaces: Vec::new(),
                 files: Vec::new(),
+                usings: Vec::new(),
             },
             true,
         );
@@ -166,7 +176,7 @@ pub fn load_with_status(
         root_entries,
         None,
         None,
-        Walk::Whole { build_dir },
+        Walk::Whole { build_dir, usings },
         libraries,
         fs,
         sources,
@@ -214,8 +224,12 @@ pub fn load_file(
 enum Walk<'a> {
     /// None: a root file or a lone namespace.
     Usings,
-    /// Every project folder but the build folder (`None`: `<root>/build`).
-    Whole { build_dir: Option<&'a Path> },
+    /// Every project folder but the build folder (`None`: `<root>/build`),
+    /// and the global `using`s.
+    Whole {
+        build_dir: Option<&'a Path>,
+        usings: &'a [Using],
+    },
 }
 
 /// A root file read before loading ([`load_file`]).
@@ -267,11 +281,12 @@ fn load_from(
     sources: &mut SourceMap,
     diags: &mut Diags,
 ) -> (Project, bool) {
-    let (whole_root, build_folder) = match walk {
-        Walk::Usings => (false, None),
-        Walk::Whole { build_dir } => (
+    let (whole_root, build_folder, usings) = match walk {
+        Walk::Usings => (false, None, &[][..]),
+        Walk::Whole { build_dir, usings } => (
             root_entries.iter().any(|entry| is_lilac_file(entry)),
             build_dir.map(|dir| canonical_folder(fs, dir)),
+            usings,
         ),
     };
     // The root namespace holds the root folder only when it is loaded as a
@@ -314,6 +329,9 @@ fn load_from(
             failed = true;
         }
     }
+    for using in usings {
+        failed |= loader.reach_using(using, fs, diags);
+    }
 
     if let Some(file) = root_file {
         let name = file.name.to_owned();
@@ -344,7 +362,9 @@ fn load_from(
     }
     failed |= loader.drain(&mut files, fs, sources, diags);
     failed |= !loader.again.is_empty();
-    (loader.project(files), failed)
+    let mut project = loader.project(files);
+    project.usings = usings.to_vec();
+    (project, failed)
 }
 
 /// Namespace bookkeeping for [`load_from`].
@@ -390,6 +410,7 @@ impl Loader<'_> {
         let file_id = sources.add_file(&display, &src);
         let usings = scan_usings(&src, file_id, &self.namespaces[ns].path);
         let index = files.len();
+        let global_usings = !self.is_library(&self.namespaces[ns].path);
         files.push(FileUnit {
             name,
             path: path.to_path_buf(),
@@ -397,28 +418,31 @@ impl Loader<'_> {
             ns,
             src,
             usings: usings.clone(),
+            global_usings,
         });
         self.namespaces[ns].files.push(index);
 
         let mut failed = false;
-        for Using {
-            path: target_path,
-            span,
-            ..
-        } in usings
-        {
-            if self.reach(&target_path, Some(span), fs, diags) == Reach::Missing {
-                diags.emit(
-                    Diagnostic::error(
-                        codes::E025,
-                        format!("cannot find module folder `{target_path}`"),
-                    )
-                    .label(span, true, "imported here"),
-                );
-                failed = true;
-            }
+        for using in &usings {
+            failed |= self.reach_using(using, fs, diags);
         }
         failed
+    }
+
+    /// Reaches a `using`'s target. Returns whether it is missing (`E025`,
+    /// reported here).
+    fn reach_using(&mut self, using: &Using, fs: &mut dyn Fs, diags: &mut Diags) -> bool {
+        let missing = self.reach(&using.path, Some(using.span), fs, diags) == Reach::Missing;
+        if missing {
+            diags.emit(
+                Diagnostic::error(
+                    codes::E025,
+                    format!("cannot find module folder `{}`", using.path),
+                )
+                .label(using.span, true, "imported here"),
+            );
+        }
+        missing
     }
 
     /// Queues the namespace at dotted `path` and its ancestors (each once).
@@ -717,6 +741,7 @@ impl Loader<'_> {
             root: self.root.to_path_buf(),
             namespaces: self.namespaces,
             files,
+            usings: Vec::new(),
         }
     }
 }
@@ -786,7 +811,9 @@ pub fn single_file(name: &str, src: &str, sources: &mut SourceMap) -> Project {
             ns: 0,
             src: src.to_owned(),
             usings,
+            global_usings: true,
         }],
+        usings: Vec::new(),
     }
 }
 
@@ -1233,8 +1260,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1309,8 +1343,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1386,8 +1427,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1457,8 +1505,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         let paths: Vec<&str> = project
             .namespaces
@@ -1488,7 +1543,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &[], &mut fs, &mut sources, &mut diags);
         assert!(!failed, "{diags:?}");
         assert_eq!(project.namespaces.len(), 1);
         assert!(project.files.is_empty());
@@ -1514,6 +1569,7 @@ mod tests {
                 &root,
                 &[],
                 build_dir,
+                &[],
                 fs,
                 &mut SourceMap::new(),
                 &mut diags,
@@ -1558,8 +1614,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), PathBuf::from("missing"))];
-        let (_, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (_, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(failed);
         assert_eq!(e025_count(&diags), 1, "{diags:?}");
     }
@@ -1687,8 +1750,15 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let libraries = [("Std".to_owned(), lib.clone())];
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         let mut names: Vec<&str> = project
             .files
@@ -1725,7 +1795,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &[], &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1755,7 +1825,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &[], &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1785,7 +1855,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
         let (project, failed) =
-            super::load_with_status(&root, &[], None, &mut fs, &mut sources, &mut diags);
+            super::load_with_status(&root, &[], None, &[], &mut fs, &mut sources, &mut diags);
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1849,8 +1919,15 @@ mod tests {
         let (root, mut fs, libraries) = vendored("using Util\n");
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(!failed, "{diags:?}");
         assert!(!diags.has_errors(), "{diags:?}");
         let paths: Vec<&str> = project
@@ -1870,8 +1947,15 @@ mod tests {
         let (root, mut fs, libraries) = vendored("using vendor.Util\nusing vendor.Util.Deep\n");
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
-        let (project, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (project, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1897,8 +1981,15 @@ mod tests {
         fs.link(&root, "Shortcut", "vendor/Util");
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
-        let (_, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (_, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(failed);
         assert_eq!(
             e025_messages(&diags),
@@ -1921,8 +2012,15 @@ mod tests {
         ];
         let mut sources = SourceMap::new();
         let mut diags = Diags::new();
-        let (_, failed) =
-            super::load_with_status(&root, &libraries, None, &mut fs, &mut sources, &mut diags);
+        let (_, failed) = super::load_with_status(
+            &root,
+            &libraries,
+            None,
+            &[],
+            &mut fs,
+            &mut sources,
+            &mut diags,
+        );
         assert!(failed);
         assert_eq!(e025_messages(&diags), ["folder `Second` is `First` again"]);
     }

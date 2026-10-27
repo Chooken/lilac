@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use lilac_driver::{Entry, OptimizeMode, Session};
 use lilac_error::{closest, codes, Diagnostic, Diags, ErrorGuaranteed};
-use lilac_module::{is_identifier, Fs, MANIFEST_FILE};
+use lilac_module::{is_identifier, Fs, Using, MANIFEST_FILE};
 use lilac_span::{SourceMap, Span};
 use lilac_target::Target;
 
@@ -40,6 +40,8 @@ pub enum Kind {
     Program,
     /// An array of strings.
     Strings,
+    /// An array of `using`s: `"A.B"` or `"A.B as Name"`.
+    Usings,
 }
 
 /// One setting of [`SETTINGS`].
@@ -89,6 +91,14 @@ pub const SETTINGS: &[Setting] = &[
         default: Some("\".\""),
         flag: None,
         about: "The folder holding the project's code, relative to this file.",
+    },
+    Setting {
+        section: "project",
+        key: "usings",
+        kind: Kind::Usings,
+        default: Some("[]"),
+        flag: None,
+        about: "`using`s every project file has, such as \"Standard\" or \"Standard.Io as Io\".",
     },
     Setting {
         section: "build",
@@ -195,6 +205,17 @@ pub struct Library {
     pub span: Span,
 }
 
+/// `project.usings`: the `using`s every project file has, and the
+/// manifest's text, which their spans are in ([`Settings::apply`] adds it
+/// to the session's source map).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalUsings {
+    /// The `using`s, in the manifest's order.
+    pub usings: Vec<Using>,
+    /// The manifest's text.
+    pub source: String,
+}
+
 /// A read `lilac.toml`: every setting it gives that has a right value. A
 /// setting that is `E076` is left out, as if it were not written.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +228,8 @@ pub struct Manifest {
     pub name: Option<Spanned<String>>,
     /// `project.root`, as written.
     pub root: Option<Spanned<PathBuf>>,
+    /// `project.usings`, when it names any.
+    pub usings: Option<GlobalUsings>,
     /// `build.mode`.
     pub mode: Option<Spanned<OptimizeMode>>,
     /// `build.target`.
@@ -234,6 +257,7 @@ impl Manifest {
             path: dir.join(MANIFEST_FILE),
             name: None,
             root: None,
+            usings: None,
             mode: None,
             target: None,
             stack_traces: None,
@@ -371,6 +395,7 @@ impl Reader<'_> {
                 let read = self.folder(&name, value, true);
                 self.manifest.root = read.map(|value| Spanned { value, span });
             }
+            "usings" => self.manifest.usings = self.usings(&name, value),
             "mode" => {
                 let read = self.mode(&name, value);
                 self.manifest.mode = read.map(|value| Spanned { value, span });
@@ -666,6 +691,106 @@ impl Reader<'_> {
         }
     }
 
+    /// `project.usings`: each `"A.B"` or `"A.B as Name"`, a path from the
+    /// root (a library's name, or a folder of the project) and an alias
+    /// no other global `using` takes. Every mistake is reported, and the
+    /// setting holds the rest.
+    fn usings(&mut self, setting: &str, value: &Value) -> Option<GlobalUsings> {
+        let ValueKind::Array(items) = &value.kind else {
+            self.wrong_type(setting, "an array of `using`s", value);
+            return None;
+        };
+        let mut usings: Vec<Using> = Vec::with_capacity(items.len());
+        for item in items {
+            let ValueKind::String(text) = &item.kind else {
+                self.wrong_type(setting, "an array of `using`s", item);
+                continue;
+            };
+            let Some(using) = self.using(text, item) else {
+                continue;
+            };
+            if let Some((name, span)) = &using.alias {
+                let previous = usings.iter().find_map(|earlier| {
+                    earlier
+                        .alias
+                        .as_ref()
+                        .filter(|(other, _)| other == name)
+                        .map(|(_, at)| *at)
+                });
+                if let Some(previous) = previous {
+                    self.diags.emit(
+                        Diagnostic::error(codes::E076, format!("alias `{name}` is declared twice"))
+                            .label(*span, true, "aliased again here")
+                            .label(previous, false, "first aliased here"),
+                    );
+                    continue;
+                }
+            }
+            usings.push(using);
+        }
+        (!usings.is_empty()).then(|| GlobalUsings {
+            usings,
+            source: self.text.to_owned(),
+        })
+    }
+
+    /// One `project.usings` entry. Its spans are its parts' when the string
+    /// is written as it reads (no escapes), else the whole string's.
+    fn using(&mut self, text: &str, value: &Value) -> Option<Using> {
+        let words: Vec<&str> = text.split(' ').filter(|word| !word.is_empty()).collect();
+        let (path, alias) = match words.as_slice() {
+            [path] => (*path, None),
+            [path, "as", alias] => (*path, Some(*alias)),
+            _ => {
+                self.bad_using(text, value, "write \"A.B\", or \"A.B as Name\"");
+                return None;
+            }
+        };
+        if !path.split('.').all(is_identifier) {
+            let note = if path.starts_with('*') {
+                "a global `using` names a path from the root: it has no namespace to be relative to"
+            } else {
+                "a path is identifiers joined by `.`, such as `Standard.Io`"
+            };
+            self.bad_using(text, value, note);
+            return None;
+        }
+        if let Some(alias) = alias.filter(|alias| !is_identifier(alias)) {
+            self.bad_using(
+                text,
+                value,
+                &format!("alias `{alias}` is not an identifier"),
+            );
+            return None;
+        }
+        // Where `word`, a slice of `text`, is written.
+        let inner = self.inner(value, text);
+        let at = |word: &str| -> Span {
+            let Some(inner) = inner else {
+                return value.span;
+            };
+            let start = word.as_ptr() as usize - text.as_ptr() as usize;
+            let lo = inner.lo.0 + u32::try_from(start).unwrap_or(0);
+            let hi = lo + u32::try_from(word.len()).unwrap_or(0);
+            Span::new(lo, hi, inner.file)
+        };
+        Some(Using {
+            path: path.to_owned(),
+            span: value.span,
+            alias: alias.map(|alias| (alias.to_owned(), at(alias))),
+            segments: path.split('.').map(at).collect(),
+        })
+    }
+
+    /// `E076`: `text`, written at `value`, is not a `using`.
+    fn bad_using(&mut self, text: &str, value: &Value, note: &str) {
+        self.diags.emit(
+            Diagnostic::error(codes::E076, format!("`{text}` is not a `using`"))
+                .label(value.span, true, "")
+                .note(note.to_owned()),
+        );
+    }
+
     /// An array of strings.
     fn strings(&mut self, setting: &str, value: &Value) -> Option<Vec<String>> {
         let ValueKind::Array(items) = &value.kind else {
@@ -841,6 +966,8 @@ pub struct Settings {
     pub name: Option<String>,
     /// The project's root folder.
     pub root: Option<PathBuf>,
+    /// The global `using`s, when the manifest names any.
+    pub usings: Option<GlobalUsings>,
     /// The optimization mode.
     pub mode: OptimizeMode,
     /// The target.
@@ -896,6 +1023,7 @@ impl Settings {
                     .as_ref()
                     .map_or_else(|| dir.clone(), |root| dir.join(&root.value)),
             );
+            settings.usings.clone_from(&manifest.usings);
             if overrides.mode.is_none() {
                 settings.mode = spanned_value(manifest.mode.as_ref()).unwrap_or_default();
             }
@@ -949,13 +1077,32 @@ impl Settings {
     }
 
     /// Sets what a compile reads from the settings on `session`: the
-    /// libraries, the target, the mode, the entry (from `libc`) and, with a
-    /// manifest, the build folder the loader skips. A setting given by
+    /// libraries, the global `using`s (the manifest's text added to its
+    /// source map, so their spans are the session's), the target, the
+    /// mode, the entry (from `libc`) and, with a manifest, the build
+    /// folder the loader skips. A setting given by
     /// neither the flags nor a manifest leaves the session's own; without a
     /// manifest the loader skips `<root>/build`, whatever `--build-dir`
     /// says, as it always has.
     pub fn apply(&self, session: &mut Session) {
         session.libraries.clone_from(&self.libraries);
+        session.usings = self.usings.as_ref().map_or_else(Vec::new, |globals| {
+            let file = session.source_map.add_file(MANIFEST_FILE, &globals.source);
+            let moved = |span: Span| Span::new(span.lo.0, span.hi.0, file);
+            globals
+                .usings
+                .iter()
+                .map(|using| Using {
+                    path: using.path.clone(),
+                    span: moved(using.span),
+                    alias: using
+                        .alias
+                        .as_ref()
+                        .map(|(name, span)| (name.clone(), moved(*span))),
+                    segments: using.segments.iter().copied().map(moved).collect(),
+                })
+                .collect()
+        });
         if let Some(target) = self.target {
             session.target = target;
         }

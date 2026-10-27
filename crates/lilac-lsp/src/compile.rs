@@ -282,6 +282,8 @@ impl Job {
                     session.compile_namespace_with_stages(&root, namespace, &mut fs, &mut on_stage)
                 }
                 Unit::Folder(dir) => {
+                    // A folder outside the project is no file of it.
+                    session.usings.clear();
                     session.compile_project_with_stages(dir, &mut fs, &mut on_stage)
                 }
                 Unit::File(_) => {

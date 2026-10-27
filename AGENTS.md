@@ -700,6 +700,19 @@
   `Session::build_dir` is the folder the loader skips
   (`load_with_status`'s `build_dir`; `None` is `<root>/build`); `apply`
   sets it only with a manifest, so without one nothing changes.
+- Global `using`s: `project.usings` (`"A.B"`, `"A.B as Name"`; relative
+  `*.` and duplicate aliases are `E076`) is a `GlobalUsings`, the
+  `lilac_module::Using`s and the manifest's text. `Settings::apply` adds
+  that text to the session's source map and moves the spans there
+  (`Session::usings`), since the language server reads the manifest into
+  a map of its own; a folder compile passes them to `load_with_status`
+  (`Walk::Whole`), which reaches each (`E025` at the manifest) and keeps
+  them as `Project::usings`. The resolver adds them after a file's own
+  when `FileUnit::global_usings` (a project file: not a mounted
+  library's or `@builtin`'s; `conditional.rs` resets only the file's
+  own), and a global alias yields silently to the file's own alias and
+  to an item of its namespace or an ancestor's (`global_aliases`). The
+  language server's folder units outside the project take none.
 - `lilac init [<dir>]` (`init.rs`) copies the project template
   `templates/project/` (`lilac.toml`, `src/main.lilac`): the install
   folder's (`template_dir`: `LILAC_TEMPLATE_DIR`, else

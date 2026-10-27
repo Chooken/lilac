@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use lilac_ast::{Expr, FuncDecl, Item, ItemKind, Program, Type as AstType};
 use lilac_error::{codes, Diagnostic, Diags};
-use lilac_module::{FileUnit, Project};
+use lilac_module::{FileUnit, Project, Using};
 use lilac_span::{Doc, FileId, Span};
 
 /// Identity of one namespace (`NsId(0)` is the root).
@@ -434,10 +434,16 @@ pub fn resolve(project: &Project, programs: &[(FileId, Program)], diags: &mut Di
 
     for unit in &project.files {
         let ns = ns_id(unit.ns);
-        let mut visible = compute_visible(&resolved, ns, unit, &by_path);
-        let aliases = collect_aliases(&resolved, ns, unit, &by_path, diags);
+        let globals: &[Using] = if unit.global_usings {
+            &project.usings
+        } else {
+            &[]
+        };
+        let mut visible = compute_visible(&resolved, ns, unit, globals, &by_path);
+        let mut aliases = collect_aliases(&resolved, ns, unit, &by_path, diags);
         let sites = using_namespace_sites(unit, &by_path, &aliases);
         resolved.namespace_sites.extend(sites);
+        global_aliases(&resolved, ns, globals, &by_path, &mut aliases);
         for name in aliases.keys() {
             visible.remove(name);
         }
@@ -817,23 +823,17 @@ fn nearest_ancestor(path: &str, by_path: &HashMap<String, NsId>) -> Option<NsId>
 /// Builds a file's visible names: its ancestors' and its own namespace's items
 /// (any visibility; descendant reach), then each unaliased `using`d
 /// namespace's public items. Local names shadow imports; two imports of one
-/// name are ambiguous.
+/// name are ambiguous. `globals` are the project's global `using`s, after
+/// the file's own.
 fn compute_visible(
     resolved: &Resolved,
     ns: NsId,
     unit: &FileUnit,
+    globals: &[Using],
     by_path: &HashMap<String, NsId>,
 ) -> HashMap<String, Lookup> {
     let mut visible = HashMap::new();
-    let mut chain = vec![ns];
-    let mut current = resolved.namespaces[ns.0 as usize].parent;
-    while let Some(ancestor) = current {
-        if chain.contains(&ancestor) {
-            break;
-        }
-        chain.push(ancestor);
-        current = resolved.namespaces[ancestor.0 as usize].parent;
-    }
+    let chain = ancestry(resolved, ns);
     for ns in chain.iter().rev() {
         for (name, id) in &resolved.namespaces[ns.0 as usize].items {
             visible.insert(name.clone(), Lookup::One(*id));
@@ -843,7 +843,7 @@ fn compute_visible(
 
     let mut imported: HashMap<String, Vec<(DefId, Span)>> = HashMap::new();
     let mut seen = HashSet::new();
-    for using in &unit.usings {
+    for using in unit.usings.iter().chain(globals) {
         if using.alias.is_some() {
             continue;
         }
@@ -870,6 +870,20 @@ fn compute_visible(
         }
     }
     visible
+}
+
+/// `ns` and its ancestors, nearest first.
+fn ancestry(resolved: &Resolved, ns: NsId) -> Vec<NsId> {
+    let mut chain = vec![ns];
+    let mut current = resolved.namespaces[ns.0 as usize].parent;
+    while let Some(ancestor) = current {
+        if chain.contains(&ancestor) {
+            break;
+        }
+        chain.push(ancestor);
+        current = resolved.namespaces[ancestor.0 as usize].parent;
+    }
+    chain
 }
 
 /// The namespace names `unit`'s `using`s write (see
@@ -949,6 +963,35 @@ fn collect_aliases(
     aliases
 }
 
+/// Adds the global `using … as` aliases to a file's `aliases`. One yields,
+/// with no error, to the file's own alias of its name and to an item of
+/// the file's namespace or an ancestor's: a manifest cannot know every
+/// file's names. Two global aliases of one name are the manifest's `E076`.
+fn global_aliases(
+    resolved: &Resolved,
+    ns: NsId,
+    globals: &[Using],
+    by_path: &HashMap<String, NsId>,
+    aliases: &mut HashMap<String, (NsId, Span)>,
+) {
+    let chain = ancestry(resolved, ns);
+    for using in globals {
+        let Some((name, span)) = &using.alias else {
+            continue;
+        };
+        let declared = chain
+            .iter()
+            .any(|ns| resolved.namespaces[ns.0 as usize].items.contains_key(name));
+        if declared || aliases.contains_key(name) {
+            continue;
+        }
+        // A missing target is already `E025` from the loader.
+        if let Some(&target) = by_path.get(&using.path) {
+            aliases.insert(name.clone(), (target, *span));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,7 +1007,29 @@ mod tests {
         usings: &'static [&'static str],
     }
 
+    /// A `using` as a spec writes it: `A.B`, or `A.B as Name`.
+    fn using(text: &str) -> Using {
+        Using {
+            path: text.split(" as ").next().unwrap_or(text).to_owned(),
+            span: Span::dummy(),
+            alias: text
+                .split_once(" as ")
+                .map(|(_, alias)| (alias.to_owned(), Span::dummy())),
+            segments: Vec::new(),
+        }
+    }
+
     fn resolve_files(paths: &[&str], specs: &[Spec]) -> (Resolved, Vec<FileId>, Diags) {
+        resolve_with_globals(paths, specs, &[])
+    }
+
+    /// Like [`resolve_files`], with the project's global `using`s; a file
+    /// of a namespace whose head is `Lib` is a library's.
+    fn resolve_with_globals(
+        paths: &[&str],
+        specs: &[Spec],
+        globals: &[&str],
+    ) -> (Resolved, Vec<FileId>, Diags) {
         let mut sm = SourceMap::new();
         let mut diags = Diags::new();
         let mut namespaces: Vec<LoadedNs> = paths
@@ -992,18 +1057,8 @@ mod tests {
                 file,
                 ns: spec.ns,
                 src: spec.src.to_owned(),
-                usings: spec
-                    .usings
-                    .iter()
-                    .map(|u| lilac_module::Using {
-                        path: u.split(" as ").next().unwrap_or(u).to_owned(),
-                        span: Span::dummy(),
-                        alias: u
-                            .split_once(" as ")
-                            .map(|(_, alias)| (alias.to_owned(), Span::dummy())),
-                        segments: Vec::new(),
-                    })
-                    .collect(),
+                usings: spec.usings.iter().map(|u| using(u)).collect(),
+                global_usings: !paths[spec.ns].starts_with("Lib"),
             });
         }
         let ids = files.iter().map(|f| f.file).collect();
@@ -1011,6 +1066,7 @@ mod tests {
             root: PathBuf::from("."),
             namespaces,
             files,
+            usings: globals.iter().map(|u| using(u)).collect(),
         };
         let resolved = resolve(&project, &programs, &mut diags);
         (resolved, ids, diags)
@@ -1426,6 +1482,87 @@ shown: function () nothing {}
         assert_eq!(resolved.alias(files[0], "A"), Some(NsId(1)));
     }
 
+    /// The project's global `using`s reach every project file after its
+    /// own, and no library file.
+    #[test]
+    fn global_usings_import_into_project_files() {
+        let (resolved, files, diags) = resolve_with_globals(
+            &["", "a", "Lib", "b"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 1,
+                    src: "shared: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "helper: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 3,
+                    src: "shared: function () nothing {}\n",
+                    usings: &["a"],
+                },
+            ],
+            &["Lib", "b", "a as A"],
+        );
+        assert!(!diags.has_errors(), "{diags:?}");
+        let helper = one(&resolved, files[0], "helper");
+        assert_eq!(resolved.def(one(&resolved, files[0], "shared")).ns, NsId(3));
+        assert_eq!(resolved.def(helper).ns, NsId(2));
+        assert_eq!(resolved.alias(files[0], "A"), Some(NsId(1)));
+        assert_eq!(one(&resolved, files[1], "helper"), helper);
+        // A library file takes none.
+        assert_eq!(resolved.alias(files[2], "A"), None);
+        assert!(resolved.lookup(files[2], "shared").is_none());
+        // A file's own `using a` of what a global also imports is one
+        // import, and its own `shared` wins.
+        assert_eq!(resolved.def(one(&resolved, files[3], "shared")).ns, NsId(3));
+    }
+
+    /// A global alias yields, with no error, to the file's own alias of
+    /// its name and to a declaration its file reaches.
+    #[test]
+    fn global_aliases_yield() {
+        let (resolved, files, diags) = resolve_with_globals(
+            &["", "a", "b", "c"],
+            &[
+                Spec {
+                    ns: 0,
+                    src: "main: function () nothing {}\n",
+                    usings: &["b as M"],
+                },
+                Spec {
+                    ns: 1,
+                    src: "M: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 2,
+                    src: "f: function () nothing {}\n",
+                    usings: &[],
+                },
+                Spec {
+                    ns: 3,
+                    src: "g: function () nothing {}\n",
+                    usings: &[],
+                },
+            ],
+            &["c as M"],
+        );
+        assert_eq!(e054(&diags), 0, "{diags:?}");
+        assert_eq!(resolved.alias(files[0], "M"), Some(NsId(2)));
+        assert_eq!(resolved.alias(files[1], "M"), None);
+        assert!(resolved.lookup(files[1], "M").is_some());
+        assert_eq!(resolved.alias(files[2], "M"), Some(NsId(3)));
+    }
+
     #[test]
     fn same_namespace_files_merge_and_clash() {
         let (_, _, diags) = resolve_files(
@@ -1470,7 +1607,9 @@ shown: function () nothing {}
                 ns: 0,
                 src: src.to_owned(),
                 usings: Vec::new(),
+                global_usings: true,
             }],
+            usings: Vec::new(),
         };
         let resolved = resolve(&project, &[(file, program)], &mut diags);
         assert_eq!(resolved.defs.len(), 1);

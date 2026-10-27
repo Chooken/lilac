@@ -292,6 +292,90 @@ fn spans_are_kept() {
 }
 
 #[test]
+fn global_usings_read_with_their_parts() {
+    let text = "[project]\nusings = [\"Standard\", \"Standard.Io  as Io\", 'A.B']\n";
+    let globals = manifest(text, &[]).usings.expect("usings");
+    assert_eq!(globals.source, text);
+    let slice = |span: lilac_span::Span| &text[span.lo.0 as usize..span.hi.0 as usize];
+    let read: Vec<(&str, Option<&str>, Vec<&str>, &str)> = globals
+        .usings
+        .iter()
+        .map(|using| {
+            (
+                using.path.as_str(),
+                using.alias.as_ref().map(|(_, span)| slice(*span)),
+                using.segments.iter().map(|span| slice(*span)).collect(),
+                slice(using.span),
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("Standard", None, vec!["Standard"], "\"Standard\""),
+            (
+                "Standard.Io",
+                Some("Io"),
+                vec!["Standard", "Io"],
+                "\"Standard.Io  as Io\""
+            ),
+            ("A.B", None, vec!["A", "B"], "'A.B'"),
+        ]
+    );
+    assert_eq!(globals.usings[1].alias.as_ref().expect("alias").0, "Io");
+    assert!(manifest("[project]\nusings = []\n", &[]).usings.is_none());
+}
+
+#[test]
+fn global_using_mistakes() {
+    for entry in ["*.Util", "A..B", "A.B as", "A.B as 1x", "A.B with C", ""] {
+        let text = format!("[project]\nusings = [\"{entry}\", \"Fine\"]\n");
+        let read = read(&text);
+        assert_eq!(read.errors.len(), 1, "{entry}: {:?}", read.errors);
+        let (code, message, at, _) = &read.errors[0];
+        assert_eq!(code, "E076");
+        assert_eq!(message, &format!("`{entry}` is not a `using`"));
+        assert_eq!(at, &format!("\"{entry}\""));
+        let usings = read.manifest.expect("a manifest").usings.expect("usings");
+        assert_eq!(usings.usings.len(), 1, "the right one is kept");
+    }
+    let read = read("[project]\nusings = [\"A as M\", \"B as M\"]\n");
+    assert_eq!(read.errors.len(), 1, "{:?}", read.errors);
+    assert_eq!(read.errors[0].1, "alias `M` is declared twice");
+    assert_eq!(read.errors[0].2, "M");
+    assert_eq!(
+        error("[project]\nusings = \"Standard\"\n"),
+        pair(
+            "`project.usings` takes an array of `using`s",
+            "\"Standard\""
+        )
+    );
+}
+
+/// `apply` puts the manifest's text in the session's source map and the
+/// global `using`s' spans in it.
+#[test]
+fn applying_moves_global_usings_into_the_session() {
+    let text = "[project]\nusings = [\"Standard.Io as Io\"]\n";
+    let read = manifest(text, &[]);
+    let settings = Settings::resolve(Some(&read), &Overrides::default(), host());
+    let mut session = Session::new();
+    session.source_map.add_file("other.lilac", "x");
+    settings.apply(&mut session);
+    let [using] = session.usings.as_slice() else {
+        panic!("{:?}", session.usings);
+    };
+    let (_, alias) = using.alias.as_ref().expect("alias");
+    let file = session.source_map.file(alias.file).expect("the manifest");
+    assert_eq!(&file.src[alias.lo.0 as usize..alias.hi.0 as usize], "Io");
+    assert!(using
+        .segments
+        .iter()
+        .chain([&using.span])
+        .all(|span| span.file == alias.file));
+}
+
+#[test]
 fn unknown_sections_and_settings() {
     assert_eq!(
         error("[biuld]\nmode = \"debug\"\n"),
@@ -576,6 +660,7 @@ fn an_empty_manifest_is_the_defaults() {
             manifest_dir: Some(dir.clone()),
             name: Some("proj".to_owned()),
             root: Some(dir.clone()),
+            usings: None,
             mode: OptimizeMode::Debug,
             target: Some(host()),
             stack_traces: None,

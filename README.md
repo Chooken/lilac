@@ -153,6 +153,7 @@ with no argument, so they all build and check the same program:
 [project]
 name = "hello"
 root = "src"
+usings = ["Standard", "Standard.Io as Io"]
 
 [build]
 mode = "release"
@@ -175,6 +176,7 @@ args = ["-lm", "vendor/libgreet.a"]
 | --- | --- | --- | --- |
 | `project.name` | letters, digits, `-`, `_`, `.` | the folder's name | none |
 | `project.root` | the folder holding the code | `"."` | none |
+| `project.usings` | `using`s every project file has: `"A.B"` or `"A.B as Name"` | `[]` | none |
 | `build.mode` | `"debug"`, `"release"`, `"release-small"` | `"debug"` | `--mode=`, `--release` |
 | `build.target` | a triple, or `"host"` | `"host"` | `--target=` |
 | `build.stack-traces` | `true` or `false` | on in debug builds only | `--stack-traces=` |
@@ -192,6 +194,10 @@ args = ["-lm", "vendor/libgreet.a"]
   TOML string `\` starts an escape, so write Windows paths with `/` or in
   single quotes (`'C:\libs\Util'`). The linker runs in the manifest's
   folder, so `link.args` paths are relative to it too.
+- **Global `using`s.** Each of `project.usings` is in every file of the
+  project, after the file's own `using`s; a mounted library's files do not
+  get them. A file's own declarations and aliases come first: a global
+  alias yields to a name the file declares or reaches.
 - **Bundled libraries.** `Standard = { bundled = true }` mounts the
   `Standard` installed with Lilac (`lib/Standard`, or the folder
   `LILAC_LIB_DIR` names), so the manifest holds no path on your machine,

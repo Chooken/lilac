@@ -207,6 +207,50 @@ fn a_manifest_mistake_stops_the_command() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `project.usings` are every project file's `using`s; one naming no
+/// folder is `E025` at its place in `lilac.toml`.
+#[test]
+fn global_usings_reach_every_project_file() {
+    let dir = scratch("usings");
+    write(
+        &dir,
+        "app/Util/util.lilac",
+        "helper: function () nothing {\n}\n",
+    );
+    write(
+        &dir,
+        "app/Util/Deep/deep.lilac",
+        "inner: function () nothing {\n}\n",
+    );
+    write(
+        &dir,
+        "app/main.lilac",
+        "main: function () nothing {\n    helper()\n    D.inner()\n}\n",
+    );
+    let out = run(&dir, &["check", "app"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    write(
+        &dir,
+        "app/lilac.toml",
+        "[project]\nusings = [\"Util\", \"Util.Deep as D\"]\n",
+    );
+    let out = run(&dir, &["check", "app"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    write(
+        &dir,
+        "app/lilac.toml",
+        "[project]\nusings = [\"Util\", \"Missing\"]\n",
+    );
+    let out = run(&dir, &["check", "app"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("error[E025]"), "{err}");
+    assert!(err.contains("--> lilac.toml:2:19"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file argument is single-file mode: it reads no manifest, even one
 /// beside it.
 #[test]
