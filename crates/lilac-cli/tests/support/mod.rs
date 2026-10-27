@@ -3,17 +3,25 @@
 // Each test binary uses its own subset.
 #![allow(dead_code)]
 
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Builds `source` (a file or a project folder) as `exe` with `lilac build
 /// --libc`, `Standard` mounted for the platform hooks and `clang` as the
 /// linker, then runs it. `args` are extra build flags (`--mode=release`).
+/// The build folder is `exe`'s name with `.build`, beside it, so builds
+/// running at once never share an object file.
 pub fn build_and_run(clang: &Path, source: &Path, exe: &Path, args: &[&str]) -> Output {
     let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
     let build = Command::new(env!("CARGO_BIN_EXE_lilac"))
         .args(["build", "-q", "--libc"])
         .arg(format!("--lib=Standard={}", standard.display()))
+        .arg(format!(
+            "--build-dir={}",
+            exe.with_extension("build").display()
+        ))
         .args(args)
         .arg("-o")
         .arg(exe)
@@ -23,8 +31,7 @@ pub fn build_and_run(clang: &Path, source: &Path, exe: &Path, args: &[&str]) -> 
         .expect("runs lilac build");
     assert!(
         build.status.success(),
-        "{} failed to build:
-{}",
+        "{} failed to build:\n{}",
         source.display(),
         String::from_utf8_lossy(&build.stderr)
     );
@@ -119,4 +126,50 @@ fn place(src: &Path, dest: &Path) -> Option<()> {
         std::fs::metadata(dest).ok()?;
     }
     Some(())
+}
+
+/// Runs `work` on every item, on as many threads as the machine has
+/// cores, and returns the results in the items' order. Most of the
+/// integration tests' time is `lilac build`s and runs, which are
+/// independent processes. A panic in `work` is raised again here once the
+/// other workers stop.
+pub fn parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(4, NonZero::get)
+        .clamp(1, items.len().max(1));
+    let mut results: Vec<Option<R>> = items.iter().map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else { break };
+                        done.push((index, work(item)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        let mut panic = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(done) => {
+                    for (index, result) in done {
+                        results[index] = Some(result);
+                    }
+                }
+                Err(payload) => panic = Some(payload),
+            }
+        }
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
+        }
+    });
+    results
+        .into_iter()
+        .map(|result| result.expect("every item ran"))
+        .collect()
 }

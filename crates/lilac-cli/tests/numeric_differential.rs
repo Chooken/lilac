@@ -907,13 +907,17 @@ fn numeric_operations_match_rust() {
     std::fs::create_dir_all(&dir).expect("creates scratch dir");
     std::fs::write(dir.join("numeric.lilac"), program()).expect("writes the program");
     let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
-    let mut failures = Vec::new();
-    for mode in ["debug", "release"] {
+    let failures = support::parallel(&["debug", "release"], |mode| {
+        let mut failures = Vec::new();
         let exe = dir.join(format!("numeric-{mode}{}", std::env::consts::EXE_SUFFIX));
         let build = Command::new(env!("CARGO_BIN_EXE_lilac"))
             .args(["build", "-q"])
             .arg(format!("--lib=Standard={}", standard.display()))
             .arg(format!("--mode={mode}"))
+            .arg(format!(
+                "--build-dir={}",
+                dir.join(format!("build-{mode}")).display()
+            ))
             .arg("-o")
             .arg(&exe)
             .arg("numeric.lilac")
@@ -938,7 +942,9 @@ fn numeric_operations_match_rust() {
             }
         }
         assert!(cases > 100_000, "{mode}: only {cases} cases ran");
-    }
+        failures
+    })
+    .concat();
     let _ = std::fs::remove_dir_all(&dir);
     let shown: Vec<_> = failures.iter().take(40).cloned().collect();
     assert!(

@@ -336,13 +336,17 @@ fn run_family(label: &str, tables: &[Table], data: &[[&'static str; 3]]) {
     let source = program(tables, data);
     std::fs::write(dir.join("math.lilac"), &source).expect("writes the program");
     let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
-    let mut failures = Vec::new();
-    for mode in ["debug", "release"] {
+    let failures = support::parallel(&["debug", "release"], |mode| {
+        let mut failures = Vec::new();
         let exe = dir.join(format!("math-{mode}{}", std::env::consts::EXE_SUFFIX));
         let build = Command::new(env!("CARGO_BIN_EXE_lilac"))
             .args(["build", "-q"])
             .arg(format!("--lib=Standard={}", standard.display()))
             .arg(format!("--mode={mode}"))
+            .arg(format!(
+                "--build-dir={}",
+                dir.join(format!("build-{mode}")).display()
+            ))
             .arg("-o")
             .arg(&exe)
             .arg("math.lilac")
@@ -371,7 +375,9 @@ fn run_family(label: &str, tables: &[Table], data: &[[&'static str; 3]]) {
         if !run.status.success() && failures.is_empty() {
             failures.push(format!("{mode}: exit {:?}", run.status));
         }
-    }
+        failures
+    })
+    .concat();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         failures.is_empty(),

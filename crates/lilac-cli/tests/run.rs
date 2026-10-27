@@ -173,7 +173,8 @@ fn compile_c(file: &Path, toolchain: &Toolchain, scratch: &Path) -> Result<PathB
     Ok(object)
 }
 
-/// Compiles, links and runs one program; `Err` describes the first mismatch.
+/// Compiles, links and runs one program in its own folder of `scratch`;
+/// `Err` describes the first mismatch.
 fn run_one(
     source: &Path,
     expect: &Expect,
@@ -181,6 +182,8 @@ fn run_one(
     scratch: &Path,
 ) -> Result<(), String> {
     let name = source.file_stem().unwrap().to_string_lossy().into_owned();
+    let scratch = &scratch.join(&name);
+    std::fs::create_dir_all(scratch).expect("creates the program's scratch folder");
     let file = source.file_name().expect("program has a name");
     if let Some(code) = &expect.error {
         let out = lilac()
@@ -315,29 +318,35 @@ fn run_all(pending: bool) {
         u8::from(pending)
     ));
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
-    let mut failures = Vec::new();
-    let mut ran = 0;
-    for source in programs() {
-        let header = if source.is_dir() {
-            source.join("main.lilac")
-        } else {
-            source.clone()
-        };
-        let text = std::fs::read_to_string(&header).expect("reads program");
-        let expect = parse_header(&text);
-        if expect.pending.is_some() != pending {
-            continue;
-        }
-        ran += 1;
-        if let Err(why) = run_one(&source, &expect, &toolchain, &scratch) {
-            let note = expect
-                .pending
-                .as_deref()
-                .map(|p| format!(" (pending: {p})"))
-                .unwrap_or_default();
-            failures.push(format!("{}{note}: {why}", source.display()));
-        }
-    }
+    let selected: Vec<(PathBuf, Expect)> = programs()
+        .into_iter()
+        .filter_map(|source| {
+            let header = if source.is_dir() {
+                source.join("main.lilac")
+            } else {
+                source.clone()
+            };
+            let text = std::fs::read_to_string(&header).expect("reads program");
+            let expect = parse_header(&text);
+            (expect.pending.is_some() == pending).then_some((source, expect))
+        })
+        .collect();
+    let ran = selected.len();
+    let failures: Vec<String> = support::parallel(&selected, |(source, expect)| {
+        run_one(source, expect, &toolchain, &scratch)
+            .err()
+            .map(|why| {
+                let note = expect
+                    .pending
+                    .as_deref()
+                    .map(|p| format!(" (pending: {p})"))
+                    .unwrap_or_default();
+                format!("{}{note}: {why}", source.display())
+            })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     let _ = std::fs::remove_dir_all(&scratch);
     assert!(
         failures.is_empty(),

@@ -26,8 +26,13 @@ use std::process::Command;
 /// `Float64` and `Float32` cases each.
 const COUNT: u32 = 3000;
 
+/// The processes each mode's run is split over: a Debug run takes
+/// seconds, and each shard prints every `SHARDS`th case.
+const SHARDS: u32 = 8;
+
 const PROGRAM: &str = r#"using Standard
 using Standard.Io
+using Standard.Os as Os
 
 seed: @bit64 = 0x9E3779B97F4A7C15
 
@@ -162,9 +167,8 @@ parse16: function (text: @byte_buffer) (ok: @bit8, bits: Uint16) {
 
 // `f64 bits precision shortest fixed scientific`, then whether Lilac
 // parses the shortest text and the scientific text, and to what bits.
-case64: function (raw: @bit64) nothing {
+case64: function (raw: @bit64, p: Uint32) nothing {
     x: Float64 = Float64.from_bits(raw as Uint64)
-    p: Uint32 = precision()
     shortest: Text = empty_text()
     out: Formatter = Formatter.over[Text](ref shortest, ref Text.push)
     out.write($"{x}")
@@ -176,9 +180,8 @@ case64: function (raw: @bit64) nothing {
     print_line($"f64 {raw} {p} {x} {x.fixed(p)} {x.scientific(p)} {ok_short} {short_bits} {ok_sci} {sci_bits}")
 }
 
-case32: function (raw: @bit32) nothing {
+case32: function (raw: @bit32, p: Uint32) nothing {
     x: Float32 = Float32.from_bits(raw as Uint32)
-    p: Uint32 = precision()
     shortest: Text = empty_text()
     out: Formatter = Formatter.over[Text](ref shortest, ref Text.push)
     out.write($"{x}")
@@ -200,18 +203,43 @@ case16: function (raw: @bit16) nothing {
     print_line($"f16 {raw} {x} {ok} {bits}")
 }
 
+// Which of the %SHARDS% shares of the cases this process prints: the
+// digit in `LILAC_SHARD`.
+shard: function () k: @bit32 {
+    text: @array(@bit8, 4) = @array(@bit8, 4) {}
+    data: ref @bit8 = @array_at(ref text, 0x0)
+    match Os.environment_variable("LILAC_SHARD", data, @array_len(text)) {
+        .Some -> length: @bit_native {
+            if length == 0x1 {
+                k = @extend_zero(@i_sub_8(@load_u8(data, 0x0), 0x30))
+                return
+            }
+        }
+        .None => {}
+    }
+    @panic("LILAC_SHARD is not one digit")
+}
+
+// Every input and precision is drawn in every shard, so case `i` is the
+// same whichever shard prints it.
 main: function () nothing {
+    k: @bit32 = shard()
     i: @bit32 = 0x0
     loop {
         if i == %COUNT% { break }
-        case64(input64())
-        case32(input32())
+        mine: @bit8 = @i_mod_u_32(i, %SHARDS%) == k
+        raw64: @bit64 = input64()
+        p64: Uint32 = precision()
+        if mine { case64(raw64, p64) }
+        raw32: @bit32 = input32()
+        p32: Uint32 = precision()
+        if mine { case32(raw32, p32) }
         i = @i_add_32(i, 0x1)
     }
     h: @bit32 = 0x0
     loop {
         if h == 0x10000 { break }
-        case16(@truncate(h))
+        if @i_mod_u_32(h, %SHARDS%) == k { case16(@truncate(h)) }
         h = @i_add_32(h, 0x1)
     }
 }
@@ -607,16 +635,22 @@ fn float_formatting_matches_rust() {
     let dir = std::env::temp_dir().join(format!("lilac-float-format-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("creates scratch dir");
-    let program = PROGRAM.replace("%COUNT%", &format!("{COUNT:#x}"));
+    let program = PROGRAM
+        .replace("%COUNT%", &format!("{COUNT:#x}"))
+        .replace("%SHARDS%", &format!("{SHARDS:#x}"));
     std::fs::write(dir.join("format.lilac"), program).expect("writes the program");
     let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
-    let mut failures = Vec::new();
-    for mode in ["debug", "release"] {
+    let modes = ["debug", "release"];
+    let exes = support::parallel(&modes, |mode| {
         let exe = dir.join(format!("format-{mode}{}", std::env::consts::EXE_SUFFIX));
         let build = Command::new(env!("CARGO_BIN_EXE_lilac"))
             .args(["build", "-q"])
             .arg(format!("--lib=Standard={}", standard.display()))
             .arg(format!("--mode={mode}"))
+            .arg(format!(
+                "--build-dir={}",
+                dir.join(format!("build-{mode}")).display()
+            ))
             .arg("-o")
             .arg(&exe)
             .arg("format.lilac")
@@ -630,10 +664,24 @@ fn float_formatting_matches_rust() {
             "{mode} build failed:\n{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let run = Command::new(&exe).output().expect("runs the program");
-        assert!(run.status.success(), "{mode} run failed: {:?}", run.status);
+        exe
+    });
+    let runs: Vec<(usize, u32)> = (0..modes.len())
+        .flat_map(|mode| (0..SHARDS).map(move |shard| (mode, shard)))
+        .collect();
+    let results = support::parallel(&runs, |&(mode, shard)| {
+        let run = Command::new(&exes[mode])
+            .env("LILAC_SHARD", shard.to_string())
+            .output()
+            .expect("runs the program");
+        let mode = modes[mode];
+        assert!(
+            run.status.success(),
+            "{mode} shard {shard} failed: {:?}",
+            run.status
+        );
         let output = String::from_utf8_lossy(&run.stdout);
-        let (mut floats, mut halves) = (0, 0);
+        let (mut floats, mut halves, mut failures) = (0, 0, Vec::new());
         for line in output.lines() {
             if line.starts_with("f16") {
                 halves += 1;
@@ -644,9 +692,19 @@ fn float_formatting_matches_rust() {
                 failures.push(format!("{mode}: {error}"));
             }
         }
+        (floats, halves, failures)
+    });
+    for (index, mode) in modes.iter().enumerate() {
+        let mine = runs.iter().zip(&results).filter(|((m, _), _)| *m == index);
+        let floats: u32 = mine.clone().map(|(_, (floats, _, _))| floats).sum();
+        let halves: u32 = mine.map(|(_, (_, halves, _))| halves).sum();
         assert_eq!(floats, 2 * COUNT, "{mode}: float cases");
         assert_eq!(halves, 0x10000, "{mode}: Float16 cases");
     }
+    let failures: Vec<String> = results
+        .into_iter()
+        .flat_map(|(_, _, failures)| failures)
+        .collect();
     let _ = std::fs::remove_dir_all(&dir);
     let shown: Vec<_> = failures.iter().take(40).cloned().collect();
     assert!(

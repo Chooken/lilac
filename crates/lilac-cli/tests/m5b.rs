@@ -65,7 +65,7 @@ fn ll_snapshots_stable() {
         "there must be exactly one `.ll` snapshot per success fixture"
     );
 
-    for snapshot in snapshots {
+    let failures: Vec<String> = support::parallel(&snapshots, |snapshot| {
         let source = snapshot.with_extension("lilac");
         // Run in `tests/ui` with the bare name, so panic sites read the same
         // on every machine.
@@ -79,13 +79,18 @@ fn ll_snapshots_stable() {
             .arg(source.file_name().expect("a file name"))
             .output()
             .expect("runs lilac");
-        assert!(
-            output.status.success(),
-            "{}:\n{}",
-            source.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+        (!output.status.success()).then(|| {
+            format!(
+                "{}:\n{}",
+                source.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Locates the toolchain `clang`: `%LLVM_SYS_181_PREFIX%\bin\clang[.exe]`, else
@@ -131,18 +136,21 @@ fn compiles_and_runs_on_host() {
     let scratch = scratch_dir();
     std::fs::create_dir_all(&scratch).expect("creates scratch dir");
 
-    for source in success_fixtures() {
-        let name = stem(&source);
-        for (label, opt) in [("debug", "--mode=debug"), ("release", "--mode=release")] {
-            let exe = scratch.join(format!("{name}-{label}.exe"));
-            let run = support::build_and_run(&clang, &source, &exe, &[opt]);
-            assert!(
-                run.status.success(),
-                "{name} ({label}) exited with {:?}",
-                run.status.code()
-            );
-        }
-    }
+    let builds: Vec<(PathBuf, &str)> = success_fixtures()
+        .into_iter()
+        .flat_map(|source| ["debug", "release"].map(|mode| (source.clone(), mode)))
+        .collect();
+    let failures: Vec<String> = support::parallel(&builds, |(source, mode)| {
+        let name = stem(source);
+        let exe = scratch.join(format!("{name}-{mode}.exe"));
+        let run = support::build_and_run(&clang, source, &exe, &[&format!("--mode={mode}")]);
+        (!run.status.success())
+            .then(|| format!("{name} ({mode}) exited with {:?}", run.status.code()))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 
     let _ = std::fs::remove_dir_all(&scratch);
 }

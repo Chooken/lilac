@@ -284,30 +284,38 @@ fn every_numeric_operation_links_natively() {
     std::fs::create_dir_all(&dir).expect("creates scratch dir");
     std::fs::write(dir.join("numeric.lilac"), program()).expect("writes the program");
     let standard = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/Standard");
-    let mut failures = Vec::new();
-    for triple in TARGETS {
-        for mode in ["debug", "release"] {
-            let out = Command::new(env!("CARGO_BIN_EXE_lilac"))
-                .args(["build", "-q"])
-                .arg(format!("--lib=Standard={}", standard.display()))
-                .arg(format!("--target={triple}"))
-                .arg(format!("--mode={mode}"))
-                .arg("-o")
-                .arg(dir.join(format!("{triple}-{mode}")))
-                .arg("numeric.lilac")
-                .current_dir(&dir)
-                .env("LILAC_SYSROOT", &sysroot)
-                .env("NO_COLOR", "1")
-                .output()
-                .expect("runs lilac");
-            if !out.status.success() {
-                failures.push(format!(
-                    "{triple} ({mode}):\n{}",
-                    String::from_utf8_lossy(&out.stderr)
-                ));
-            }
-        }
-    }
+    let builds: Vec<(&str, &str)> = TARGETS
+        .iter()
+        .flat_map(|triple| ["debug", "release"].map(|mode| (*triple, mode)))
+        .collect();
+    let failures: Vec<String> = support::parallel(&builds, |(triple, mode)| {
+        let out = Command::new(env!("CARGO_BIN_EXE_lilac"))
+            .args(["build", "-q"])
+            .arg(format!("--lib=Standard={}", standard.display()))
+            .arg(format!("--target={triple}"))
+            .arg(format!("--mode={mode}"))
+            .arg(format!(
+                "--build-dir={}",
+                dir.join(format!("build-{triple}-{mode}")).display()
+            ))
+            .arg("-o")
+            .arg(dir.join(format!("{triple}-{mode}")))
+            .arg("numeric.lilac")
+            .current_dir(&dir)
+            .env("LILAC_SYSROOT", &sysroot)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("runs lilac");
+        (!out.status.success()).then(|| {
+            format!(
+                "{triple} ({mode}):\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

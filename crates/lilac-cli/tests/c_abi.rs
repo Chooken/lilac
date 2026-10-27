@@ -452,13 +452,15 @@ fn objects_cross_the_c_abi_as_clang_passes_them() {
     };
     let dir = std::env::temp_dir().join(format!("lilac-c-abi-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch folder");
-    let mut failures = Vec::new();
-    let mut checked = 0;
-    for target in Target::supported() {
-        if !target.passes_c_aggregates() {
-            continue;
-        }
+    let targets: Vec<Target> = Target::supported()
+        .into_iter()
+        .filter(Target::passes_c_aggregates)
+        .collect();
+    let results = support::parallel(&targets, |&target| {
+        let mut failures = Vec::new();
         let corpus = Corpus::new(has_half(&clang, target));
+        let dir = dir.join(target.to_string());
+        std::fs::create_dir_all(&dir).expect("scratch folder");
         let lilac_file = dir.join("corpus.lilac");
         std::fs::write(&lilac_file, corpus.lilac()).expect("writes the Lilac corpus");
         let lilac = Command::new(env!("CARGO_BIN_EXE_lilac"))
@@ -493,7 +495,6 @@ fn objects_cross_the_c_abi_as_clang_passes_them() {
             "{target}: the modules declare different functions"
         );
         for (name, sig) in &ours {
-            checked += 1;
             if theirs[name] != *sig {
                 failures.push(format!(
                     "{target} `{name}`:\n  lilac {sig}\n  clang {}",
@@ -501,7 +502,13 @@ fn objects_cross_the_c_abi_as_clang_passes_them() {
                 ));
             }
         }
-    }
+        (ours.len(), failures)
+    });
+    let checked: usize = results.iter().map(|(checked, _)| checked).sum();
+    let failures: Vec<String> = results
+        .into_iter()
+        .flat_map(|(_, failures)| failures)
+        .collect();
     assert!(checked > 0, "nothing was compared");
     assert!(
         failures.is_empty(),
