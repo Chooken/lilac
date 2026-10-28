@@ -71,19 +71,26 @@ write: function (handle: Handle, buffer: ref unknown, length: @bit_native) resul
     }
 }
 
-/// Writes all `length` bytes at `buffer`, or stops at the first error.
+/// Writes all `length` bytes at `buffer`, or stops at the first error. A
+/// write cut short by a signal (`.Interrupted`) is retried, and one that
+/// writes nothing fails with `.WriteZero` rather than looping forever.
 write_all: function (handle: Handle, buffer: ref unknown, length: @bit_native) error: Optional[Error] {
     // A zeroed `Optional` is `Some`.
     error = .None
     done: @bit_native = 0x0
-    loop {
-        if @i_less_than_u_native(done, length) {
-        } else break
+    loop if @i_less_than_u_native(done, length) {
         match write(handle, @ptr_add(buffer, done), @i_sub_native(length, done)) {
             .Ok -> written: @bit_native {
+                if written == 0x0 {
+                    error = .Some(.WriteZero)
+                    break
+                }
                 done = @i_add_native(done, written)
             }
             .Error -> why: Error {
+                if why == .Interrupted {
+                    continue
+                }
                 error = .Some(why)
                 break
             }

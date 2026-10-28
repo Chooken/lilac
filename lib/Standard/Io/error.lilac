@@ -1,0 +1,30 @@
+using Standard.Os as Os
+
+/// Why an I/O call failed.
+Error: alias Os.Error
+
+/// `not found`, `permission denied`, ..., `OS error 1234` for a code with
+/// no name. It lives in `Io`, not `Os`, so `Os` depends on nothing above
+/// it.
+@format: function (error: ref Os.Error, out: ref Formatter) nothing {
+    match error {
+        .Other -> code: @bit32 => out.write($"OS error {code as Uint32}")
+        .NotFound => out.write_bytes("not found")
+        .PermissionDenied => out.write_bytes("permission denied")
+        .AlreadyExists => out.write_bytes("already exists")
+        .Interrupted => out.write_bytes("interrupted")
+        .InvalidInput => out.write_bytes("invalid input")
+        .OutOfMemory => out.write_bytes("out of memory")
+        .WouldBlock => out.write_bytes("would block")
+        .BrokenPipe => out.write_bytes("broken pipe")
+        .IsDirectory => out.write_bytes("is a directory")
+        .NotDirectory => out.write_bytes("not a directory")
+        .DirectoryNotEmpty => out.write_bytes("directory not empty")
+        .NoSpace => out.write_bytes("no space left")
+        .TimedOut => out.write_bytes("timed out")
+        .Unsupported => out.write_bytes("unsupported")
+        .BadHandle => out.write_bytes("bad handle")
+        .InvalidData => out.write_bytes("invalid UTF-8")
+        .WriteZero => out.write_bytes("wrote zero bytes")
+    }
+}

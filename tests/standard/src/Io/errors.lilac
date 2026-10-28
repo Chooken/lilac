@@ -1,0 +1,24 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+
+test "Io errors format as their text" {
+    not_found: Error = .NotFound
+    expect_text($"{not_found}", "not found")
+    denied: Error = .PermissionDenied
+    expect_text($"{denied}", "permission denied")
+    invalid: Error = .InvalidData
+    expect_text($"{invalid}", "invalid UTF-8")
+    zero: Error = .WriteZero
+    expect_text($"{zero}", "wrote zero bytes")
+}
+
+test "An Io error with no name formats as its OS code" {
+    other: Error = .Other(0x4D2)
+    expect_text($"{other}", "OS error 1234")
+}
+
+test "An Io error formats inside other text" {
+    error: Error = .BrokenPipe
+    expect_text($"write failed: {error}.", "write failed: broken pipe.")
+}

@@ -29,6 +29,12 @@ Error: either {
     TimedOut
     Unsupported
     BadHandle
+    /// Bytes that should be UTF-8 are not. No OS code maps to it: only
+    /// `Io` reports it.
+    InvalidData
+    /// A write accepted no bytes, so writing the rest would never finish.
+    /// No OS code maps to it: only `Io` and `write_all` report it.
+    WriteZero
 }
 
 /// The error an `errno` value names.
