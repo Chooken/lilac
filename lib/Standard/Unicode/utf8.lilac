@@ -1,0 +1,234 @@
+/// The scalar starting at `at` (which must be below the count) and its
+/// length in bytes; fails with the length of the bad bytes and why.
+decode: function (bytes: Slice[Byte], at: Int) scalar: Uint32, length: Int else error_length: Int, kind: Utf8ErrorKind {
+    lead: Byte = bytes.get(at)
+
+    if lead < 0x80 {
+        scalar = lead
+        length = 1
+        return
+    }
+
+    if lead < 0xC0 {
+        error_length = 1
+        kind = .UnexpectedContinuation
+        fail
+    }
+
+    if lead < 0xC2 {
+        error_length = 1
+        kind = .Overlong
+        fail
+    }
+
+    // The range of the second byte: narrowed for some leads, below.
+    need: Int = 0
+    low: Byte = 0x80
+    high: Byte = 0xBF
+
+    if lead < 0xE0 {
+        need = 1
+        scalar = @bit_and_8(lead as @bit8, 0x1F) as Byte
+    } else if lead < 0xF0 {
+        need = 2
+        scalar = @bit_and_8(lead as @bit8, 0x0F) as Byte
+        if lead == 0xE0 as Byte {
+            // Below A0 is overlong (under U+0800).
+            low = 0xA0
+        } else if lead == 0xED as Byte {
+            // Above 9F is a surrogate (U+D800..DFFF).
+            high = 0x9F
+        }
+    } else if lead < 0xF5 {
+        need = 3
+        scalar = @bit_and_8(lead as @bit8, 0x07) as Byte
+        if lead == 0xF0 as Byte {
+            // Below 90 is overlong (under U+10000).
+            low = 0x90
+        } else if lead == 0xF4 as Byte {
+            // Above 8F is past U+10FFFF.
+            high = 0x8F
+        }
+    } else {
+        error_length = 1
+        kind = .TooLarge
+        fail
+    }
+
+    index: Int = 1
+
+    loop if index <= need {
+
+        if at + index == bytes.get_count() {
+            error_length = index
+            kind = .Truncated
+            fail
+        }
+
+        byte: Byte = bytes.get(at + index)
+
+        if byte < low or byte > high {
+
+            kind = .Truncated
+
+            // A continuation byte outside the narrowed range: the lead
+            // says why.
+            if index == 1 as Int and 0x80 <= byte and byte <= 0xBF {
+
+                if lead == 0xE0 as Byte or lead == 0xF0 as Byte {
+                    kind = .Overlong
+                } else if lead == 0xED as Byte {
+                    kind = .Surrogate
+                } else if lead == 0xF4 as Byte {
+                    kind = .TooLarge
+                }
+            }
+
+            error_length = index
+            fail
+        }
+
+        scalar = @bit_or_32(
+            @bit_shift_left_32(scalar as @bit32, 6),
+            @bit_and_32(byte as Uint32 as @bit32, 0x3F)
+        )
+
+        // Every byte after the second is any continuation byte.
+        low = 0x80
+        high = 0xBF
+        index += 1
+    }
+
+    length = need + 1
+}
+
+/// The scalar starting at `at` and its length in bytes, in bytes already
+/// known to be valid UTF-8 (`at` must start a scalar). Checks nothing.
+decode_valid: function (bytes: Slice[Byte], at: Int) scalar: Uint32, length: Int {
+    lead: Byte = bytes.get(at)
+
+    if lead < 0x80 {
+        scalar = lead
+        length = 1
+        return
+    }
+
+    // The lead says the length; its low bits are the scalar's top bits.
+    if lead < 0xE0 {
+        length = 2
+        scalar = @bit_and_8(lead as @bit8, 0x1F) as Byte
+    } else if lead < 0xF0 {
+        length = 3
+        scalar = @bit_and_8(lead as @bit8, 0x0F) as Byte
+    } else {
+        length = 4
+        scalar = @bit_and_8(lead as @bit8, 0x07) as Byte
+    }
+
+    index: Int = 1
+
+    loop if index < length {
+        byte: Byte = bytes.get(at + index)
+        scalar = @bit_or_32(
+            @bit_shift_left_32(scalar as @bit32, 6),
+            @bit_and_32(byte as Uint32 as @bit32, 0x3F)
+        )
+        index += 1
+    }
+}
+
+/// Succeeds when `bytes` are all valid UTF-8; fails with where the first
+/// bad sequence starts and why.
+validate: function (bytes: Slice[Byte]) nothing else error: Utf8Error {
+    count: Int = bytes.get_count()
+    at: Int = 0
+
+    // Each step takes a whole word of ASCII, one ASCII byte, or one
+    // scalar.
+    loop if at < count {
+
+        // A word at a time where it can: the fast path for ASCII text.
+        if at + WORD <= count and word_aligned(bytes, at) and word_is_ascii(bytes, at) {
+            at += WORD
+            continue
+        }
+
+        // One ASCII byte, without decoding it.
+        if bytes.get(at) < 0x80 {
+            at += 1
+            continue
+        }
+
+        // Anything else is one scalar, or the error.
+        _: Uint32, length: Int = decode(bytes, at) else -> _: Int, kind: Utf8ErrorKind {
+            error = Utf8Error {
+                offset = at
+                kind = kind
+            }
+            fail
+        }
+
+        at += length
+    }
+}
+
+private {
+    /// Bytes in a word: the target's pointer size.
+    WORD: Int => @builtin.Target.pointer_size as Int
+
+    /// Each byte of a word `0x80`: the bit an ASCII byte never has.
+    HIGH_BITS: @bit_native => @i_mul_native(@i_div_u_native(@bit_not_native(0x0), 0xFF), 0x80)
+
+    /// Whether byte `at` is at a word-aligned address. A word is read
+    /// only from one: a load must be aligned to its type.
+    word_aligned: function (bytes: Slice[Byte], at: Int) aligned: @bit8 {
+        address: @bit_native = @ptr_to_address(bytes.get(at) as ref unknown)
+        aligned = @bit_and_native(address, @i_sub_native(@builtin.Target.pointer_size, 0x1)) == 0x0
+    }
+
+    /// Whether the word starting at byte `at` is all ASCII. Byte `at`
+    /// must be word-aligned, with a whole word left after it.
+    word_is_ascii: function (bytes: Slice[Byte], at: Int) ascii: @bit8 {
+        word: @bit_native = bytes.get(at) as ref unknown as ref @bit_native
+        ascii = @bit_and_native(word, HIGH_BITS) == 0x0
+    }
+}
+/// Writes `scalar` as UTF-8 at the start of `into`, which needs room for
+/// it (`scalar.utf8_length()` bytes; 4 always do), and returns how many
+/// bytes it wrote.
+encode: function (scalar: Scalar, into: Slice[Byte]) length: Int {
+    value: @bit32 = scalar.value()
+
+    if @i_less_than_u_32(value, 0x80) {
+        into.get(0) = low_byte(value)
+        length = 1
+    } else if @i_less_than_u_32(value, 0x800) {
+        into.get(0) = low_byte(@bit_or_32(0xC0, @bit_shift_right_u_32(value, 0x6)))
+        into.get(1) = continuation(value, 0x0)
+        length = 2
+    } else if @i_less_than_u_32(value, 0x10000) {
+        into.get(0) = low_byte(@bit_or_32(0xE0, @bit_shift_right_u_32(value, 0xC)))
+        into.get(1) = continuation(value, 0x6)
+        into.get(2) = continuation(value, 0x0)
+        length = 3
+    } else {
+        into.get(0) = low_byte(@bit_or_32(0xF0, @bit_shift_right_u_32(value, 0x12)))
+        into.get(1) = continuation(value, 0xC)
+        into.get(2) = continuation(value, 0x6)
+        into.get(3) = continuation(value, 0x0)
+        length = 4
+    }
+}
+
+private {
+    /// The low 8 bits of `bits`.
+    low_byte: function (bits: @bit32) byte: Byte {
+        narrow: @bit8 = @truncate(bits)
+        byte = narrow as Byte
+    }
+
+    /// A continuation byte: `10` then the six bits of `value` from bit
+    /// `shift` up.
+    continuation: function (value: @bit32, shift: @bit32) Byte =>
+        low_byte(@bit_or_32(0x80, @bit_and_32(@bit_shift_right_u_32(value, shift), 0x3F)))
+}

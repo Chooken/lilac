@@ -275,7 +275,7 @@ consumer meet in it:
 |---|---|
 | `Formatter` | Where formatted text goes: a structure holding a `target: ref unknown` and a `sink: FormatSink`. `Formatter.over(target, sink)` makes one; `write(text: Format)` writes a format (an f-string, a literal or one formattable value), `write_bytes(bytes)` raw bytes. |
 | `Format` | `alias @format_args(Formatter)`: the type of an f-string written into a `Formatter`. |
-| `FormatSink` | `alias function (target: ref unknown, bytes: @byte_buffer) nothing`: what a consumer hands a `Formatter`. |
+| `FormatSink` | `alias function (target: ref unknown, bytes: Slice[Byte]) nothing`: what a consumer hands a `Formatter`. |
 | `Hex`, `Binary` | A number's bits in base 16 (lowercase) or 2, no prefix, at the type's width: `{n.hex()}`, `{n.binary()}`. |
 | `Fixed`, `Scientific` | A float formatted with `precision` digits after the decimal point (ties rounded to even), fixed-point or scientific: `{x.fixed(3)}`, `{x.scientific(4)}`. |
 | `Padded` | `pad_left(ref f, width)`, `pad_right` and `pad_center` (an odd space goes after) pad a `Format` with spaces to `width` code points; a counting `Formatter` measures it first. |

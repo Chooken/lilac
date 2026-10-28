@@ -11,34 +11,58 @@ String: structure {
         result = String {
             layout = .Inline(StringInline.new())
         }
-        result.formatter().write(format)
+        result.add(format)
     }
 
     new_using: function (format: Format, allocator: Heap.Allocator) result: String {
         result = String {
             layout = .Heap(StringHeap.new_using(allocator))
         }
-        result.formatter().write(format)
+        result.add(format)
     }
 
-    add: function (self, text: @byte_buffer) nothing {
-        match self.layout {
-            .Inline -> inline: ref StringInline { 
-                inline.add(text) else -> buffer: StringHeap {
-                    self.layout = .Heap(buffer)
-                    return
-                }
-            }
+    from_bytes: function (bytes: Slice[Byte]) result: String else error: Unicode.Utf8Error {
 
-            .Heap -> buffer: ref StringHeap {
-                buffer.add(text)
-            }
+        result = String {
+            layout = .Inline(StringInline.new())
+        }
+
+        result.add_bytes(bytes) else -> validate_error: Unicode.Utf8Error {
+            error = validate_error
+            fail
         }
     }
 
-    formatter: function (self) result: Formatter {
-        result = Formatter.over[String](self, ref String.add)
+    from_bytes_lossy: function (bytes: Slice[Byte]) result: String {
+
+        result = String {
+            layout = .Inline(StringInline.new())
+        }
+
+        result.add_bytes_lossy(bytes)
     }
+
+    add: function (self, format: Format) nothing {
+        start: Int = self.get_count()
+        self.formatter().write(format)
+        self.repair_from(start)
+    }
+
+    add_bytes_lossy: function (self, bytes: Slice[Byte]) nothing {
+        start: Int = self.get_count()
+        self.append_raw(bytes)
+        self.repair_from(start)
+    }
+
+    add_bytes: function (self, bytes: Slice[Byte]) nothing else error: Unicode.Utf8Error {
+        Unicode.validate(bytes) else -> validate_error: Unicode.Utf8Error {
+            error = validate_error
+            fail
+        }
+        self.append_raw(bytes)
+    }
+
+    get_count: function (self) Int => self.byte_slice().get_count()
 
     hash: function (self) @bit64 => Hash.Wyhash.hash(0x0, self.byte_slice())
 
@@ -51,6 +75,8 @@ String: structure {
     @eql: function (lhs: String, rhs: @byte_buffer) Bool => Memory.equal_bytes(lhs.byte_slice(), rhs)
 
     @eql: function (lhs: @byte_buffer, rhs: String) Bool => Memory.equal_bytes(lhs, rhs.byte_slice())
+
+    @conversion: function (from: @byte_buffer) String => new(from)
 
     @conversion: function (from: Format) String => new(from)
 
@@ -78,18 +104,105 @@ String: structure {
     }
 
     private {
+
         byte_slice: function (self) slice: Slice[Byte] {
             match self.layout {
 
-                .Inline -> inline: StringInline {
+                .Inline -> inline: ref StringInline {
                     slice = inline.get_slice()
                 }
 
-                .Heap -> heap: StringHeap {
+                .Heap -> heap: ref StringHeap {
                     slice = heap.get_slice()
                 }
             }
         }
+
+        append_raw: function (self, bytes: Slice[Byte]) nothing {
+            match self.layout {
+                .Inline -> inline: ref StringInline { 
+                    inline.add(bytes) else -> buffer: StringHeap {
+                        self.layout = .Heap(buffer)
+                        return
+                    }
+                }
+
+                .Heap -> buffer: ref StringHeap {
+                    buffer.add(bytes)
+                }
+            }
+        }
+
+        /// Makes the bytes from `start` to the end valid UTF-8, each bad
+        /// sequence becoming U+FFFD. The bytes before `start` must be
+        /// valid already: they end on a whole scalar, so no sequence
+        /// crosses `start` and checking from it is enough.
+        repair_from: function (self, start: Int) nothing {
+            bytes: Slice[Byte] = self.byte_slice()
+            rest: Slice[Byte] = bytes.slice(Range.of(start, bytes.get_count()))
+
+            // The common case: valid, nothing to do.
+            Unicode.validate(rest) else -> error: Unicode.Utf8Error {
+                self.replace_bad_from(start + error.offset)
+                return
+            }
+        }
+
+        /// Rewrites the bytes from `first_bad` (which starts a bad
+        /// sequence, with only valid bytes before it) to the end, each bad
+        /// sequence becoming U+FFFD.
+        replace_bad_from: function (self, first_bad: Int) nothing {
+            bytes: Slice[Byte] = self.byte_slice()
+
+            // Copy the rest out, since it is rewritten into this string's
+            // own storage. This path only runs on bad input, so the
+            // allocation does not matter.
+            tail: List[Byte] = List[Byte].new()
+            tail.add_slice(bytes.slice(Range.of(first_bad, bytes.get_count())))
+            self.truncate(first_bad)
+
+            rest: Slice[Byte] = tail.get_slice()
+            at: Int = 0
+            // Where the valid bytes not yet appended start.
+            run: Int = 0
+
+            loop if at < rest.get_count() {
+
+                _scalar: Uint32, length: Int = Unicode.decode(rest, at) else -> bad: Int, _kind: Unicode.Utf8ErrorKind {
+                    // The valid run before it, then one U+FFFD for the
+                    // bad bytes; the next decode starts after them.
+                    self.append_raw(rest.slice(Range.of(run, at)))
+                    self.append_raw(REPLACEMENT)
+                    at += bad
+                    run = at
+                    continue
+                }
+
+                at += length
+            }
+
+            self.append_raw(rest.slice(Range.of(run, at)))
+        }
+
+        /// Shortens the string to its first `count` bytes.
+        truncate: function (self, count: Int) nothing {
+            match self.layout {
+                .Inline -> inline: ref StringInline {
+                    inline.count = count.to_uint8_wrapping()
+                }
+
+                .Heap -> heap: ref StringHeap {
+                    heap.list.remove_range(Range.of(count, heap.list.get_count()))
+                }
+            }
+        }
+
+        formatter: function (self) result: Formatter {
+            result = Formatter.over[String](self, ref String.append_raw)
+        }
+
+        /// U+FFFD, the replacement character, in UTF-8.
+        REPLACEMENT: @byte_buffer => "\xEF\xBF\xBD"
     }
 }
 
@@ -112,29 +225,16 @@ StringInline: structure {
         }
     }
 
-    add: function (self, text: @byte_buffer) nothing else buffer: StringHeap {
+    add: function (self, text: Slice[Byte]) nothing else buffer: StringHeap {
 
-        new_slice: Slice[Uint8] = Slice[Uint8].new(
-            @byte_buffer_ptr(text) as ref unknown as ref Uint8, 
-            @byte_buffer_len(text)
-        )
-
-        count: Int = @byte_buffer_len(text)
+        count: Int = text.get_count()
 
         if SIZE < self.count as Int + count {
 
+            // Spill to the heap: the bytes so far, then the new ones.
             buffer = StringHeap.new()
-
-            // Add existing.
-            buffer.list.add_slice(
-                Slice[Uint8].new(
-                    (ref self.buffer) as ref unknown as ref Uint8,
-                    self.count
-                )
-            )
-
-            // Add new. 
-            buffer.list.add_slice(new_slice)
+            buffer.list.add_slice(self.get_slice())
+            buffer.list.add_slice(text)
             fail
         }
 
@@ -143,7 +243,7 @@ StringInline: structure {
             @array_len(self.buffer)
         )
 
-        new_slice.move_to(buffer_slice, self.count)
+        text.move_to(buffer_slice, self.count)
         self.count += count.to_uint8_wrapping()
     }
 
@@ -169,14 +269,8 @@ StringHeap: structure {
         }
     }
 
-    add: function (self, text: @byte_buffer) nothing {
-
-        new_slice: Slice[Uint8] = Slice[Uint8].new(
-            @byte_buffer_ptr(text) as ref unknown as ref Uint8, 
-            @byte_buffer_len(text)
-        )
-
-        self.list.add_slice(new_slice)
+    add: function (self, text: Slice[Byte]) nothing {
+        self.list.add_slice(text)
     }
 
     get_slice: function (self) Slice[Byte] => self.list.get_slice()

@@ -24,8 +24,8 @@ record: function (bytes: @byte_buffer) nothing {
 }
 
 print_byte: function (byte: @bit8) nothing {
-    b: @bit8 = byte
-    recorded.push(@byte_buffer_from(ref b, 0x1))
+    b: Byte = byte as Byte
+    recorded.push(Slice[Byte].new(ref b, 1))
 }
 
 /// Keeps the code point `c` as UTF-8.
@@ -50,12 +50,12 @@ print_char: function (c: @bit32) nothing {
 /// Fails the test unless what was printed is exactly `expected`, showing
 /// both, then forgets it.
 expect_printed: function (expected: @byte_buffer) nothing {
-    printed: @byte_buffer = @byte_buffer_from(@array_at(ref recorded.bytes, 0x0), recorded.used)
+    printed: @byte_buffer = recorded.written()
     if recorded.full {
         @panic($"printed more than {@array_len(recorded.bytes)} bytes")
     }
     expect_text(printed, expected)
-    recorded.used = 0x0
+    recorded.used = 0
 }
 
 /// Fails the test with `code`: where a program would have exited with it.
@@ -73,18 +73,23 @@ expect_code: function (code: @bit32, expected: @bit32) nothing {
 private {
     /// The printed bytes so far.
     Recorder: structure {
-        used: @bit_native
+        used: Int
         full: Bool
-        bytes: @array(@bit8, 0x10000)
+        bytes: @array(Byte, 0x10000)
 
-        push: function (self, text: @byte_buffer) nothing {
-            length: @bit_native = @byte_buffer_len(text)
-            if @i_greater_than_u_native(length, @i_sub_native(@array_len(self.bytes), self.used)) {
+        /// The bytes kept so far.
+        written: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), self.used)
+
+        /// The whole buffer, used or not.
+        whole: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
+
+        push: function (self, text: Slice[Byte]) nothing {
+            if text.get_count() > self.whole().get_count() - self.used {
                 self.full = true
                 return
             }
-            @memcpy(@ptr_add(@array_at(ref self.bytes, 0x0) as ref unknown, self.used), @byte_buffer_ptr(text) as ref unknown, length)
-            self.used = @i_add_native(self.used, length)
+            text.copy_to(self.whole(), self.used)
+            self.used += text.get_count()
         }
     }
 

@@ -1,0 +1,101 @@
+using Standard
+using Standard.Testing
+using Standard.Unicode
+
+// Encodes `value` and decodes it back, both ways, expecting `length`
+// bytes.
+round_trip: function (value: Uint32, length: Int) nothing {
+    scalar: Scalar = Scalar.from(value) else {
+        expect_with(false, $"{value} is a scalar")
+        return
+    }
+    expect(scalar.value() == value)
+    expect(scalar.utf8_length() == length)
+
+    bytes: @array(Byte, 4) = @array(Byte, 4) {}
+    view: Slice[Byte] = Slice[Byte].new(@array_at(ref bytes, 0x0), 4)
+    expect(encode(scalar, view) == length)
+
+    written: Slice[Byte] = view.slice(Range.of(0, length))
+    validate(written) else -> error: Utf8Error {
+        expect_with(false, $"{value} encodes badly: {error}")
+        return
+    }
+
+    decoded: Uint32, decoded_length: Int = decode(written, 0) else -> bad: Int, kind: Utf8ErrorKind {
+        expect_with(false, $"{value} decodes badly: {kind}")
+        return
+    }
+    expect(decoded == value)
+    expect(decoded_length == length)
+
+    trusted: Uint32, trusted_length: Int = decode_valid(written, 0)
+    expect(trusted == value)
+    expect(trusted_length == length)
+}
+
+test "Scalars at each UTF-8 length's ends round-trip" {
+    round_trip(0x0, 1)
+    round_trip(0x7F, 1)
+    round_trip(0x80, 2)
+    round_trip(0x7FF, 2)
+    round_trip(0x800, 3)
+    round_trip(0xD7FF, 3)
+    round_trip(0xE000, 3)
+    round_trip(0xFFFD, 3)
+    round_trip(0xFFFF, 3)
+    round_trip(0x10000, 4)
+    round_trip(0x10FFFF, 4)
+}
+
+test "Scalar.from refuses surrogates and values past U+10FFFF" {
+    refused: Int = 0
+    if Scalar.from(0xD800) -> _: Scalar {} else { refused += 1 }
+    if Scalar.from(0xDFFF) -> _: Scalar {} else { refused += 1 }
+    if Scalar.from(0x110000) -> _: Scalar {} else { refused += 1 }
+    if Scalar.from(0xFFFFFFFF) -> _: Scalar {} else { refused += 1 }
+    expect(refused == 4 as Int)
+}
+
+test "A character literal converts to a Scalar" {
+    e: Scalar = 'é'
+    expect(e.value() == 0xE9 as Uint32)
+    expect(e == 'é')
+    expect('é' == e)
+    expect(e != 'e')
+    expect(not e.is_ascii())
+    a: Scalar = 'a'
+    expect(a.is_ascii())
+}
+
+test "Scalars order by value" {
+    a: Scalar = 'a'
+    z: Scalar = 'z'
+    expect(a < z)
+    expect(z > a)
+    expect(a <= a)
+    expect(a >= a)
+    expect(a < 'b')
+    expect('b' > a)
+    expect(Scalar.MIN < Scalar.MAX)
+    expect(a.compare(z) == .Less)
+    expect(z.compare(a) == .Greater)
+    expect(a.compare(a) == .Equal)
+}
+
+test "A Scalar formats as its UTF-8" {
+    a: Scalar = 'A'
+    e: Scalar = 'é'
+    euro: Scalar = '€'
+    smile: Scalar = '😀'
+    expect_text($"{a}{e}{euro}{smile}", "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80")
+    expect_text($"{Scalar.REPLACEMENT}", "\xEF\xBF\xBD")
+}
+
+test "Equal Scalars hash alike" {
+    a: Scalar = 'a'
+    b: Scalar = 'a'
+    c: Scalar = 'c'
+    expect(a.hash() == b.hash())
+    expect(a.hash() != c.hash())
+}

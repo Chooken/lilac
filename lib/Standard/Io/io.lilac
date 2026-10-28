@@ -65,12 +65,15 @@ private {
     /// when the buffer fills, and at `flush`.
     Line: structure {
         handle: Os.Handle
-        used: @bit_native
-        bytes: @array(@bit8, 0x100)
+        used: Int
+        bytes: @array(Byte, 0x100)
 
         over: function (handle: Os.Handle) line: Line {
-            line = Line { handle = handle, used = 0x0, bytes = @array(@bit8, 0x100) {} }
+            line = Line { handle = handle, used = 0, bytes = @array(Byte, 0x100) {} }
         }
+
+        /// The whole buffer, used or not.
+        buffer: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
 
         /// A formatter that writes into this line. It holds the line's
         /// address, so it is used only while the line is in place.
@@ -79,28 +82,37 @@ private {
         }
 
         /// `Line`'s sink: buffers `text`, writing at each newline and when full.
-        push: function (self, text: @byte_buffer) nothing {
-            data: ref @bit8 = @byte_buffer_ptr(text)
-            length: @bit_native = @byte_buffer_len(text)
-            index: @bit_native = 0x0
-            loop {
-                if index == length { break }
-                byte: @bit8 = @load_u8(data, index)
-                @store_u8(@array_at(ref self.bytes, 0x0), self.used, byte)
-                self.used = @i_add_native(self.used, 0x1)
-                if byte == 0xA or self.used == @array_len(self.bytes) {
+        push: function (self, text: Slice[Byte]) nothing {
+            buffer: Slice[Byte] = self.buffer()
+            rest: Slice[Byte] = text
+
+            // A piece at a time: as much as fits, cut after a newline.
+            loop if rest.get_count() > 0 {
+                take: Int = Int.min(rest.get_count(), buffer.get_count() - self.used)
+                ends_line: Bool = false
+
+                if Memory.find_byte(rest.slice(Range.of(0, take)), 0x0A, 0) -> newline: Int {
+                    take = newline + 1
+                    ends_line = true
+                }
+
+                rest.slice(Range.of(0, take)).copy_to(buffer, self.used)
+                self.used += take
+
+                if ends_line or self.used == buffer.get_count() {
                     self.flush()
                 }
-                index = @i_add_native(index, 0x1)
+
+                rest = rest.slice(Range.of(take, rest.get_count()))
             }
         }
 
         /// Writes what is buffered; a failure is dropped, as C's `printf`
         /// does.
         flush: function (self) nothing {
-            if self.used == 0x0 { return }
-            Os.write_all(self.handle, @array_at(ref self.bytes, 0x0) as ref unknown, self.used)
-            self.used = 0x0
+            if self.used == 0 as Int { return }
+            Os.write_all(self.handle, @array_at(ref self.bytes, 0x0) as ref unknown, self.used as @bit_native)
+            self.used = 0
         }
     }
 

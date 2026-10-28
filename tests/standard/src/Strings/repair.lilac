@@ -1,0 +1,77 @@
+using Standard
+using Standard.Testing
+
+// Each maximal bad subpart of UTF-8 becomes one U+FFFD (`EF BF BD`).
+
+test "String keeps valid text as it is" {
+    text: String = $"h\xC3\xA9llo \xE2\x82\xAC \xF0\x9F\x98\x80"
+    expect_text(text, "h\xC3\xA9llo \xE2\x82\xAC \xF0\x9F\x98\x80")
+}
+
+test "String repairs each maximal bad subpart" {
+    // Unicode's example: `F1 80 80`, `E1 80` and `C2` are cut short, and
+    // `80` and `BF` stand alone.
+    text: String = $"a\xF1\x80\x80\xE1\x80\xC2b\x80c\x80\xBFd"
+    expect_text(text, "a\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBDb\xEF\xBF\xBDc\xEF\xBF\xBD\xEF\xBF\xBDd")
+}
+
+test "String repairs overlongs, surrogates and values past U+10FFFF" {
+    // The lead alone is bad, then each continuation byte alone.
+    overlong: String = $"\xE0\x80"
+    expect_text(overlong, "\xEF\xBF\xBD\xEF\xBF\xBD")
+    surrogate: String = $"\xED\xA0\x80"
+    expect_text(surrogate, "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD")
+    too_large: String = $"\xF4\x90\x80\x80!"
+    expect_text(too_large, "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD!")
+    lead: String = $"\xFF\xC0"
+    expect_text(lead, "\xEF\xBF\xBD\xEF\xBF\xBD")
+}
+
+test "String repairs a sequence the end cuts short" {
+    text: String = $"ab\xF0\x9F\x98"
+    expect_text(text, "ab\xEF\xBF\xBD")
+}
+
+test "A repaired inline String that grows past 23 bytes moves to the heap" {
+    // 20 bytes plus one U+FFFD is 23: still inline.
+    fits: String = $"01234567890123456789\xFF"
+    expect(fits.is_inlined())
+    expect_text(fits, "01234567890123456789\xEF\xBF\xBD")
+
+    // 21 bytes plus one U+FFFD is 24: the heap.
+    spills: String = $"012345678901234567890\xFF"
+    expect(not spills.is_inlined())
+    expect_text(spills, "012345678901234567890\xEF\xBF\xBD")
+
+    // Ten bad bytes become 30.
+    many: String = $"\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80"
+    expect(not many.is_inlined())
+    expect_text(many, "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD")
+}
+
+test "A heap String repairs from where it was added to" {
+    text: String = $"012345678901234567890123456789"
+    text.add("\xC3(")
+    expect_text(text, "012345678901234567890123456789\xEF\xBF\xBD(")
+}
+
+test "String add repairs only what it added" {
+    text: String = $"abc"
+    text.add("\xE2\x82")
+    text.add("!")
+    expect_text(text, "abc\xEF\xBF\xBD!")
+}
+
+/// Writes `é` one byte at a time.
+SplitE: structure {
+    @format: function (self, out: ref Formatter) nothing {
+        out.write_bytes("\xC3")
+        out.write_bytes("\xA9")
+    }
+}
+
+test "String repairs once, after the whole format" {
+    split: SplitE = SplitE {}
+    text: String = $"caf{split}"
+    expect_text(text, "caf\xC3\xA9")
+}

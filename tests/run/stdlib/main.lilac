@@ -136,33 +136,28 @@ c_library: function () nothing {
 
 // Formatted text collected in a buffer, to compare with what it should be.
 Capture: structure {
-    used: @bit_native
-    bytes: @array(@bit8, 0x100)
+    used: Int
+    bytes: @array(Byte, 0x100)
+
+    /// The bytes written so far.
+    written: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), self.used)
+
+    /// The whole buffer, used or not.
+    whole: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
 }
 
-capture_push: function (capture: ref Capture, text: @byte_buffer) nothing {
-    @memcpy(@ptr_add(@array_at(ref capture.bytes, 0x0) as ref unknown, capture.used), @byte_buffer_ptr(text) as ref unknown, @byte_buffer_len(text))
-    capture.used = @i_add_native(capture.used, @byte_buffer_len(text))
+capture_push: function (capture: ref Capture, text: Slice[Byte]) nothing {
+    text.copy_to(capture.whole(), capture.used)
+    capture.used += text.get_count()
 }
 
 // Exits with `code` unless `text` formats as exactly `want`.
 expect_format: function (text: Format, want: @byte_buffer, code: @bit32) nothing {
-    capture: Capture = Capture { used = 0x0, bytes = @array(@bit8, 0x100) {} }
+    capture: Capture = Capture { used = 0, bytes = @array(Byte, 0x100) {} }
     out: Formatter = Formatter.over[Capture](ref capture, ref capture_push)
     out.write(text)
-    if capture.used == @byte_buffer_len(want) {
-    } else {
+    if not Standard.Memory.equal_bytes(capture.written(), want) {
         exit(code)
-    }
-    got: ref @bit8 = @array_at(ref capture.bytes, 0x0)
-    index: @bit_native = 0x0
-    loop {
-        if index == capture.used { break }
-        if @load_u8(got, index) == @load_u8(@byte_buffer_ptr(want), index) {
-        } else {
-            exit(code)
-        }
-        index = @i_add_native(index, 0x1)
     }
 }
 

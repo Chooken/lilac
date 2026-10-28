@@ -61,10 +61,10 @@ expect_equal[T]: function (actual: T, expected: T) nothing {
 /// (`expect_text($"{x} {y}", "1 2")`), showing both. The text is compared
 /// as it is written, so nothing is allocated.
 expect_text: function (actual: Format, expected: @byte_buffer) nothing {
-    matcher: TextMatcher = TextMatcher { expected = expected, at = 0x0, same = true }
+    matcher: TextMatcher = TextMatcher { expected = expected, at = 0, same = true }
     out: Formatter = Formatter.over[TextMatcher](ref matcher, ref TextMatcher.compare)
     out.write(actual)
-    if not matcher.same or matcher.at != @byte_buffer_len(expected) {
+    if not matcher.same or matcher.at != matcher.expected.get_count() {
         @panic($"expected `{expected}`, found `{actual}`")
     }
 }
@@ -72,31 +72,22 @@ expect_text: function (actual: Format, expected: @byte_buffer) nothing {
 private {
     /// Compares written text with `expected`, from `at` on.
     TextMatcher: structure {
-        expected: @byte_buffer
-        at: @bit_native
+        expected: Slice[Byte]
+        at: Int
         same: Bool
 
         /// The sink: matches `bytes` against the next part of `expected`.
-        compare: function (self, bytes: @byte_buffer) nothing {
-            length: @bit_native = @byte_buffer_len(bytes)
+        compare: function (self, bytes: Slice[Byte]) nothing {
+            count: Int = bytes.get_count()
             if not self.same {
                 return
             }
-            if @i_greater_than_u_native(@i_add_native(self.at, length), @byte_buffer_len(self.expected)) {
+            if count > self.expected.get_count() - self.at {
                 self.same = false
                 return
             }
-            text: ref @bit8 = @byte_buffer_ptr(bytes)
-            wanted: ref @bit8 = @byte_buffer_ptr(self.expected)
-            index: @bit_native = 0x0
-            loop if @i_less_than_u_native(index, length) {
-                if @load_u8(text, index) != @load_u8(wanted, @i_add_native(self.at, index)) {
-                    self.same = false
-                    return
-                }
-                index = @i_add_native(index, 0x1)
-            }
-            self.at = @i_add_native(self.at, length)
+            self.same = Memory.equal_bytes(bytes, self.expected.slice(Range.of(self.at, self.at + count)))
+            self.at += count
         }
     }
 

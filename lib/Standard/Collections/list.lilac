@@ -53,7 +53,9 @@ List[T]: structure {
         value = self.data.get(index)
     }
 
-    get_slice: function (self) Slice[T] => self.data.get_slice()
+    /// A view of the elements, `count` of them. It lasts until the list
+    /// next grows, shrinks or shifts its elements.
+    get_slice: function (self) Slice[T] => self.data.slice(Range.of(0, self.count))
 
     /// Adds `value` (moved in) at the end, growing the list when it is
     /// full.

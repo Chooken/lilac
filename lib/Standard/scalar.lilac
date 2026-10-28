@@ -1,0 +1,87 @@
+/// A Unicode scalar value: a code point that is not a surrogate, from
+/// U+0000 to U+D7FF and from U+E000 to U+10FFFF. A character literal
+/// converts to one: `c: Scalar = 'é'`.
+Scalar: structure {
+
+    private {
+        bits: @bit32
+
+        /// Whether `value` is a scalar: not a surrogate
+        /// (U+D800..U+DFFF), and at most U+10FFFF.
+        is_valid: function (value: @bit32) Bool =>
+            @i_less_than_u_32(value, 0xD800) or (@i_greater_than_or_equal_u_32(value, 0xE000) and @i_less_than_or_equal_u_32(value, 0x10FFFF))
+    }
+
+    /// U+FFFD, the replacement character: what stands in for bad UTF-8.
+    REPLACEMENT: Scalar => Scalar { bits = 0xFFFD }
+
+    /// The smallest scalar, U+0000.
+    MIN: Scalar => Scalar { bits = 0x0 }
+
+    /// The largest scalar, U+10FFFF.
+    MAX: Scalar => Scalar { bits = 0x10FFFF }
+
+    /// The scalar `value`; fails for a surrogate or a value past
+    /// U+10FFFF: `Scalar.from(0x41)` is `'A'`.
+    from: function (value: Uint32) scalar: Scalar else nothing {
+        bits: @bit32 = value
+        if not is_valid(bits) {
+            fail
+        }
+        scalar = Scalar { bits = bits }
+    }
+
+    /// A character literal (`c: Scalar = 'é'`), or any `@bit32` that is a
+    /// scalar. A constant that is not one is a compile-time error, and
+    /// one at run time panics.
+    @conversion: function (from: @bit32) Scalar =>
+        if is_valid(from) then Scalar { bits = from } else @panic("not a Unicode scalar")
+
+    /// The scalar's number: `'A'.value()` is `0x41`.
+    value: function (self: Scalar) Uint32 => self.bits
+
+    /// How many bytes its UTF-8 takes, 1 to 4.
+    utf8_length: function (self: Scalar) Int =>
+        if @i_less_than_u_32(self.bits, 0x80) then 1
+        else if @i_less_than_u_32(self.bits, 0x800) then 2
+        else if @i_less_than_u_32(self.bits, 0x10000) then 3
+        else 4
+
+    /// Whether it is ASCII (below U+0080).
+    is_ascii: function (self: Scalar) Bool => @i_less_than_u_32(self.bits, 0x80)
+
+    /// A hash of the scalar, for `Map` keys.
+    hash: function (self) @bit64 =>
+        Hash.Wyhash.hash(0x0, Slice[Byte].new(ref self.bits as ref unknown as ref Byte, 4))
+
+    /// How `self` orders against `other`, by value.
+    compare: function (self: Scalar, other: Scalar) Ordering =>
+        if @i_less_than_u_32(self.bits, other.bits) then .Less else if self.bits == other.bits then .Equal else .Greater
+
+    /// Writes the scalar as UTF-8.
+    @format: function (self, out: ref Formatter) nothing {
+        bytes: @array(Byte, 4) = @array(Byte, 4) {}
+        view: Slice[Byte] = Slice[Byte].new(@array_at(ref bytes, 0x0), 4)
+        length: Int = Unicode.encode(self, view)
+        out.write_bytes(view.slice(Range.of(0, length)))
+    }
+
+    @eql: function (lhs: Scalar, rhs: Scalar) Bool => lhs.bits == rhs.bits
+    @less_than: function (lhs: Scalar, rhs: Scalar) Bool => @i_less_than_u_32(lhs.bits, rhs.bits)
+    @greater_than: function (lhs: Scalar, rhs: Scalar) Bool => @i_greater_than_u_32(lhs.bits, rhs.bits)
+    @less_than_or_equal: function (lhs: Scalar, rhs: Scalar) Bool => @i_less_than_or_equal_u_32(lhs.bits, rhs.bits)
+    @greater_than_or_equal: function (lhs: Scalar, rhs: Scalar) Bool => @i_greater_than_or_equal_u_32(lhs.bits, rhs.bits)
+
+    // Against a character literal: `c == 'a'`, `c < 'z'`.
+    @eql: function (lhs: Scalar, rhs: @bit32) Bool => lhs.bits == rhs
+    @less_than: function (lhs: Scalar, rhs: @bit32) Bool => @i_less_than_u_32(lhs.bits, rhs)
+    @greater_than: function (lhs: Scalar, rhs: @bit32) Bool => @i_greater_than_u_32(lhs.bits, rhs)
+    @less_than_or_equal: function (lhs: Scalar, rhs: @bit32) Bool => @i_less_than_or_equal_u_32(lhs.bits, rhs)
+    @greater_than_or_equal: function (lhs: Scalar, rhs: @bit32) Bool => @i_greater_than_or_equal_u_32(lhs.bits, rhs)
+
+    @eql: function (lhs: @bit32, rhs: Scalar) Bool => lhs == rhs.bits
+    @less_than: function (lhs: @bit32, rhs: Scalar) Bool => @i_less_than_u_32(lhs, rhs.bits)
+    @greater_than: function (lhs: @bit32, rhs: Scalar) Bool => @i_greater_than_u_32(lhs, rhs.bits)
+    @less_than_or_equal: function (lhs: @bit32, rhs: Scalar) Bool => @i_less_than_or_equal_u_32(lhs, rhs.bits)
+    @greater_than_or_equal: function (lhs: @bit32, rhs: Scalar) Bool => @i_greater_than_or_equal_u_32(lhs, rhs.bits)
+}

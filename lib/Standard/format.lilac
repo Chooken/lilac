@@ -12,7 +12,7 @@
 Format: alias @format_args(Formatter)
 
 /// What a `Formatter` hands its bytes to: `sink(target, bytes)`.
-FormatSink: alias function (target: ref unknown, bytes: @byte_buffer) nothing
+FormatSink: alias function (target: ref unknown, bytes: Slice[Byte]) nothing
 
 /// Where formatted text goes: every byte is handed to `sink(target, bytes)`.
 Formatter: structure {
@@ -24,7 +24,7 @@ Formatter: structure {
     /// A formatter that hands every byte to `sink(target, bytes)`.
     over[T]: function (
         target: ref T, 
-        sink: ref function (target: ref T, bytes: @byte_buffer) nothing
+        sink: ref function (target: ref T, bytes: Slice[Byte]) nothing
     ) 
         out: Formatter 
     {
@@ -178,18 +178,21 @@ private {
 
     /// A sink that counts the code points it is given into the
     /// `@bit_native` at `target`: every byte but a UTF-8 continuation byte.
-    count_characters: function (count: ref @bit_native, bytes: @byte_buffer) nothing {
-        data: ref @bit8 = @byte_buffer_ptr(bytes)
-        length: @bit_native = @byte_buffer_len(bytes)
-        index: @bit_native = 0x0
+    count_characters: function (count: ref @bit_native, bytes: Slice[Byte]) nothing {
+
+        index: Int = 0
+
         loop {
-            if index == length { break }
-            byte: @bit8 = @load_u8(data, index)
-            if @bit_and_8(byte, 0xC0) == 0x80 {
-            } else {
+
+            if index == bytes.get_count() { break }
+
+            byte: Byte = bytes.get(index)
+
+            if @bit_and_8(byte as @bit8, 0xC0) != 0x80 {
                 count = @i_add_native(count, 0x1)
             }
-            index = @i_add_native(index, 0x1)
+
+            index += 1
         }
     }
 }

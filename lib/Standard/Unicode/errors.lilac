@@ -1,0 +1,34 @@
+
+Utf8ErrorKind: either {
+    /// A sequence stops before its last byte: the input ends, or a byte
+    /// that is not a continuation byte comes too early.
+    Truncated
+    /// `C0`, `C1`, or `E0`/`F0` with a too-small second byte.
+    Overlong
+    /// `ED A0..BF`: a UTF-16 surrogate.
+    Surrogate
+    /// `F4 90..`, or a lead byte `F5..FF`: past U+10FFFF.
+    TooLarge
+    /// A continuation byte (`80..BF`) where a sequence should start.
+    UnexpectedContinuation
+
+    @format: function (self, out: ref Formatter) nothing {
+        match self {
+            .Truncated => out.write_bytes("Truncated")
+            .Overlong => out.write_bytes("Overlong")
+            .Surrogate => out.write_bytes("Surrogate")
+            .TooLarge => out.write_bytes("TooLarge")
+            .UnexpectedContinuation => out.write_bytes("UnexpectedContinuation")
+        }
+    }
+}
+
+Utf8Error: structure {
+    /// The byte offset where the bad sequence starts.
+    offset: Int
+    kind: Utf8ErrorKind
+
+    @format: function (self, out: ref Formatter) nothing {
+        out.write($"invalid UTF-8 at byte {self.offset}: {self.kind}")
+    }
+}
