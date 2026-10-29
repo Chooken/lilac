@@ -1,0 +1,91 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+
+// Writes `bytes`, failing the test on an error.
+put: function (writer: Writer, bytes: Slice[Byte]) nothing {
+    writer.write_bytes(bytes) else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+}
+
+test "StringWriter appends what it is given" {
+    text: String = $"a"
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "bc")
+    out.writer().write($"{1} \xC3\xA9") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect_text($"{text}", "abc1 \xC3\xA9")
+}
+
+test "StringWriter joins a scalar split across writes" {
+    text: String = $""
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "\xC3")
+    put(out.writer(), "\xA9")
+    expect_text($"{text}", "\xC3\xA9")
+}
+
+test "StringWriter joins a four-byte scalar written a byte at a time" {
+    text: String = $""
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "x\xF0")
+    put(out.writer(), "\x9F")
+    put(out.writer(), "\x98")
+    put(out.writer(), "\x80y")
+    expect_text($"{text}", "x\xF0\x9F\x98\x80y")
+}
+
+test "StringWriter holds a split sequence until it is whole" {
+    text: String = $""
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "\xE2\x82")
+    expect_text($"{text}", "")
+    put(out.writer(), "\xAC!")
+    expect_text($"{text}", "\xE2\x82\xAC!")
+}
+
+test "StringWriter flushes an incomplete sequence as U+FFFD" {
+    text: String = $""
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "\xC3")
+    out.flush()
+    expect_text($"{text}", "\xEF\xBF\xBD")
+    // Nothing is held after a flush.
+    put(out.writer(), "A")
+    expect_text($"{text}", "\xEF\xBF\xBDA")
+}
+
+test "StringWriter repairs a sequence a byte cuts short" {
+    whole: String = $""
+    one: StringWriter = StringWriter.over(ref whole)
+    put(one.writer(), "\xC3A")
+    expect_text($"{whole}", "\xEF\xBF\xBDA")
+
+    split: String = $""
+    two: StringWriter = StringWriter.over(ref split)
+    put(two.writer(), "\xC3")
+    put(two.writer(), "A")
+    expect_text($"{split}", "\xEF\xBF\xBDA")
+}
+
+test "StringWriter repairs bad bytes as String does" {
+    text: String = $""
+    out: StringWriter = StringWriter.over(ref text)
+    put(out.writer(), "a\xFFb\xC0")
+    put(out.writer(), "\xE0")
+    put(out.writer(), "\x80c")
+    expect_text($"{text}", "a\xEF\xBF\xBDb\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBDc")
+}
+
+test "A dropped StringWriter flushes what it holds" {
+    text: String = $"a"
+    if true {
+        out: StringWriter = StringWriter.over(ref text)
+        put(out.writer(), "\xF0\x9F")
+    }
+    expect_text($"{text}", "a\xEF\xBF\xBD")
+}

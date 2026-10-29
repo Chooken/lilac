@@ -1,0 +1,174 @@
+// `Writer`: anything bytes can be written to, as one handle. A type
+// becomes a writer by giving `Writer` a table of its functions; the
+// handle forwards to them, and adds whole writes, formats and lines on
+// top.
+
+/// The functions behind a `Writer` over a `T`. A type keeps one as a
+/// constant global and names it `WRITER_TABLE`, so `Writer.from[T]` finds
+/// it:
+///
+///     WRITER_TABLE: ref WriterTable[Pipe] => ref pipe_table
+WriterTable[T]: structure {
+
+    /// Writes some of `bytes`, and says how many: at least one unless
+    /// `bytes` is empty. `Writer.write_bytes` calls it again for the rest.
+    write: ref function (target: ref T, bytes: Slice[Byte]) result: Result[Int, Error]
+
+    /// Pushes anything `target` holds back to where it goes.
+    flush: ref function (target: ref T) result: Result[Empty, Error]
+}
+
+/// Anything bytes can be written to: a file, a string, a list, standard
+/// output. It borrows its target, never owns it, so keep the target where
+/// it lies while the writer is in use.
+///
+///     out: StringWriter = StringWriter.over(ref text)
+///     writer: Writer = out.writer()
+///     writer.write_line($"{count} items") else -> e: Error { ... }
+Writer: structure {
+
+    private {
+        /// What is written to, with its type erased.
+        target: ref unknown
+        /// The target type's `WriterTable`, erased the same way.
+        functions: ref WriterFunctions
+    }
+
+    /// A writer over `target`, through its type's `WRITER_TABLE`.
+    from[T]: function (target: ref T) Writer => over[T](target, T.WRITER_TABLE)
+
+    /// A writer over `target`, through `table`: for a type with no
+    /// `WRITER_TABLE`, or one with several ways to write.
+    over[T]: function (target: ref T, table: ref WriterTable[T]) writer: Writer {
+        // Every slot of a table is a `ref`, so the erased layout is the
+        // same for every `T`.
+        writer = Writer {
+            target = target as ref unknown
+            functions = table as ref unknown as ref WriterFunctions
+        }
+    }
+
+    /// Writes all of `bytes`, as they are, calling the target's `write`
+    /// until it has taken them. A write a signal cut short
+    /// (`.Interrupted`) is retried; one that takes nothing fails with
+    /// `.WriteZero`.
+    write_bytes: function (self, bytes: Slice[Byte]) nothing else error: Error {
+
+        index: Int = 0
+
+        loop if index < bytes.get_count() {
+
+            rest: Slice[Byte] = bytes.slice(Range.of(index, bytes.get_count()))
+
+            result: Int = self.functions.write(self.target, rest).get() else -> write_error: Error {
+
+                match write_error {
+                    .Interrupted {
+                        continue
+                    }
+                }
+
+                error = write_error
+                fail
+            }
+
+            // Nothing written: the rest would never be.
+            if result == 0 as Int {
+                error = .WriteZero
+                fail
+            }
+
+            index += result
+        }
+    }
+
+    /// Writes `format`'s text. On an error nothing more is written, and it
+    /// fails with the first error once the format has run to its end.
+    write: function (self, format: Format) nothing else error: Error {
+        out: WriterFormatter = WriterFormatter.over(self)
+        out.formatter().write(format)
+        if out.get_error() -> catch_error: Error {
+            error = catch_error
+            fail
+        }
+    }
+
+    /// Writes `format`'s text, then a newline.
+    write_line: function (self, format: Format) nothing else error: Error {
+        self.write(format) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+        self.write_bytes("\n") else -> write_error: Error {
+            error = write_error
+            fail
+        }
+    }
+
+    /// Pushes anything the target holds back (a buffer, a split scalar) to
+    /// where it goes.
+    flush: function (self) nothing else error: Error {
+        if self.functions.flush(self.target).error() -> flush_error: Error {
+            error = flush_error
+            fail
+        }
+    }
+}
+
+private {
+
+    /// `WriterTable[T]` with `T` erased: the same layout for every `T`.
+    WriterFunctions: structure {
+
+        write: ref function (target: ref unknown, bytes: Slice[Byte]) result: Result[Int, Error]
+
+        flush: ref function (target: ref unknown) result: Result[Empty, Error]
+    }
+
+    /// A formatter over a writer that keeps the first error, since a
+    /// `@format` hook cannot fail. It points at itself, so keep it where
+    /// it lies while its `formatter()` is in use.
+    WriterFormatter: structure {
+
+        private {
+            writer: Writer
+            /// The first error a write met; `.None` until one fails.
+            error: Optional[Error]
+        }
+
+        /// One over `writer` with no error yet.
+        over: function (writer: Writer) formatter: WriterFormatter => WriterFormatter {
+            writer = writer
+            // Explicitly: a zeroed `Optional` is `.Some`.
+            error = .None
+        }
+
+        /// A formatter whose sink is `push`.
+        formatter: function (self) Formatter => Formatter.over[WriterFormatter](self, ref WriterFormatter.push)
+
+        /// The sink: writes `bytes` unless a write already failed, and
+        /// keeps the error when this one does.
+        push: function (self, bytes: Slice[Byte]) nothing {
+
+            if self.error.get() -> error: Error {
+                return
+            }
+
+            self.writer.write_bytes(bytes) else -> error: Error {
+                self.error = .Some(error)
+                return
+            }
+        }
+
+        /// The first error a write met; fails when none did.
+        get_error: function (self) error: Error else nothing {
+
+            if self.error.get() -> writer_error: Error {
+                error = writer_error
+                return
+            }
+
+            fail
+        }
+    }
+}

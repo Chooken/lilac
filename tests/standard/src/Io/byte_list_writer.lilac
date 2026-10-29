@@ -1,0 +1,96 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+using Standard.Collections
+
+// Whether `list` holds exactly `expected`.
+holds: function (list: ref List[Byte], expected: Slice[Byte]) Bool =>
+    Standard.Memory.equal_bytes(list.get_slice(), expected)
+
+test "ByteListWriter appends raw bytes" {
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    out.writer().write_bytes("abc") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(holds(ref list, "abc"))
+}
+
+test "ByteListWriter appends after what the list holds" {
+    list: List[Byte] = List[Byte].new()
+    list.add_slice("ab")
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    out.writer().write_bytes("cd") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(holds(ref list, "abcd"))
+}
+
+test "ByteListWriter writes formats and lines" {
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    writer: Writer = out.writer()
+    writer.write($"{12} + {30}") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    writer.write_line($" = {42}") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(holds(ref list, "12 + 30 = 42\n"))
+}
+
+test "ByteListWriter keeps bytes that are not UTF-8" {
+    // It is a byte writer: nothing is validated or repaired.
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    out.writer().write_bytes("\xFF\xC3") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(holds(ref list, "\xFF\xC3"))
+}
+
+test "ByteListWriter grows the list across many writes" {
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    writer: Writer = out.writer()
+    index: Int = 0
+    loop if index < 1000 {
+        writer.write_bytes("x") else -> error: Error {
+            expect_with(false, $"write failed: {error}")
+            return
+        }
+        index += 1
+    }
+    expect(list.get_slice().get_count() == 1000 as Int)
+    expect(list.get_slice().get(999) == 0x78 as Byte)
+}
+
+test "ByteListWriter flushes without changing the list" {
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    out.writer().write_bytes("a") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    out.writer().flush() else -> error: Error {
+        expect_with(false, $"flush failed: {error}")
+        return
+    }
+    expect(holds(ref list, "a"))
+}
+
+test "Writer.from finds ByteListWriter's WRITER_TABLE" {
+    list: List[Byte] = List[Byte].new()
+    out: ByteListWriter = ByteListWriter.over(ref list)
+    writer: Writer = Writer.from[ByteListWriter](ref out)
+    writer.write_bytes("from") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(holds(ref list, "from"))
+}

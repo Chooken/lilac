@@ -1,0 +1,183 @@
+// Writers over memory: `ByteListWriter` appends raw bytes to a list, and
+// `StringWriter` appends to a string, keeping it valid UTF-8.
+
+using Standard.Collections
+
+/// Appends to a list of bytes, as they are: nothing is validated, so it
+/// suits binary data. For text, `StringWriter` keeps it valid UTF-8.
+///
+/// Keep it where it lies while its `writer()` is in use: the writer points
+/// at it.
+///
+///     bytes: List[Byte] = List[Byte].new()
+///     out: ByteListWriter = ByteListWriter.over(ref bytes)
+///     out.writer().write($"{count} items") else -> e: Error { ... }
+ByteListWriter: structure {
+
+    private {
+        /// The list written to; borrowed, never owned.
+        list: ref List[Byte]
+    }
+
+    /// The table `Writer.from[ByteListWriter]` finds.
+    WRITER_TABLE: ref WriterTable[ByteListWriter] => ref byte_list_table
+
+    /// A writer that appends to `list`, after what it already holds.
+    over: function (list: ref List[Byte]) ByteListWriter => ByteListWriter {
+        list = list
+    }
+
+    /// A `Writer` that appends to the list through this one.
+    writer: function (self) Writer => Writer.over[ByteListWriter](self, ref byte_list_table)
+
+    /// Appends all of `bytes`; the list grows as it needs to, so it never
+    /// fails.
+    write: function (self, bytes: Slice[Byte]) result: Result[Int, Error] {
+        self.list.add_slice(bytes)
+        result = .Ok(bytes.get_count())
+    }
+
+    /// Nothing to do: every write is already in the list.
+    flush: function (self) Result[Empty, Error] => .Ok(Empty{})
+}
+
+private {
+
+    /// `ByteListWriter`'s functions, for `Writer`.
+    byte_list_table: WriterTable[ByteListWriter] {
+        write = ref ByteListWriter.write
+        flush = ref ByteListWriter.flush
+    }
+}
+
+/// Appends to a string and keeps it valid UTF-8. A scalar split across
+/// writes (`"\xC3"`, then `"\xA9"`) is joined, bad bytes become U+FFFD as
+/// `String.add_bytes_lossy` makes them, and a sequence still incomplete at
+/// `flush` or when it drops becomes one U+FFFD.
+///
+/// Keep it where it lies while its `writer()` is in use: the writer points
+/// at it.
+///
+///     out: StringWriter = StringWriter.over(ref text)
+///     render(out.writer()) else -> e: Error { ... }
+StringWriter: structure {
+
+    private {
+        string: ref String
+        /// The start of a sequence the last write ended inside.
+        pending: @array(Byte, 4)
+        held: Int
+    }
+
+    WRITER_TABLE: ref WriterTable[StringWriter] => ref string_writer_table
+
+    over: function (string: ref String) writer: StringWriter {
+        writer = StringWriter {
+            string = string
+            pending = @array(Byte, 4) {}
+            held = 0
+        }
+    }
+
+    /// A `Writer` that appends to the string through this one.
+    writer: function (self) Writer => Writer.over[StringWriter](self, ref string_writer_table)
+
+    /// Appends what is held: a sequence the last write ended inside
+    /// becomes U+FFFD.
+    flush: function (self) nothing {
+        if self.held > 0 {
+            self.string.add_bytes_lossy(self.held_bytes())
+            self.held = 0
+        }
+    }
+
+    @on_drop: function (self) nothing {
+        self.flush()
+    }
+
+    private {
+        /// The pending bytes held so far.
+        held_bytes: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.pending, 0x0), self.held)
+
+        /// The sink: appends `bytes`, holding back a sequence they end
+        /// inside. Takes all of them.
+        write_raw: function (self, bytes: Slice[Byte]) result: Result[Int, Error] {
+            rest: Slice[Byte] = bytes
+
+            // 1. Finish the held sequence with the continuation bytes it
+            // still needs; a byte that is not one ends it early.
+            if self.held > 0 {
+                need: Int = sequence_length(self.whole_pending().get(0))
+                loop if self.held < need and rest.get_count() > 0 {
+                    if not is_continuation(rest.get(0)) { break }
+                    self.whole_pending().get(self.held) = rest.get(0)
+                    self.held += 1
+                    rest = rest.slice(Range.of(1, rest.get_count()))
+                }
+
+                // Still short with nothing left: wait for the next write.
+                if self.held < need and rest.get_count() == 0 as Int {
+                    result = .Ok(bytes.get_count())
+                    return
+                }
+
+                self.string.add_bytes_lossy(self.held_bytes())
+                self.held = 0
+            }
+
+            // 2. Hold back a sequence the bytes end inside.
+            split: Int = incomplete_tail(rest)
+
+            // 3. Append the rest; `add_bytes_lossy` repairs anything bad.
+            self.string.add_bytes_lossy(rest.slice(Range.of(0, split)))
+            rest.slice(Range.of(split, rest.get_count())).copy_to(self.whole_pending(), 0)
+            self.held = rest.get_count() - split
+
+            result = .Ok(bytes.get_count())
+        }
+
+        flush_raw: function (self) result: Result[Empty, Error] {
+            self.flush()
+            result = .Ok(Empty {})
+        }
+
+        /// All four pending slots.
+        whole_pending: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.pending, 0x0), 4)
+    }
+}
+
+private {
+
+    /// `StringWriter`'s functions, for `Writer`.
+    string_writer_table: WriterTable[StringWriter] = WriterTable {
+        write = ref StringWriter.write_raw
+        flush = ref StringWriter.flush_raw
+    }
+
+    /// Where a sequence `bytes` end inside starts: its lead is one of the
+    /// last three bytes and needs more bytes than follow it. The count when
+    /// there is none.
+    incomplete_tail: function (bytes: Slice[Byte]) at: Int {
+        count: Int = bytes.get_count()
+        at = count
+        index: Int = count
+        loop if index > 0 and count - index < 3 {
+            index -= 1
+            byte: Byte = bytes.get(index)
+            if is_continuation(byte) { continue }
+            // A lead that can start a scalar (`C2..F4`): a bad one is
+            // repaired now, never held.
+            if byte >= 0xC2 and byte <= 0xF4 and sequence_length(byte) > count - index {
+                at = index
+            }
+            break
+        }
+    }
+
+    /// Whether `byte` is a continuation byte, `10xxxxxx`.
+    is_continuation: function (byte: Byte) Bool => byte >= 0x80 and byte <= 0xBF
+
+    /// How many bytes the sequence a lead byte `C2..F4` starts takes.
+    sequence_length: function (lead: Byte) Int =>
+        if lead < 0xE0 then 2 else if lead < 0xF0 then 3 else 4
+}

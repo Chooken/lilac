@@ -1,0 +1,79 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+
+// A writer that takes one byte per call.
+Trickle: structure {
+    used: Int
+    calls: Int
+    bytes: @array(Byte, 64)
+
+    written: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), self.used)
+    whole: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
+}
+
+trickle_write: function (trickle: ref Trickle, bytes: Slice[Byte]) result: Result[Int, Error] {
+    trickle.calls += 1
+    bytes.slice(Range.of(0, 1)).copy_to(trickle.whole(), trickle.used)
+    trickle.used += 1
+    result = .Ok(1)
+}
+
+trickle_flush: function (trickle: ref Trickle) result: Result[Empty, Error] {
+    result = .Ok(Empty {})
+}
+
+trickle_table: WriterTable[Trickle] = WriterTable {
+    write = ref trickle_write
+    flush = ref trickle_flush
+}
+
+// A writer that never takes a byte.
+Stuck: structure {
+    calls: Int
+}
+
+stuck_write: function (stuck: ref Stuck, bytes: Slice[Byte]) result: Result[Int, Error] {
+    stuck.calls += 1
+    result = .Ok(0)
+}
+
+stuck_flush: function (stuck: ref Stuck) result: Result[Empty, Error] {
+    result = .Ok(Empty {})
+}
+
+stuck_table: WriterTable[Stuck] = WriterTable {
+    write = ref stuck_write
+    flush = ref stuck_flush
+}
+
+// The error writing `bytes` fails with; fails if it succeeds.
+failure_of: function (writer: Writer, bytes: Slice[Byte]) error: Error else nothing {
+    writer.write_bytes(bytes) else -> write_error: Error {
+        error = write_error
+        return
+    }
+    fail
+}
+
+test "write_bytes writes everything through a writer that takes one byte at a time" {
+    trickle: Trickle = Trickle { used = 0, calls = 0, bytes = @array(Byte, 64) {} }
+    writer: Writer = Writer.over[Trickle](ref trickle, ref trickle_table)
+    writer.write_bytes("hello") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(Standard.Memory.equal_bytes(trickle.written(), "hello"))
+    expect(trickle.calls == 5 as Int)
+}
+
+test "write_bytes fails with WriteZero when a writer takes nothing" {
+    stuck: Stuck = Stuck { calls = 0 }
+    writer: Writer = Writer.over[Stuck](ref stuck, ref stuck_table)
+    error: Error = failure_of(writer, "abc") else {
+        expect_with(false, $"writing to a stuck writer succeeded")
+        return
+    }
+    expect_text($"{error}", "wrote zero bytes")
+    expect(stuck.calls == 1 as Int)
+}

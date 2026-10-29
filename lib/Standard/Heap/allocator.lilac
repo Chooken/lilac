@@ -64,9 +64,7 @@ Allocator: structure {
     }
 
     /// The allocator at `target`, with its type's `ALLOCATOR_TABLE`.
-    from[T]: function (target: ref T) allocator: Allocator {
-        allocator = over[T](target, T.ALLOCATOR_TABLE)
-    }
+    from[T]: function (target: ref T) Allocator => over[T](target, T.ALLOCATOR_TABLE)
 
     /// The allocator at `target`, with the functions in `table`.
     over[T]: function (target: ref T, table: ref AllocatorTable[T]) allocator: Allocator {
