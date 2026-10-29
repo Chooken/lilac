@@ -4,7 +4,9 @@
 //! from `libSystem` on macOS) and spin with `@spin_hint` (a `pause` or
 //! `yield` instruction, or nothing), so a missing stub or an unlowered
 //! hint shows up as a failed link. Threads link the same way (`clone` and
-//! `mprotect`, `CreateThread`, the `pthread_attr_*` stack size).
+//! `mprotect`, `CreateThread`, the `pthread_attr_*` stack size), and so
+//! do the terminal checks (`GetConsoleMode`, the `TCGETS` `ioctl`,
+//! `isatty`) and Windows' `WriteConsoleW`.
 //!
 //! The program uses every lock, wait and wake once, starts and joins a
 //! thread, and is built for each
@@ -74,6 +76,11 @@ main: function () nothing {
     Os.wake_one(ref word)
     Os.wake_all(ref word)
     @spin_hint()
+    output: Os.Handle = Os.standard_output()
+    if Os.is_terminal(output) {
+        unit: @bit16 = 0x41
+        Os.write_console(output, ref unit, 0x1)
+    }
     print_line($\"{counter.lock().value()}\")
 }
 ";

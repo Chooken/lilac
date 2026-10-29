@@ -1,0 +1,20 @@
+using Standard
+using Standard.Testing
+using Standard.Os as Os
+
+// `lilac test` captures each test's output through a pipe, so standard
+// output is never a terminal here.
+
+test "A captured standard output is not a terminal" {
+    expect(not Os.is_terminal(Os.standard_output()))
+}
+
+test "write_console fails on a handle that is not a console" {
+    unit: @bit16 = 0x41
+    failed: Bool = false
+    match Os.write_console(Os.standard_output(), ref unit, 0x1) {
+        .Ok -> _: @bit_native => {}
+        .Error -> _: Os.Error => { failed = true }
+    }
+    expect(failed)
+}

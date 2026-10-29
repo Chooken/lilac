@@ -76,6 +76,9 @@ SEEK_SET: @bit32 => 0x0
 SEEK_CUR: @bit32 => 0x1
 SEEK_END: @bit32 => 0x2
 
+// `ioctl` requests (the same on x86-64 and 64-bit Arm).
+TCGETS: @bit_native => 0x5401
+
 // `fcntl` commands.
 F_DUPFD: @bit32 => 0x0
 F_GETFD: @bit32 => 0x1

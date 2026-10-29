@@ -1,0 +1,45 @@
+// Terminals: whether a handle is one, and Windows' console output.
+
+using Standard.Os.Windows as Windows
+using Standard.Os.Linux as Linux
+using Standard.Os.MacOs as MacOs
+
+/// Whether `handle` is an interactive terminal: a console on Windows, a
+/// tty elsewhere. A pipe or a file is not. A target with no OS has none.
+is_terminal: function (handle: Handle) terminal: Bool {
+    match @builtin.Target.os {
+        .Windows => {
+            // Only a console has a console mode.
+            mode: @bit32 = 0x0
+            terminal = Windows.GetConsoleMode(handle_ptr(handle), ref mode) != Windows.FALSE
+        }
+        .Linux => {
+            // `isatty` is this `ioctl` in libc: a tty answers `TCGETS`.
+            // 64 bytes cover the kernel's 36-byte `struct termios`.
+            termios: @array(@bit8, 64) = @array(@bit8, 64) {}
+            address: @bit_native = @ptr_to_address(@array_at(ref termios, 0x0) as ref unknown)
+            terminal = Linux.ioctl(fd(handle), Linux.TCGETS, address) == 0x0
+        }
+        .MacOs => {
+            terminal = MacOs.isatty(fd(handle)) == 0x1
+        }
+    } else {
+        terminal = false
+    }
+}
+
+/// Writes up to `count` UTF-16 units at `units` to the Windows console
+/// `handle` (`WriteConsoleW`): how many were written, which may be fewer.
+/// A console shows UTF-16 whatever its code page; `is_terminal` says
+/// whether `handle` is one. `.Unsupported` off Windows.
+write_console: function (handle: Handle, units: ref @bit16, count: @bit_native) result: Result[@bit_native, Error] {
+    match @builtin.Target.os {
+        .Windows => {
+            written: @bit32 = 0x0
+            ok: @bit32 = Windows.WriteConsoleW(handle_ptr(handle), units as ref unknown, windows_count(count), ref written, null())
+            result = windows_count_result(ok, written)
+        }
+    } else {
+        result = .Error(.Unsupported)
+    }
+}
