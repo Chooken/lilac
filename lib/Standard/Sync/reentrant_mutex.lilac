@@ -1,0 +1,218 @@
+using Standard.Os as Os
+
+/// A lock with no data that the thread holding it may take again: each
+/// `lock` from the holder counts, and the lock is free once each has
+/// had its `unlock`. Prefer `ReentrantMutex[T]`, which owns what it
+/// guards and unlocks itself; `RawReentrantMutex` is for building other
+/// structures.
+///
+/// Reach for it only when code can call back into itself while holding
+/// the lock (a format hook that prints while standard output is being
+/// written); otherwise `RawMutex` is cheaper and catches a relock as the
+/// mistake it usually is.
+///
+/// Zero is unlocked, so a zeroed `RawReentrantMutex` needs no setup. Each
+/// `lock` asks the system for the thread's id first, so it costs that
+/// call more than `RawMutex`. A thread unlocks the lock it locked; Debug
+/// builds check that. The lock is not fair.
+RawReentrantMutex: structure {
+
+    private {
+        /// Held while `depth` is not zero.
+        raw: RawMutex
+        /// The holder's thread id, `0` when none. Only the holder writes
+        /// it, so a thread reads its own id here only while it holds the
+        /// lock.
+        owner: @bit64
+        /// How many `lock`s the holder has not yet unlocked.
+        depth: Int
+    }
+
+    /// A free lock (the zero value).
+    UNLOCKED: RawReentrantMutex => RawReentrantMutex { raw = RawMutex.UNLOCKED, owner = 0x0, depth = 0 }
+
+    /// Holds the lock: at once when this thread already does, else once
+    /// no other thread does.
+    lock: function (self) nothing {
+        me: @bit64 = Os.current_thread_id()
+        if self.relock(me) {
+            return
+        }
+        self.raw.lock()
+        self.take(me)
+    }
+
+    /// Holds the lock if no other thread does, without waiting: `true`
+    /// when this thread already holds it.
+    try_lock: function (self) acquired: Bool {
+        me: @bit64 = Os.current_thread_id()
+        acquired = true
+        if self.relock(me) {
+            return
+        }
+        acquired = self.raw.try_lock()
+        if acquired {
+            self.take(me)
+        }
+    }
+
+    /// Like `lock`, but gives up once about `nanos` nanoseconds have
+    /// passed: `false` when it did not get the lock.
+    lock_timeout: function (self, nanos: @bit64) acquired: Bool {
+        me: @bit64 = Os.current_thread_id()
+        acquired = true
+        if self.relock(me) {
+            return
+        }
+        acquired = self.raw.lock_timeout(nanos)
+        if acquired {
+            self.take(me)
+        }
+    }
+
+    /// Undoes one `lock`; the last one frees the lock, waking a waiting
+    /// thread if there is one. The calling thread must hold it.
+    unlock: function (self) nothing {
+        if @builtin.Build.mode == .Debug {
+            if @atomic_load_relaxed_64(ref self.owner) != Os.current_thread_id() {
+                @panic("unlocked a lock this thread does not hold")
+            }
+        }
+        self.depth -= 1
+        if self.depth == 0 as Int {
+            @atomic_store_relaxed_64(ref self.owner, 0x0)
+            self.raw.unlock()
+        }
+    }
+
+    /// Whether some thread holds the lock right now. Only a hint: it may
+    /// change before the caller looks at the answer.
+    is_locked: function (self) locked: Bool {
+        locked = self.raw.is_locked()
+    }
+
+    private {
+
+        /// Counts one more `lock` when `me` already holds the lock.
+        relock: function (self, me: @bit64) held: Bool {
+            held = @atomic_load_relaxed_64(ref self.owner) == me
+            if held {
+                self.depth += 1
+            }
+        }
+
+        /// Records `me` as the holder of the lock it just took.
+        take: function (self, me: @bit64) nothing {
+            @atomic_store_relaxed_64(ref self.owner, me)
+            self.depth = 1
+        }
+    }
+}
+
+/// A value shared between threads, reached one thread at a time, which
+/// the thread holding it may lock again: `lock` hands back a
+/// `ReentrantMutexGuard`, and the mutex is free once every guard this
+/// thread holds has dropped.
+///
+/// ```lilac
+/// total: Sync.ReentrantMutex[Int] = Sync.ReentrantMutex[Int].new(0)
+///
+/// add_twice: function (amount: Int) nothing {
+///     guard: Sync.ReentrantMutexGuard[Int] = total.lock()
+///     add(amount)                 // locks `total` again: no deadlock
+///     guard.value() += amount
+/// }
+/// ```
+///
+/// Two guards on one thread reach the same value, so code that can be
+/// called back while it holds a guard must leave the value whole at each
+/// point it might be. There is no waiting on a `Condvar`: that would free
+/// a lock an outer guard still counts on. Otherwise it is a `Mutex`: it
+/// moves and cannot be copied, a zeroed one is unlocked, `new` is a
+/// constant, and Debug builds panic when one is dropped while locked.
+ReentrantMutex[T]: structure {
+
+    private {
+        raw: RawReentrantMutex
+        data: T
+    }
+
+    /// An unlocked mutex holding `value`.
+    new: function (value: T) ReentrantMutex[T] => ReentrantMutex[T] { raw = RawReentrantMutex.UNLOCKED, data = value }
+
+    /// Holds the mutex until the guard drops: at once when this thread
+    /// already holds it, else once no other thread does.
+    lock: function (self) guard: ReentrantMutexGuard[T] {
+        self.raw.lock()
+        guard = ReentrantMutexGuard[T] { mutex = self }
+    }
+
+    /// Holds the mutex if no other thread does, without waiting; fails
+    /// when another thread holds it.
+    try_lock: function (self) guard: ReentrantMutexGuard[T] else nothing {
+        if self.raw.try_lock() {
+            guard = ReentrantMutexGuard[T] { mutex = self }
+            return
+        }
+        fail
+    }
+
+    /// Like `lock`, but fails once about `nanos` nanoseconds have passed
+    /// without getting the mutex.
+    lock_timeout: function (self, nanos: @bit64) guard: ReentrantMutexGuard[T] else nothing {
+        if self.raw.lock_timeout(nanos) {
+            guard = ReentrantMutexGuard[T] { mutex = self }
+            return
+        }
+        fail
+    }
+
+    /// The value, with no lock taken: only for a mutex no other thread can
+    /// reach yet (or any more), such as while it is being set up.
+    get_unlocked: function (self) value: ref T {
+        value = ref self.data
+    }
+
+    /// The value, moved out; the mutex is gone.
+    into_inner: function (self: ReentrantMutex[T]) value: T {
+        @discard(self)
+        value = @move(self.data)
+    }
+
+    @on_drop: function (self) nothing {
+        if @builtin.Build.mode == .Debug {
+            if self.raw.is_locked() {
+                @panic("dropped a mutex while it is locked")
+            }
+        }
+    }
+}
+
+/// One `lock` of a held `ReentrantMutex`: the way to its value. It undoes
+/// its lock when it drops, or early through `unlock`; the mutex is free
+/// once the thread's last guard has. A guard moves and cannot be copied,
+/// and it must drop on the thread that locked it.
+///
+/// A `ref` taken from `value` must not be used once the guard is gone.
+ReentrantMutexGuard[T]: structure {
+
+    private {
+        mutex: ref ReentrantMutex[T]
+    }
+
+    /// The guarded value, the same one every guard of the mutex reaches.
+    value: function (self) value: ref T {
+        value = ref self.mutex.data
+    }
+
+    /// Undoes this guard's lock now, before its scope ends. Once `value`
+    /// has lent out a `ref`, the guard moves only when told:
+    /// `@move(guard).unlock()`.
+    unlock: function (self: ReentrantMutexGuard[T]) nothing {
+        // Dropping the guard here unlocks it.
+    }
+
+    @on_drop: function (self) nothing {
+        self.mutex.raw.unlock()
+    }
+}

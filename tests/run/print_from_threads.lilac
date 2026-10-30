@@ -1,0 +1,63 @@
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// expect-stdout: <ab><ab><ab><ab><ab><ab><ab><ab>
+// Four threads print five lines each, every line from eight holes whose
+// hook yields the processor first. Each print holds standard output for
+// the whole line, so no line takes another's pieces.
+
+using Standard
+using Standard.Io
+using Standard.Os as Os
+
+Piece: structure {
+    @format: function (self, out: ref Formatter) nothing {
+        Os.yield_thread()
+        out.write_bytes("<ab>")
+    }
+}
+
+work: function (_argument: ref unknown) nothing {
+    piece: Piece = Piece {}
+    count: Int = 0
+    loop if count < 5 {
+        print_line($"{piece}{piece}{piece}{piece}{piece}{piece}{piece}{piece}")
+        count += 1
+    }
+}
+
+main: function () nothing {
+    threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
+    index: @bit_native = 0x0
+    loop if index != 0x4 {
+        thread: Os.Thread = Os.spawn(ref work, ref threads as ref unknown).get() else {
+            print_error_line("spawn failed")
+            return
+        }
+        @array_at(ref threads, index) = thread
+        index = @i_add_native(index, 0x1)
+    }
+    index = 0x0
+    loop if index != 0x4 {
+        match Os.join(@array_at(ref threads, index)) {
+            .Some => print_error_line("join failed")
+        }
+        index = @i_add_native(index, 0x1)
+    }
+}

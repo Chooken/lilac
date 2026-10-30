@@ -29,8 +29,10 @@ differs from the design below:
   which is also the public wait for a `RawMutex`.
 - **A second compiler change**: a global initializer builds a `=>`
   function's body in place (`eval_built`), as it already did a
-  constant's, so `G: Mutex[Int] = Mutex[Int].new(0)` is constant. Its
-  arguments must be hook-free constants.
+  constant's, so `G: Mutex[Int] = Mutex[Int].new(0)` is constant. An
+  argument with a hook builds in place too, when the body moves it into
+  the value (`Mutex[Optional[T]].new(.None)`); one the body copies or
+  leaves to drop is not constant.
 - **Unlocking a borrowed guard**: once `value` has lent out a `ref`, the
   guard moves only by `@move` (`E079`), so an early unlock or a wait reads
   `@move(guard).unlock()`. This is the moves plan working as intended:
@@ -39,7 +41,8 @@ differs from the design below:
   `mutex_try_and_timeout`, `mutex_guard_exits`, `condvar_queue` (a ring
   buffer rather than a `List`), `mutex_relock_panics`,
   `mutex_drop_locked_panics`, `raw_mutex_foreign_unlock`,
-  `global_hooked_constructor`, `FAILS_global_hooked_argument`, and
+  `global_hooked_constructor`, `FAILS_global_hooked_argument_copied`
+  and `_dropped`, and
   `crates/lilac-cli/tests/sync_link.rs` (all six native targets, Debug
   and Release). A global `Mutex` is covered by `mutex_counter`. There are
   no `--libc` twins: `threads_libc` already links `--libc` on Windows,
@@ -47,6 +50,8 @@ differs from the design below:
   (`LinkInfo::libc_libs`).
 - **Not done**: the state-machine model and `bench/sync` (both optional),
   and phase 7.
+- **Since then**: `Sync.RawReentrantMutex` and `ReentrantMutex[T]`
+  (section 8), for standard output's lock.
 
 ## What "production quality" means here
 
@@ -278,6 +283,50 @@ Replace its `lock: @bit32` with `lock: Sync.RawMutex`, and `acquire`/
 - **A typed or scoped `spawn`.** This would let a thread borrow a stack
   `Mutex` without `ref unknown`. It is its own plan, but it is what makes
   sharing a mutex ergonomic.
+
+### 8. `Sync.ReentrantMutex[T]` (done)
+
+`lib/Standard/Sync/reentrant_mutex.lilac`: a lock the holding thread may
+take again, for code that can call back into itself while it holds one.
+Standard output is the first user: a `@format` hook that prints while
+`print_line` holds the lock would otherwise deadlock (Rust's `stdout` is a
+`ReentrantLock` for the same reason).
+
+- **`RawReentrantMutex`** is a `RawMutex`, the holder's full
+  `current_thread_id` (`owner: @bit64`, `0` when none: the id is never
+  zero) and a `depth: Int`. Zero is unlocked. `lock`, `try_lock` and
+  `lock_timeout` first check `owner` against the caller's id: a match
+  only adds to `depth` (so `try_lock` from the holder succeeds, unlike
+  `RawMutex`'s); otherwise they take the `RawMutex` and record the
+  owner with depth 1. `unlock` takes one off `depth` and, at zero,
+  clears `owner` and unlocks the `RawMutex`.
+- **`owner` is atomic (relaxed),** read without the lock. Only the
+  holder writes it and clears it before unlocking, so by coherence a
+  thread reads its own id there only while it holds the lock. `depth` is
+  only touched by the holder, so it is plain.
+- **The id costs a system call per lock on Linux** (`gettid`), in every
+  mode, since the owner check is the lock itself, not a Debug check. A
+  thread-local id would remove it (the same gap as the Debug thread id,
+  below).
+- **Debug** panics on an unlock from a thread that does not hold it
+  (`tests/run/reentrant_mutex_foreign_unlock`). A relock never panics:
+  it is the point.
+- **`ReentrantMutex[T]`/`ReentrantMutexGuard[T]`** are `Mutex[T]`'s
+  shape: `new` is a `=>`, so a global is constant; `try_lock`,
+  `lock_timeout`, `get_unlocked`, `into_inner`; a Debug panic when one
+  is dropped locked; both move-only. Each guard undoes one lock.
+- **Two guards on one thread reach one value,** so `value()` lends the
+  same `ref T` twice. Rust gives only `&T` for that reason; Lilac
+  doesn't forbid aliased `ref`s, so it is a documented rule: code that
+  can be called back while holding a guard leaves the value whole at
+  each point it might be.
+- **No `wait`/`wait_timeout`.** Waiting on a `Condvar` at depth 2 would
+  free a lock an outer guard still counts on.
+- **Tests**: `tests/standard/src/Sync/reentrant_mutex` (relocking and
+  the last unlock freeing the lock, as other threads see it; four
+  threads nesting locks under contention, also for the raw lock;
+  `get_unlocked`/`into_inner`) and the run test above. `sync_link.rs`
+  links all of `Sync`, so it covers the new file.
 
 ## Language gaps (none of them block the plan)
 

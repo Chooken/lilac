@@ -190,7 +190,7 @@ for speed: `buffered: BufferedWriter = BufferedWriter.over(file.writer())`.
 
 ```lilac
 /// The program's standard output, line-buffered on a terminal and
-/// fully buffered otherwise. Shared by every thread.
+/// fully buffered otherwise (`print` flushes). Shared by every thread.
 standard_output: function () Writer
 /// Standard error: unbuffered, so a message is out before a crash.
 standard_error: function () Writer
@@ -199,20 +199,23 @@ standard_error: function () Writer
 standard_input: function () StandardInput
 ```
 
-State: `output_state: Sync.Mutex[StandardOutput] = Mutex[StandardOutput].new(StandardOutput.EMPTY)`
-(a constant global, as the mutex plan allows) holding a `BufferedWriter`
-over `Os.standard_output()`. The `Writer` it hands out is a stateless
+State: `standard_out: Sync.ReentrantMutex[Optional[StandardOutput]]`
+(a constant global, `.None` until first use) holding the standard output
+`File` and a `BufferedWriter` over it. The `Writer` it hands out is a
 shim whose `write`/`flush` lock the mutex for the call, so concurrent
-prints never interleave inside one `write_line`. The same for input.
+prints never interleave inside one `write_line`. The lock is reentrant,
+so a `@format` hook may print during a print. The same for input.
 
 Line vs full buffering needs `Os.is_terminal(handle) Bool`
 (`GetConsoleMode` on Windows, `ioctl(TCGETS)` on Linux, `isatty` on macOS)
 decided once, on first use.
 
-Flushing at exit: `Standard.Runtime`'s `@exit` calls `Io.flush_standard`
-before `Os.exit`. It uses `try_lock`, so a panic raised while output is
-locked (a `@format` hook that panics mid-print) still exits instead of
-deadlocking; that buffer's text is lost, as in C. `@compiler_print`
+Flushing at exit: `Standard.Runtime`'s `@exit` and `Process.exit` call
+`Io.flush_standard` before `Os.exit`. It uses `try_lock`, which the
+reentrant lock grants the thread holding it, so a panic raised mid-print
+(a `@format` hook that panics) still writes out that print's text and
+exits instead of deadlocking; while another thread holds the lock, its
+text is lost, as in C. `@compiler_print`
 keeps going to standard error, which is unbuffered and unlocked for the
 panic path (the panic handler already guards re-entry).
 
@@ -221,7 +224,7 @@ panic path (the panic handler already guards re-entry).
 All of these are one line over the API above:
 
 ```lilac
-print: function (text: Format) nothing                 // standard_output().write(text), error dropped
+print: function (text: Format) nothing                 // written into the buffer, then flushed; error dropped
 print_line: function (text: Format) nothing
 print_error: function (text: Format) nothing
 print_error_line: function (text: Format) nothing
@@ -242,9 +245,15 @@ fails only at the end of input; a beginner's loop is
 `loop if line: String = read_line() { ... }`. Code that cares uses
 `standard_input().read_line(ref s)` directly.
 
+Each `print*` call is written out before it returns (Go's model), so a
+beginner's output always shows; the buffer makes it one write, not one
+per piece. `print_error*` gather the text in a stack buffer, so a
+message is one write too.
+
 `print_char`/`print_byte` go: a character formats (`print($"{c}")`)
-once a character type has a `@format`. Until then they stay, rewritten as
-`print` of a 1-4 byte stack buffer, so they are buffered too. The tests'
+once a character type has a `@format`. Until then they stay, over
+`print` (`print_char` prints the `Scalar`, U+FFFD for a code point that
+is no scalar). The tests'
 187 `print_char` uses are migrated in the same phase they are removed.
 
 Errors on standard output are dropped, as today and as C's `printf`;
@@ -259,9 +268,9 @@ Errors on standard output are dropped, as today and as C's `printf`;
 2. **Standard output on the backbone.** `BufferedWriter`, `Os.is_terminal`,
    `standard.lilac`, `@exit` flushing, `print*` rewritten.
    `print_char`/`print_byte` rewritten over `print`. Tests: the existing
-   `standard_print`/`standard_io` pass byte-for-byte; output interleaved
-   with stderr in order when line-buffered; output piped to a file
-   (fully buffered) is complete after a normal exit and after `@panic`;
+   `standard_print`/`standard_io` pass byte-for-byte; `standard_output()`
+   text piped to a file (fully buffered) is complete after a normal exit,
+   `Process.exit` and `@panic`;
    two threads printing lines never mix a line; a panic inside a
    `@format` during `print_line` exits 101 rather than hanging.
 3. **File.** `file.lilac`, `read_file`/`write_file`/`append_file`,

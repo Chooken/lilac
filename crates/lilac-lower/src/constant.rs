@@ -420,9 +420,12 @@ impl<'a> Lower<'a> {
                 let hir = self.hir;
                 self.expand_built(eval, *def, HashMap::new(), hir.consts.get(def)?)
             }
-            // So does a `=>` function's (`Mutex[T].new(value)`), from
-            // arguments that are plain constants: a hooked one would move
-            // or copy into the body, which runs hooks.
+            // So does a `=>` function's (`Mutex[T].new(value)`). An
+            // argument with a hook is built in place too (`.None`), and
+            // its parameter is constant only where the body moves it into
+            // the value (below): a move runs no hook, while a copy would
+            // run `@on_copy`, and a parameter the body leaves unmoved
+            // drops, which `inline_body` refuses.
             HirExprKind::Call {
                 callee: HirCallee::Func(key),
                 args,
@@ -432,10 +435,22 @@ impl<'a> Lower<'a> {
                 let body = inline_body(callee)?;
                 let mut frame = HashMap::new();
                 for (param, arg) in callee.params.iter().zip(args) {
-                    frame.insert(*param, self.eval(eval, arg)?);
+                    let value = if self.needs_drop(arg.ty) || self.needs_copy(arg.ty) {
+                        self.eval_built(eval, arg)?
+                    } else {
+                        self.eval(eval, arg)?
+                    };
+                    frame.insert(*param, value);
                 }
                 self.expand_built(eval, key.def, frame, body)
             }
+            // A parameter moved into the value being built leaves the
+            // frame, as it leaves the local. Any other read of a hooked
+            // parameter goes through `eval`, which refuses it.
+            HirExprKind::Move(inner) if !expr.ty.is_ref => match inner.kind {
+                HirExprKind::Local(id) => eval.frames.last_mut()?.remove(&id),
+                _ => self.eval(eval, expr),
+            },
             _ => self.eval(eval, expr),
         }
     }

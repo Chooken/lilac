@@ -1,7 +1,8 @@
 // A global may be initialized by a call to a `=>` function returning a
-// type with a drop hook, generic or not, when its arguments are plain
-// constants: the function's body builds the global in place, like a
-// literal, and a global never drops.
+// type with a drop hook, generic or not: the function's body builds the
+// global in place, like a literal, and a global never drops. An argument
+// with a hook is built in place too, when the body moves it into the
+// value: directly, through another `=>` call, or as a `.None`.
 
 using Standard
 using Transcript
@@ -33,14 +34,31 @@ Pair: structure {
     }
 }
 
+Holder[T]: structure {
+    inner: T
+
+    of: function (inner: T) Holder[T] => Holder[T] { inner = inner }
+
+    /// Passes its argument on to another `=>` function.
+    wrap: function (inner: T) Holder[T] => Holder[T].of(inner)
+}
+
 single: Guarded[Int] = Guarded[Int].new(7)
 pair: Pair = Pair.of(8, 9)
+held: Holder[Guarded[Int]] = Holder[Guarded[Int]].of(Guarded[Int].new(10))
+wrapped: Holder[Pair] = Holder[Pair].wrap(Pair.of(11, 12))
+empty: Holder[Optional[Guarded[Int]]] = Holder[Optional[Guarded[Int]]].of(.None)
 
 program: function () nothing {
     print_line($"{single.get_value()} {pair.second.get_value()} dropped {drops}")
+    missing: Bool = false
+    match empty.inner {
+        .None => missing = true
+    }
+    print_line($"{held.inner.get_value()} {wrapped.inner.first.get_value()} {missing} dropped {drops}")
 }
 
 test "global_hooked_constructor" {
     program()
-    Transcript.expect_printed("7 9 dropped 0\n")
+    Transcript.expect_printed("7 9 dropped 0\n10 11 true dropped 0\n")
 }

@@ -1,0 +1,27 @@
+// expect-error: E038
+// A `=>` function builds a global in place from an argument with a hook
+// only when its body moves the argument into the value: one it leaves
+// unmoved drops at the end of the body, running `@on_drop`, so this
+// initializer is not constant.
+
+using Standard
+
+Guarded: structure {
+    value: Int
+
+    new: function (value: Int) Guarded => Guarded { value = value }
+
+    @on_drop: function (self) nothing {
+    }
+}
+
+Holder: structure {
+    value: Int
+
+    ignoring: function (inner: Guarded) Holder => Holder { value = 1 }
+}
+
+held: Holder = Holder.ignoring(Guarded.new(1))
+
+main: function () nothing {
+}

@@ -1,0 +1,152 @@
+// The standard streams as writers. Standard output is one buffer shared
+// by every thread, behind a reentrant lock: a `@format` hook may print
+// while its own print holds the lock, and the exit flush may run from
+// inside a print that panicked. Standard error keeps nothing, so it needs
+// no lock.
+
+/// A writer over standard output, shared by every thread. Each write
+/// takes the lock for its call, so two threads never mix one write. The
+/// text waits in a buffer until it fills, a line ends on a terminal, the
+/// writer is flushed or the program exits. `print` and `print_line` write
+/// through the same buffer and flush.
+///
+///     out: Writer = standard_output()
+///     out.write_line($"{count} items") else -> e: Error { ... }
+standard_output: function () Writer => Writer.over[Sync.ReentrantMutex[Optional[StandardOutput]]](ref standard_out, ref output_table)
+
+/// A writer over standard error. It is unbuffered, so each write is a
+/// system call and a message is out before a crash.
+standard_error: function () Writer => Writer.over[StandardError](ref standard_error_target, ref error_table)
+
+/// Writes out what standard output holds. `Standard.Runtime`'s `@exit`
+/// and `Process.exit` call it. While another thread holds standard
+/// output, it skips the flush and the text is lost, as in C: waiting
+/// could hang an exit.
+flush_standard: function () nothing {
+    guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = standard_out.try_lock() else {
+        return
+    }
+    if guard.value().get_ref() -> out: ref StandardOutput {
+        // An error has nowhere to go at exit.
+        out.buffer.flush()
+    }
+}
+
+private {
+
+    /// Standard output once it is used: its file and the buffer over it.
+    StandardOutput: structure {
+        file: File
+        buffer: BufferedWriter
+    }
+
+    /// `None` until the first write sets it up (`set_up`).
+    standard_out: Sync.ReentrantMutex[Optional[StandardOutput]] = Sync.ReentrantMutex[Optional[StandardOutput]].new(.None)
+
+    /// The state behind a locked `state`, set up on first use: the
+    /// standard output file and a buffer over it, in line mode for a
+    /// terminal.
+    set_up: function (state: ref Optional[StandardOutput]) out: ref StandardOutput {
+
+        if state.is_none() {
+            file: File = File.standard_output()
+            lines: Bool = file.is_terminal()
+            // The buffer's writer holds the file's address, so it is made
+            // again once the file is in place.
+            placeholder: Writer = file.writer()
+            state = .Some(StandardOutput {
+                file = @move(file)
+                buffer = BufferedWriter.over(placeholder, lines)
+            })
+            out = state.get_ref_unchecked()
+            out.buffer = BufferedWriter.over(out.file.writer(), lines)
+            return
+        }
+
+        out = state.get_ref_unchecked()
+    }
+
+    /// Writes `text` to standard output, then a newline when `line`, and
+    /// flushes, all under one lock, so threads never mix one print. An
+    /// error is dropped, as C's `printf` does: a closed pipe ends the
+    /// output, not the program.
+    print_standard: function (text: Format, line: Bool) nothing {
+
+        guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = standard_out.lock()
+        writer: Writer = set_up(guard.value()).buffer.writer()
+
+        if line {
+            writer.write_line(text) else {
+                return
+            }
+        } else {
+            writer.write(text) else {
+                return
+            }
+        }
+
+        writer.flush() else {
+            return
+        }
+    }
+
+    /// Writes `bytes` to standard output as they are and flushes, as
+    /// `print_standard`.
+    print_standard_bytes: function (bytes: Slice[Byte]) nothing {
+
+        guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = standard_out.lock()
+        writer: Writer = set_up(guard.value()).buffer.writer()
+
+        writer.write_bytes(bytes) else {
+            return
+        }
+
+        writer.flush() else {
+            return
+        }
+    }
+
+    /// `standard_output()`'s `write`: into the buffer, under the lock.
+    output_write: function (state: ref Sync.ReentrantMutex[Optional[StandardOutput]], bytes: Slice[Byte]) result: Result[Int, Error] {
+        guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = state.lock()
+        result = set_up(guard.value()).buffer.write(bytes)
+    }
+
+    /// `standard_output()`'s `flush`: the buffer out, under the lock.
+    output_flush: function (state: ref Sync.ReentrantMutex[Optional[StandardOutput]]) result: Result[Empty, Error] {
+        guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = state.lock()
+        result = set_up(guard.value()).buffer.flush()
+    }
+
+    /// `standard_output()`'s functions.
+    output_table: WriterTable[Sync.ReentrantMutex[Optional[StandardOutput]]] {
+        write = ref output_write
+        flush = ref output_flush
+    }
+
+    /// What `standard_error()`'s writer points at: nothing, since the
+    /// stream keeps no state.
+    StandardError: structure {}
+
+    standard_error_target: StandardError = StandardError {}
+
+    /// `standard_error()`'s `write`: all of `bytes`, to a `File` over the
+    /// stream, looked up each time (it is not constant on Windows).
+    error_write: function (_target: ref StandardError, bytes: Slice[Byte]) result: Result[Int, Error] {
+        file: File = File.standard_error()
+        file.writer().write_bytes(bytes) else -> error: Error {
+            result = .Error(error)
+            return
+        }
+        result = .Ok(bytes.get_count())
+    }
+
+    /// `standard_error()`'s `flush`: the stream holds nothing back.
+    error_flush: function (_target: ref StandardError) Result[Empty, Error] => .Ok(Empty {})
+
+    /// `standard_error()`'s functions.
+    error_table: WriterTable[StandardError] {
+        write = ref error_write
+        flush = ref error_flush
+    }
+}

@@ -1,0 +1,16 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stdout: before the panic
+// expect-stderr: panic: stopped
+// expect-stderr:   at main (stdout_then_panic.lilac:15:5)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// What was printed before a panic is out: each print is written before
+// it returns.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    print_line("before the panic")
+    @panic("stopped")
+}

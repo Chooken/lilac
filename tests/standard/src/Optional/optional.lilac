@@ -1,0 +1,71 @@
+// `Optional`'s unchecked access reaches the payload past the tag, for
+// payloads of every alignment, and moving the value out drops it once.
+
+using Standard
+using Standard.Testing
+
+drops: Int = 0
+
+Counted: structure {
+    value: Int
+
+    @on_drop: function (self) nothing {
+        drops += 1
+    }
+}
+
+Wide: structure {
+    first: Int64
+    last: Int8
+}
+
+test "is_some and is_none tell the variants apart" {
+    some: Optional[Int8] = .Some(1 as Int8)
+    none: Optional[Int8] = .None
+    expect(some.is_some())
+    expect(not some.is_none())
+    expect(none.is_none())
+    expect(not none.is_some())
+}
+
+test "get_ref_unchecked reaches the payload at every alignment" {
+    narrow: Optional[Int8] = .Some(5 as Int8)
+    middle: Optional[Int32] = .Some(70000 as Int32)
+    wide: Optional[Wide] = .Some(Wide { first = 1234567890123 as Int64, last = -3 as Int8 })
+    reference: Optional[ref Int8] = .None
+    target: Int8 = 9 as Int8
+    reference = .Some(ref target)
+
+    expect_equal[Int8](narrow.get_ref_unchecked(), 5 as Int8)
+    expect_equal[Int32](middle.get_ref_unchecked(), 70000 as Int32)
+    expect_equal[Int64](wide.get_ref_unchecked().first, 1234567890123 as Int64)
+    expect_equal[Int8](wide.get_ref_unchecked().last, -3 as Int8)
+    expect_equal[Int8](reference.get_ref_unchecked(), 9 as Int8)
+}
+
+test "a write through get_ref_unchecked changes the optional" {
+    value: Optional[Int64] = .Some(1 as Int64)
+    value.get_ref_unchecked() = 42 as Int64
+    expect_text(value, "Some(42)")
+}
+
+/// Takes the value out of `held`; it drops when this returns.
+take: function (held: Optional[Counted]) value: Int {
+    taken: Counted = held.get_unchecked()
+    expect_equal[Int](drops, 0)
+    value = taken.value
+}
+
+test "get_unchecked moves the value out and drops it once" {
+    drops = 0
+    expect_equal[Int](take(.Some(Counted { value = 7 })), 7)
+    expect_equal[Int](drops, 1)
+}
+
+test "get_unchecked of a reference gives the stored reference" {
+    target: Int8 = 4 as Int8
+    held: Optional[ref Int8] = .Some(ref target)
+    taken: ref Int8 = held.get_unchecked()
+    taken = 6 as Int8
+    expect_equal[Int8](target, 6 as Int8)
+}

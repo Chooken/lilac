@@ -1,0 +1,26 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stdout: before
+// expect-stdout: start
+// expect-stderr: panic: no format today
+// expect-stderr:   at Broken.@format (panic_in_format_hook.lilac:18:9)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A `@format` hook that panics inside `print_line`: the panic's `@exit`
+// takes standard output's lock again on the same thread and writes out
+// what the print had buffered, then the process exits.
+
+using Standard
+using Standard.Io
+
+Broken: structure {
+    @format: function (self, out: ref Formatter) nothing {
+        out.write_bytes("\n")
+        @panic("no format today")
+    }
+}
+
+main: function () nothing {
+    print_line("before")
+    broken: Broken = Broken {}
+    print_line($"start{broken} end")
+}

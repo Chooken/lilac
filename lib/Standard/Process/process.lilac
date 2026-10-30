@@ -1,9 +1,11 @@
 // Ending the process.
 
 using Standard.Os as Os
+using Standard.Io as Io
 
-/// Ends the process with `code`. Does not return.
+/// Writes out standard output (`Io.flush_standard`), then ends the
+/// process with `code`. Does not return.
 exit: function (code: @bit32) nothing {
+    Io.flush_standard()
     Os.exit(code)
-
 }

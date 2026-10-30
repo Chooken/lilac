@@ -305,8 +305,8 @@ when the payload types copy and have a `@format`, checked where they are
 used). Every numeric type also provides `parse(text: @byte_buffer) value: T else error: ParseError`. A character literal
 is a `@bit32`, so `{'A'}` prints `65` until `Standard` has a `Char` type.
 
-A consumer makes a `Formatter` over its own storage: `Io.print` over a
-line buffer on the stack, `Runtime`'s `@compiler_print` over standard
+A consumer makes a `Formatter` over its own storage: `Io.print` over
+standard output's buffer, `Runtime`'s `@compiler_print` over standard
 error (so `@panic($"index {i} past {n}")` formats), and the counting
 formatter `Padded` uses. N types and M consumers need N hooks and M sinks.
 
@@ -447,9 +447,13 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 
 > **Today:** `print`, `print_line`, `print_error` and `print_error_line`
 > take a `Format` (an f-string, a literal or one formattable value, §3.1a)
-> and write it through a line buffer on the stack: one `Standard.Os.write_all`
-> per line (and per full buffer), not per piece. `print_char` (a code point,
-> as UTF-8) and `print_byte` stay until `Standard` has a `Char` type.
+> and write it out before they return: standard output through its shared
+> `BufferedWriter` (behind a `Sync.ReentrantMutex`, flushed by each print),
+> standard error through one on the stack, so a call is one write, not one
+> per piece. `standard_output()` and `standard_error()` are the streams as
+> `Writer`s; `@exit` and `Process.exit` flush standard output.
+> `print_char` (a code point, as UTF-8) and `print_byte` stay until
+> `Standard` has a `Char` type.
 > `Standard.Process.exit` and `Standard.Heap.Allocator` likewise sit on
 > `Standard.Os` (`exit`, `allocate`/`deallocate`), and `Standard.Runtime`
 > defines the platform hooks (SPEC §8) over it; its `@compiler_print`

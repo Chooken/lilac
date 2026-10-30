@@ -28,11 +28,13 @@ The plan's code has these wrong; this guide uses the fixed forms.
 3. **The standard-output lock must be reentrant.** A `@format` hook that
    prints, or a panic inside `print_line` whose message goes through
    standard output, would otherwise deadlock (or panic "deadlock" in
-   Debug) on the thread's own lock.
+   Debug) on the thread's own lock. It is `Sync.ReentrantMutex[T]`
+   (`lib/Standard/Sync/reentrant_mutex.lilac`, done).
 4. **A Windows console needs UTF-16.** `WriteFile` of UTF-8 to a console
-   shows mojibake unless the code page is 65001. Write through
-   `WriteConsoleW` when the handle is a console. Both it and `ReadConsoleW`
-   are already declared in `Os/Windows/files.lilac` and stubbed.
+   shows mojibake unless the code page is 65001. A `File` writes through
+   `WriteConsoleW` when its handle is a console, so the standard streams
+   and any other console handle get it. Both it and `ReadConsoleW` are
+   already declared in `Os/Windows/files.lilac` and stubbed.
 5. **`run.rs` has no stdin directive.** Phase 4 adds one.
 6. **`read_line` validates** (`.InvalidData`); the plan left that open.
    The beginner `read_line()` repairs instead of failing.
@@ -302,207 +304,176 @@ used = 0
   what `program | head` wants.
 - The table's `flush` is `flush_buffer`, then `inner.flush()`.
 
-### `Io/standard.lilac`: standard output
+### `Io/file.lilac`: `File` as a writer
 
-**The sink.** The buffer's inner writer is a stateless writer over
-`Os.standard_output()`. It holds no handle, so a constant global can
-build it:
+Every writer over a system handle is a `File`: an open file (phase 3) or
+a standard stream. It is a handle and whether it owns it, nothing more:
 
 ```lilac
-private {
-    /// Writes to the process's standard output, looking the handle up each call.
-    ConsoleOut: structure {
-        WRITER_TABLE: ref WriterTable[ConsoleOut] => ref console_out_table
-        write: function (self, bytes: @byte_buffer) Result[Int, Error]   // Os.write, or the Windows console path
-        flush: function (self) Optional[Error] => .None
+File: structure {
+    private {
+        handle: Os.Handle
+        owned: Bool            // dropping it closes `handle`
     }
-    console_out: ConsoleOut
-    console_out_table: WriterTable[ConsoleOut] = WriterTable[ConsoleOut] { write = ref ConsoleOut.write, flush = ref ConsoleOut.flush }
+    WRITER_TABLE: ref WriterTable[File] => ref file_table
+    /// Not owned. Each call looks the handle up; keep the `File` to look it up once.
+    standard_output: function () File => File { handle = Os.standard_output(), owned = false }
+    standard_error: function () File => File { handle = Os.standard_error(), owned = false }
+    writer: function (self) Writer => Writer.from[File](self)
+    @on_drop: function (self) nothing   // Os.close when owned, the error dropped
+    private {
+        write_raw: function (self, bytes: Slice[Byte]) Result[Int, Error]   // the table's write
+        flush_raw: function (self) Result[Empty, Error] => .Ok(Empty {})     // a file holds nothing back
+    }
 }
 ```
 
-A constant global can hold `ref console_out`, a `ref G` in an
-initializer, so the stream's state is one global:
+- `write_raw`: on Windows, when `Os.is_terminal(handle)`, the console
+  path (below), returning all of `bytes`. Otherwise `Os.write`,
+  returning the count the system took; `Writer.write_bytes` loops on it.
+- The table's functions are private `write_raw`/`flush_raw`, so phase
+  3's `write(text: Format)` keeps the plain name.
+- It keeps no state. So the standard streams need no writer of their
+  own, and standard error needs no lock. Its cost on Windows is one
+  `GetConsoleMode` per write (behind a `BufferedWriter`, per flush). If
+  that is ever measured, the standard-output state below can keep the
+  answer.
+- The standard streams are never closed: their `File`s are not owned.
+
+### `Io/standard.lilac`: standard output (done)
+
+**Printing flushes.** `print` and `print_line` write their text out
+before they return (Go's model), so a beginner's output always shows,
+and nothing is lost to a crash. The buffer is still used: a print's
+text gathers there and goes out in one write at the end of the call, so
+two threads never mix one print and a format with many holes is one
+system call, not one per piece.
+
+**The state** is one constant global behind a `Sync.ReentrantMutex`,
+`None` until first use (`new` is a `=>`, so the global is constant, and
+nothing is zeroed):
 
 ```lilac
 private {
     StandardOutput: structure {
-        lock: ReentrantLock
-        buffer: BufferedWriter     // over Writer.over[ConsoleOut](ref console_out, ref console_out_table)
-        ready: Bool                // line mode decided?
-        console: Bool              // Windows: write UTF-16 through WriteConsoleW
-        console_pending: @array(@bit8, 4), console_held: Int   // a scalar split across writes
+        file: File
+        buffer: BufferedWriter     // over file.writer()
     }
-    output: StandardOutput = StandardOutput { ... }       // a constant initializer
+    standard_out: Sync.ReentrantMutex[Optional[StandardOutput]] = Sync.ReentrantMutex[Optional[StandardOutput]].new(.None)
 }
 ```
 
-If the initializer can't take the `Writer` (an `E038`), give
-`BufferedWriter` a private `inner` setter and fill it in on first use
-under the lock. Either way there is one global and one lock.
+**First use** (`set_up`, under the lock): on `None`, take
+`File.standard_output()` (its handle is a call on Windows) and
+`is_terminal`, store `.Some(StandardOutput { … })`, then make the
+buffer again over `out.file.writer()`, since the writer holds the file's
+address and the file has moved into the global. It returns a `ref
+StandardOutput` through `get_ref_unchecked`.
 
-**The reentrant lock** (private to `standard.lilac`):
+**Why reentrant.** A thread that already holds `standard_out` locks it
+again without waiting: a format hook that prints during `print_line`, or
+the exit flush from inside a print that panicked (below).
+`Sync.ReentrantMutex` is Rust's `ReentrantLock`, which its `stdout` uses
+for the same reason.
 
-```lilac
-ReentrantLock: structure {
-    private { mutex: Sync.RawMutex, owner: @bit64, depth: Int }
-    /// Holds the lock; again from the holding thread only counts.
-    lock: function (self) nothing {
-        me = Os.current_thread_id()
-        if @atomic_load_relaxed_64(ref self.owner) == me { self.depth += 1; return }
-        self.mutex.lock()
-        @atomic_store_relaxed_64(ref self.owner, me)
-        self.depth = 1
-    }
-    unlock: function (self) nothing {
-        self.depth -= 1
-        if self.depth == 0 { @atomic_store_relaxed_64(ref self.owner, 0x0); self.mutex.unlock() }
-    }
-    /// Holds the lock unless another thread does. For the exit flush.
-    try_lock: function (self) acquired: Bool   // same as lock, `try_lock` on the mutex
-}
-```
-
-- `owner` is read without the mutex, so it is atomic. Only the holder
-  writes it, and a thread sees its own id only if it wrote it.
-- Thread id 0 must mean "nobody". Check that `Os.current_thread_id`
-  never returns 0 on the three OSes.
-- `RawMutex.try_lock` from the holding thread returns `false` and doesn't
-  panic, so `try_lock` here is safe.
-- This is Rust's `ReentrantMutex` (its `stdout` uses one for the same
-  reason).
 - A reentrant print writes into the same buffer in the middle of the
-  outer line. That is the cost: the alternative is a deadlock.
+  outer one, and its flush writes out what the outer print had so far.
+  That is the cost: the alternative is a deadlock.
+- Its guards on one thread reach one `StandardOutput`, so a write into
+  the buffer must not be cut by a callback. `BufferedWriter` is safe: a
+  format hook runs between its writes, never inside one.
+- A lock costs one `current_thread_id` (a system call on Linux), next to
+  the write's own.
 
-**First use** (under the lock):
-
-```text
-if not ready:
-    h = Os.standard_output()
-    terminal = Os.is_terminal(h)
-    buffer.line = terminal
-    console = target is Windows and terminal
-    ready = true
-```
-
-**The public surface:**
+**The surface:**
 
 | Function | Algorithm |
 |---|---|
-| `standard_output() Writer` | `Writer.over[StandardOutputShim](...)`: each `write`/`flush` takes the lock, decides `ready`, writes into `output.buffer`, then unlocks. |
-| `lock_standard_output() StandardOutputGuard` | Locks once, so a run of writes is one unit. The guard's `writer()` writes with no further lock, `@on_drop` unlocks, and the guard is move-only. |
-| `flush_standard() nothing` | For `@exit`, below. |
+| `print(text)`, `print_line(text)` | `print_standard`: lock, `set_up`, write (and `\n`) into the buffer, flush, unlock. Errors are dropped, as C's `printf` does: a closed pipe ends the output, not the program. |
+| `print_byte(b)` | `print_standard_bytes` of a one-byte stack array, raw: standard output is not a string, so no validation. |
+| `print_char(c: @bit32)` | `Scalar.from(c)` and `print` it; a code point that is no scalar prints `Scalar.REPLACEMENT`. |
+| `standard_output() Writer` | `Writer.over` the mutex with a private table: each `write`/`flush` locks, `set_up`s and writes into the buffer. The text waits until the buffer fills, a line ends on a terminal (line mode), the writer is flushed, or the program exits. |
+| `standard_error() Writer` | Unbuffered and lock-free: each write is a `File.standard_error()` write (looked up per call, it is not constant on Windows). |
+| `flush_standard() nothing` | For the exits, below. |
 
-`print`, `print_line`, `print_error` and `print_error_line` (`io.lilac`)
-are each one locked write. `print_line` locks, writes the text and `\n`,
-then unlocks, so two threads never mix one line:
+A lock held over a run of writes (`lock_standard_output`) is left until
+something needs it: a print already is one unit.
 
-```lilac
-print_line: function (text: Format) nothing {
-    guard: StandardOutputGuard = lock_standard_output()
-    guard.writer().write_line(text) else -> _: Error {}      // dropped, BrokenPipe too
-}
-```
+**Standard error.** `print_error` and `print_error_line` gather the text
+in a `BufferedWriter` on their own stack (8 KiB, inside the 128 KiB
+minimum thread stack) over `standard_error()` and flush it, so a message
+up to that size is one system call, and nothing is shared or locked.
+The panic handler prints through `@compiler_print`, the same path, so a
+panic never waits on a lock. `Io`'s old `Line` buffer is gone.
 
-**Standard error** is unbuffered and lock-free: a `Writer` over a
-stateless `ConsoleError` that calls `Os.write_all(Os.standard_error())`
-(with the console path on Windows).
-
-- `print_error` keeps today's private `Line` stack buffer, so one message
-  is still one system call.
-- The panic handler prints through it, so a panic never waits on a lock.
-
-**Exit flushing** (`Runtime/runtime.lilac`):
-
-```lilac
-@exit: function (code: @bit32) nothing {
-    Io.flush_standard()
-    Os.exit(code)
-}
-```
+**Exit flushing.** `Runtime`'s `@exit` and `Process.exit` call
+`Io.flush_standard()` before `Os.exit`:
 
 ```text
 flush_standard:
-    if output.lock.try_lock():        // also true when this thread holds it (reentrant)
-        output.buffer.flush() else drop
-        output.lock.unlock()
-    // else another thread holds it: skip, its text is lost (C does the same)
+    guard = standard_out.try_lock() else return   // reentrant: works on the holding thread
+    if guard.value() is Some(out): out.buffer.flush(), the error dropped
+    // another thread holding it: skip, its text is lost (C does the same)
 ```
 
-- The panic path is `@compiler_print` (stderr), then `@exit(101)`, so
-  output printed before a panic is flushed even when the panic happened
-  inside `print_line` (the thread holds the lock, so the reentrant
-  `try_lock` succeeds).
-- `Standard.Process.exit` calls `Os.exit` directly. Make it call
-  `Io.flush_standard()` first, or a program that exits early loses its
-  output.
+- The panic path is `@compiler_print` (stderr), then `@exit(101)`, so a
+  panic inside `print_line` (a format hook) still writes out what that
+  print had buffered: the thread holds the lock, so `try_lock`
+  succeeds.
 
 ### Windows console output (UTF-8 to UTF-16)
 
-When `console` is set, `ConsoleOut.write` converts:
+When a `File`'s handle is a console, `write_raw` converts (a private
+`ConsoleUnits` on the stack):
 
 ```text
-units: @array(@bit16, 512)          // stack
-1. join any held bytes with the start of `bytes` (as StringWriter does)
-2. decode the bytes (they are valid UTF-8 unless a `List[Uint8]` writer fed raw bytes:
-   decode, and turn a bad subpart into U+FFFD)
-3. scalar < 0x10000 -> one unit; else the surrogate pair
-4. when units is nearly full (510), WriteConsoleW it, looping on the count written
-5. hold a split tail (at most 3 bytes) for the next write
+units: @array(@bit16, 512)
+1. decode the bytes (they are valid UTF-8 unless a raw-byte writer fed them:
+   decode, and turn each bad subpart into U+FFFD, as add_bytes_lossy does)
+2. scalar < 0x10000 -> one unit; else the surrogate pair
+3. when a pair no longer fits, WriteConsoleW the units, looping on the count written
+4. WriteConsoleW what is left
 return .Ok(all of bytes)
 ```
 
-- `Os` gets a `write_console(handle, units: ref @bit16, count)` wrapper
-  for Windows only. It is the only new `Os` function, and the conversion
-  itself stays in `Io`.
-- A held tail at `flush` or exit is written as U+FFFD.
+- `Os.write_console(handle, units: ref @bit16, count)` is the wrapper,
+  Windows only (`.Unsupported` elsewhere). The conversion stays in `Io`.
+- **A scalar split across two writes shows as U+FFFD,** since a `File`
+  holds nothing back. Behind a `BufferedWriter` that is rare: it passes
+  on whole writes, and a format pushes whole pieces of text. An
+  unbuffered `File` written a byte at a time would show each split
+  scalar as U+FFFDs.
 - When the handle is not a console (a pipe or a file), `Os.write` the
   bytes unchanged: a file gets UTF-8.
-
-### `print_char` and `print_byte`
-
-Rewrite both over `print`:
-
-- `print_byte`: one byte, through `print`'s writer as raw bytes. It
-  writes to standard output, not a string, so no validation is needed.
-- `print_char(c: @bit32)`: `Scalar.encode` into a 4-byte array, then
-  `write_bytes`. An invalid scalar prints U+FFFD.
-
-Both now buffer, so the 187 test uses get fast without being touched.
 
 ### Tests
 
 | Test | Where | Checks |
 |---|---|---|
 | existing `standard_print`, `standard_io` | `tests/run` | byte-for-byte unchanged |
-| `stdout_then_panic` | `tests/run` | `print("a")`, then `@panic`: stdout has `a`, stderr the panic, exit 101 |
-| `stdout_exit_early` | `tests/run` | `print`, then `Process.exit(3)`: the text is out |
+| `stdout_then_panic` | `tests/run` | `print_line`, then `@panic`: stdout has the line, stderr the panic, exit 101 |
+| `stdout_writer_exit_early` | `tests/run` | `standard_output()` writes left in the buffer, then `Process.exit(3)`: the text is out |
+| `stdout_writer_flushed_at_exit` | `tests/run` | a `standard_output()` write left in the buffer when `main` returns is out, after an earlier `print_line` |
 | `print_in_format_hook` | `tests/run` | a `@format` that calls `print`, used in `print_line`: no hang, both texts out |
-| `panic_in_format_hook` | `tests/run` | a `@format` that panics during `print_line`: exit 101, earlier output flushed |
-| `threads_print_lines` | `tests/standard/src/Io` | 4 threads × 1,000 `print_line`s of a distinct 60-byte line through a `Transcript`-like capture, or a run test that checks each output line is whole |
+| `panic_in_format_hook` | `tests/run` | a `@format` that panics during `print_line`: exit 101, the print's text so far flushed |
+| `print_from_threads` | `tests/run` | 4 threads × 5 `print_line`s, each of 8 holes whose hook yields first: every line is whole |
+| `standard_stream_writers` | `tests/run` | `File.standard_output()`/`standard_error()`, `standard_output()` and `standard_error()` writers, `print_byte`, `print_char` (U+FFFD for a surrogate) |
 | `buffered_writer` | `tests/standard/src/Io` | over a recording writer: small writes give one inner write on flush; a write ≥ 8 KiB passes straight through; line mode writes at `\n`; an error drops the buffer |
-| Windows console | by hand | `print_line("héllo ✓ 🌍")` in a console shows correctly; there is no automated console |
+| Windows console | by hand | `print_line("héllo ✓ 🌍")` and `print_error_line` of the same text in a console show correctly; there is no automated console |
 
-Interleaving with stderr: since stdout is fully buffered when piped, run
-tests that compare stdout and stderr together never relied on order (each
-stream is captured separately). Check that `run.rs` does compare them
-separately; if any test merges them, it needs a flush, or it must expect
-the new order.
+Interleaving with stderr: `run.rs` captures each stream on its own, so
+tests never relied on their order.
 
 ## Phase 3: File
 
 ### `Io/file.lilac`
 
-```lilac
-/// An open file. Dropping it closes it; `close()` closes it and reports
-/// the error. Not copyable.
-File: structure {
-    private { handle: Os.Handle }
-    @on_drop: function (self) nothing { Os.close(self.handle) }    // error dropped
-}
-```
+`File` and its writer come from phase 2. This phase adds opening,
+reading and closing. A file it opens is owned, so dropping it closes it,
+and `close()` closes it and reports the error.
 
 It is move-only because it has `@on_drop` and no `@on_copy`, like `Box`.
+That holds for the standard streams' `File`s too.
 
 **Paths:**
 
@@ -538,19 +509,20 @@ large enough (threads plan phase 1).
 
 | Method | Algorithm |
 |---|---|
-| `open(path)` | `open_path(path, .Read)` → `File { handle }` |
+| `open(path)` | `open_path(path, .Read)` → `File { handle, owned = true }` |
 | `create(path)` | `.Write` (create + truncate, as `Os.open` defines it) |
 | `open_with(path, mode)` | as given |
 | `read(self, into: Slice[Uint8]) count: Int else error` | `Os.read(handle, into.base(), into.get_count())`; retry `.Interrupted` |
-| `write_bytes(self, bytes)` | `Os.write_all`; `.Some(e)` fails `e` |
+| `write_bytes(self, bytes)` | `self.writer().write_bytes(bytes)`, so a console gets the console path |
 | `write(self, text: Format)` | `self.writer().write(text)` |
 | `seek`, `size` | forward to `Os` |
-| `writer(self) Writer` | `Writer.from[File](self)`, unbuffered |
+| `writer(self) Writer` | phase 2's, unbuffered, with the console path |
 | `reader(self) Reader` | phase 4 |
-| `close(self: File) nothing else error: Error` | `handle = self.handle; @discard(self); Os.close(handle)`, and fail with its error |
+| `close(self: File) nothing else error: Error` | `handle = self.handle; owned = self.owned; @discard(self)`; when `owned`, `Os.close(handle)` and fail with its error |
 
 `close` takes `self` by value and discards it, so `@on_drop` doesn't run
-and the handle isn't closed twice.
+and the handle isn't closed twice. Closing a `File` that doesn't own its
+handle (a standard stream) only gives it up, as dropping it does.
 
 ### The file functions (`io.lilac`)
 
@@ -773,15 +745,15 @@ Run tests (they need real stdin):
    it was a literal. `print_byte` uses become `print` of the literal.
    Then delete both. Use a script for the 187 test uses, and check the
    output stays byte-identical.
-2. Remove `Io`'s private `Line`. `print_error` keeps a stack buffer of its
-   own (or uses an unbuffered `Writer` with a `Catch`), so a panic
-   message stays one system call.
+2. Done in phase 2: `Io`'s private `Line` is gone, and `print_error`
+   gathers a message in a `BufferedWriter` on its stack.
 3. `STDLIB.md`: the `Io` section.
 4. `AGENTS.md`: a `Standard.Io` entry beside `Standard.Heap`. Cover:
    - the handle tables and why they return `Result`;
    - `Catch`;
    - buffering and exit flushing;
-   - the reentrant standard-output lock;
-   - the Windows console conversion;
+   - standard output's `Sync.ReentrantMutex`;
+   - `File` (a handle and whether it owns it) and its Windows console
+     conversion;
    - `read_line`'s validation;
    - the `// stdin:` directive.

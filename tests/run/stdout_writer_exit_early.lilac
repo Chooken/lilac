@@ -1,0 +1,23 @@
+// expect-exit: 3
+// expect-stdout: held in the buffer
+// expect-stdout: and this
+// Text written through `standard_output()` waits in its buffer (not a
+// terminal here), and `Process.exit` writes it out before the process
+// ends.
+
+using Standard
+using Standard.Io
+using Standard.Process
+
+main: function () nothing {
+    out: Writer = standard_output()
+    out.write_line("held in the buffer") else {
+        exit(1)
+        return
+    }
+    out.write_line($"and {"this"}") else {
+        exit(1)
+        return
+    }
+    exit(3)
+}

@@ -1,0 +1,53 @@
+// expect-stdout: to a file over standard output
+// expect-stdout: through standard_output()
+// expect-stdout: printed: 'A' é ✓ 🌍 �
+// expect-stderr: to standard_error() 3
+// expect-stderr: to a file over standard error
+// The writers over the standard streams: `File`s (unbuffered, a write
+// each), `standard_output()` (buffered, flushed here) and
+// `standard_error()`, beside `print_byte` and `print_char` (a code
+// point that is no scalar prints U+FFFD).
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    out_file: File = File.standard_output()
+    out_file.writer().write_line("to a file over standard output") else {
+        print_error_line("write failed")
+        return
+    }
+
+    out: Writer = standard_output()
+    out.write_line("through standard_output()") else {
+        print_error_line("write failed")
+        return
+    }
+    out.flush() else {
+        print_error_line("flush failed")
+        return
+    }
+
+    print("printed: ")
+    print_byte(0x27)
+    print_char('A')
+    print_byte(0x27)
+    print(" ")
+    print_char(0xE9)
+    print(" ")
+    print_char(0x2713)
+    print(" ")
+    print_char(0x1F30D)
+    print(" ")
+    print_char(0xD800)
+    print_line("")
+
+    error: Writer = standard_error()
+    error.write_line($"to standard_error() {3}") else {
+        return
+    }
+    error_file: File = File.standard_error()
+    error_file.writer().write_line("to a file over standard error") else {
+        return
+    }
+}

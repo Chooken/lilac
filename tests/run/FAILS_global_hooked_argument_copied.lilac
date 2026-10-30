@@ -1,0 +1,28 @@
+// expect-error: E038
+// A `=>` function builds a global in place from an argument with a hook
+// only when its body moves the argument into the value: one it copies
+// would run `@on_copy`, so this initializer is not constant.
+
+using Standard
+
+Counted: structure {
+    value: Int
+
+    new: function (value: Int) Counted => Counted { value = value }
+
+    @on_copy: function (self) copy: Counted {
+        copy = Counted { value = self.value + 1 }
+    }
+}
+
+Twice: structure {
+    first: Counted
+    second: Counted
+
+    of: function (inner: Counted) Twice => Twice { first = inner, second = inner }
+}
+
+held: Twice = Twice.of(Counted.new(1))
+
+main: function () nothing {
+}

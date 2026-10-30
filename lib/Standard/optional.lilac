@@ -17,8 +17,21 @@ Optional[T]: either {
         fail
     }
 
+    /// The value of a `Some` (moved out of the optional), without testing
+    /// the tag: on `None` it is garbage. Debug builds panic instead.
     get_unchecked: function (self: Optional[T]) value: T {
-        value = (ref self) as ref unknown as ref T
+        if @builtin.Build.mode == .Debug {
+            if self.is_none() {
+                @panic("get_unchecked on a None")
+            }
+        }
+        // Wrapped in a structure, the payload moves out whatever `T` is,
+        // a reference too.
+        payload: ref Payload[T] = (ref self).payload_address() as ref Payload[T]
+        moved: Payload[T] = @read(payload)
+        value = @move(moved.value)
+        // The value has moved out, so `self` must not drop it again.
+        @write(ref self, .None)
     }
 
     /// A reference to the `Some` value, left in place; fails on `None`.
@@ -34,8 +47,31 @@ Optional[T]: either {
         fail
     }
 
+    /// A reference to the `Some` value, left in place, without testing the
+    /// tag: on `None` it points at garbage. Debug builds panic instead.
+    /// For an `Optional[ref X]` it is the stored reference itself, as
+    /// `get_ref` gives.
     get_ref_unchecked: function (self) value: ref T {
-        value = self as ref unknown as ref T
+        if @builtin.Build.mode == .Debug {
+            if self.is_none() {
+                @panic("get_ref_unchecked on a None")
+            }
+        }
+        // `ref T` is `T` exactly when `T` is a reference. Both arms check
+        // for every `T`, so each reads the slot through `ref unknown`.
+        if @is_same(ref T, T) {
+            stored: ref Payload[ref unknown] = self.payload_address() as ref Payload[ref unknown]
+            value = stored.value as ref T
+        } else {
+            value = self.payload_address() as ref T
+        }
+    }
+
+    private {
+        /// Where the payload lies: an either is a C tagged union, a
+        /// `@bit8` tag (two variants) and then the payload at its own
+        /// alignment, which is past the tag.
+        payload_address: function (self) ref unknown => @ptr_add(self as ref unknown, @align_of(T))
     }
 
     unwrap_or: function(self: Optional[T], default: T) value: T {
@@ -69,6 +105,22 @@ Optional[T]: either {
         }
     }
 
+    /// Whether this is a `Some`.
+    is_some: function (self) result: Bool {
+        result = false
+        match self {
+            .Some => result = true
+        }
+    }
+
+    /// Whether this is a `None`.
+    is_none: function (self) result: Bool {
+        result = false
+        match self {
+            .None => result = true
+        }
+    }
+
     /// `Some(value)` or `None`; usable when `T` copies and has a `@format`
     /// (checked where it is used).
     @format: function (self, out: ref Formatter) nothing {
@@ -78,5 +130,13 @@ Optional[T]: either {
             }
             .None => out.write_bytes("None")
         }
+    }
+}
+
+private {
+    /// An `Optional`'s payload as a structure of its own, which can be
+    /// moved and read whatever `T` is.
+    Payload[T]: structure {
+        value: T
     }
 }

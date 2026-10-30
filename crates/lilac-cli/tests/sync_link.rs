@@ -37,6 +37,7 @@ using Standard.Sync as Sync
 
 counter: Sync.Mutex[Int] = Sync.Mutex[Int].new(1)
 raw: Sync.RawMutex
+nested: Sync.ReentrantMutex[Int] = Sync.ReentrantMutex[Int].new(1)
 ready: Sync.Condvar
 word: @bit32
 
@@ -71,6 +72,14 @@ main: function () nothing {
     if raw.try_lock() {
         raw.unlock()
     }
+    outer: Sync.ReentrantMutexGuard[Int] = nested.lock()
+    if nested.try_lock() -> inner: Sync.ReentrantMutexGuard[Int] {
+        inner.value() += 1
+    }
+    if nested.lock_timeout(0x1) -> inner: Sync.ReentrantMutexGuard[Int] {
+        inner.value() += 1
+    }
+    @move(outer).unlock()
     ready.notify_all()
     Os.wait_on_address_timeout(ref word, 0x1, 0x1)
     Os.wake_one(ref word)

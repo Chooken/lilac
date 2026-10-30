@@ -1,0 +1,199 @@
+// `File`: a handle the system writes to, an open file or a standard
+// stream, as a writer.
+
+using Standard.Os as Os
+
+/// A handle to write to: an open file, or a standard stream. It closes the
+/// handle when it drops only if it owns it, so a standard stream's is
+/// never closed. A Windows console shows UTF-16 whatever its code page, so
+/// there the bytes are converted; anything else gets them as they are.
+///
+///     out: File = File.standard_output()
+///     out.writer().write_line($"{count} items") else -> e: Error { ... }
+File: structure {
+
+    private {
+        handle: Os.Handle
+        /// Whether dropping it closes `handle`.
+        owned: Bool
+    }
+
+    WRITER_TABLE: ref WriterTable[File] => ref file_table
+
+    /// Standard output, not owned. Each call looks the handle up, so keep
+    /// the `File` to look it up once.
+    standard_output: function () File => File { handle = Os.standard_output(), owned = false }
+
+    /// Standard error, not owned, as `standard_output`.
+    standard_error: function () File => File { handle = Os.standard_error(), owned = false }
+
+    /// A writer over this file. It holds the file's address, so keep the
+    /// file where it lies while the writer is in use.
+    writer: function (self) Writer => Writer.from[File](self)
+
+    is_terminal: function (self) Bool => Os.is_terminal(self.handle)
+
+    @on_drop: function (self) nothing {
+        // An error closing is dropped; `close` will report it.
+        if self.owned {
+            Os.close(self.handle)
+        }
+    }
+
+    private {
+
+        /// The table's `write`: all of `bytes` to a console, as many as the
+        /// system takes to anything else.
+        write_raw: function (self, bytes: Slice[Byte]) result: Result[Int, Error] {
+
+            if @builtin.Target.os == .Windows {
+                if Os.is_terminal(self.handle) {
+                    write_to_console(self.handle, bytes) else -> error: Error {
+                        result = .Error(error)
+                        return
+                    }
+                    result = .Ok(bytes.get_count())
+                    return
+                }
+            }
+
+            written: @bit_native = Os.write(self.handle, bytes.base() as ref unknown, bytes.get_count() as @bit_native).get() else -> error: Error {
+                result = .Error(error)
+                return
+            }
+
+            result = .Ok(written as Int)
+        }
+
+        /// The table's `flush`: a file holds nothing back.
+        flush_raw: function (self) Result[Empty, Error] => .Ok(Empty {})
+    }
+}
+
+private {
+
+    /// `File`'s functions, behind every `writer()`.
+    file_table: WriterTable[File] {
+        write = ref File.write_raw
+        flush = ref File.flush_raw
+    }
+
+    /// Writes `bytes` to a console as UTF-16. A bad sequence shows as
+    /// U+FFFD, and so does one the bytes end inside: behind a
+    /// `BufferedWriter` a write is whole pieces of text, so that is rare.
+    write_to_console: function (handle: Os.Handle, bytes: Slice[Byte]) nothing else error: Error {
+
+        units: ConsoleUnits = ConsoleUnits.over(handle)
+
+        units.add_utf8(bytes) else -> add_error: Error {
+            error = add_error
+            fail
+        }
+
+        units.finish() else -> finish_error: Error {
+            error = finish_error
+            fail
+        }
+    }
+
+    /// How many UTF-16 units `ConsoleUnits` writes at once.
+    CONSOLE_UNITS: Int => 0x200
+
+    /// UTF-16 on its way to a console, on the stack: written whenever it
+    /// fills, and at `finish`.
+    ConsoleUnits: structure {
+        handle: Os.Handle
+        units: @array(@bit16, 0x200)
+        used: Int
+
+        /// No units yet, for `handle`.
+        over: function (handle: Os.Handle) ConsoleUnits => ConsoleUnits {
+            handle = handle
+            units = @array(@bit16, 0x200) {}
+            used = 0
+        }
+
+        /// All the units, used or not.
+        whole: function (self) Slice[@bit16] => Slice[@bit16].new(@array_at(ref self.units, 0x0), @array_len(self.units))
+
+        /// Adds the scalars of `bytes`; each bad sequence is one U+FFFD,
+        /// as `String.add_bytes_lossy` repairs it.
+        add_utf8: function (self, bytes: Slice[Byte]) nothing else error: Error {
+
+            at: Int = 0
+
+            loop if at < bytes.get_count() {
+
+                scalar: Uint32, length: Int = Unicode.decode(bytes, at) else -> bad: Int, _: Unicode.Utf8ErrorKind {
+                    self.add(Scalar.REPLACEMENT.value()) else -> add_error: Error {
+                        error = add_error
+                        fail
+                    }
+                    at += bad
+                    continue
+                }
+
+                self.add(scalar) else -> add_error: Error {
+                    error = add_error
+                    fail
+                }
+                at += length
+            }
+        }
+
+        /// Adds one scalar: one unit, or a surrogate pair above U+FFFF.
+        add: function (self, scalar: Uint32) nothing else error: Error {
+
+            // Room for a pair, so one never splits across two writes.
+            if self.used + 2 > CONSOLE_UNITS {
+                self.finish() else -> finish_error: Error {
+                    error = finish_error
+                    fail
+                }
+            }
+
+            bits: @bit32 = scalar as @bit32
+
+            if scalar < 0x10000 {
+                unit: @bit16 = @truncate(bits)
+                self.whole().get(self.used) = unit
+                self.used += 1
+                return
+            }
+
+            offset: @bit32 = @i_sub_32(bits, 0x10000)
+            high: @bit16 = @truncate(@i_add_32(0xD800, @bit_shift_right_u_32(offset, 0xA)))
+            low: @bit16 = @truncate(@i_add_32(0xDC00, @bit_and_32(offset, 0x3FF)))
+            self.whole().get(self.used) = high
+            self.whole().get(self.used + 1) = low
+            self.used += 2
+        }
+
+        /// Writes the units added so far, until the console has taken
+        /// them all. They are gone even when the write fails.
+        finish: function (self) nothing else error: Error {
+
+            used: Int = self.used
+            self.used = 0
+            done: Int = 0
+
+            loop if done < used {
+
+                rest: Slice[@bit16] = self.whole().slice(Range.of(done, used))
+
+                written: @bit_native = Os.write_console(self.handle, rest.base(), rest.get_count() as @bit_native).get() else -> write_error: Error {
+                    error = write_error
+                    fail
+                }
+
+                // Nothing written: the rest would never be.
+                if written == 0x0 {
+                    error = .WriteZero
+                    fail
+                }
+
+                done += written as Int
+            }
+        }
+    }
+}

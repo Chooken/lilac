@@ -1,0 +1,122 @@
+// `Sync.ReentrantMutex` and `Sync.RawReentrantMutex`: the holding thread
+// locks again without waiting, the lock stays held until its last guard
+// drops, other threads wait for that (or give up, for `try_lock` and
+// `lock_timeout`), and under contention each count comes out exact.
+
+using Standard
+using Standard.Testing
+using Standard.Os as Os
+using Standard.Sync as Sync
+
+millisecond: @bit64 => 0xF4240
+
+held: Sync.ReentrantMutex[Int] = Sync.ReentrantMutex[Int].new(0)
+
+/// Runs `entry` on a new thread and waits for it; `false` when the thread
+/// could not start or join.
+run: function (entry: ref Os.ThreadEntry) ran: Bool {
+    ran = false
+    thread: Os.Thread = Os.spawn(entry, ref held as ref unknown).get() else {
+        return
+    }
+    match Os.join(thread) {
+        .Some => return
+    }
+    ran = true
+}
+
+/// Run while the test holds `held`: neither attempt may get it.
+cannot_lock: function (argument: ref unknown) nothing {
+    if held.try_lock() -> guard: Sync.ReentrantMutexGuard[Int] {
+        guard.value() += 1000
+    }
+    if held.lock_timeout(@i_mul_64(millisecond, 0xA)) -> guard: Sync.ReentrantMutexGuard[Int] {
+        guard.value() += 1000
+    }
+}
+
+/// Run once the test has let `held` go: it gets it at once.
+can_lock: function (argument: ref unknown) nothing {
+    if held.try_lock() -> guard: Sync.ReentrantMutexGuard[Int] {
+        guard.value() += 100
+    }
+}
+
+test "The holding thread locks again, and the lock is held until its last unlock" {
+    outer: Sync.ReentrantMutexGuard[Int] = held.lock()
+    inner: Sync.ReentrantMutexGuard[Int] = held.lock()
+    inner.value() += 1
+    if held.try_lock() -> again: Sync.ReentrantMutexGuard[Int] {
+        again.value() += 1
+    } else {
+        expect_with(false, $"try_lock from the holding thread failed")
+    }
+    @move(inner).unlock()
+
+    // One guard left: still held.
+    expect(run(ref cannot_lock))
+    expect(outer.value() == 2 as Int)
+    @move(outer).unlock()
+
+    expect(run(ref can_lock))
+    expect(held.lock().value() == 102 as Int)
+}
+
+counted: Sync.ReentrantMutex[Int] = Sync.ReentrantMutex[Int].new(0)
+raw: Sync.RawReentrantMutex
+raw_count: @bit32
+
+/// Adds one to `counted`, locking it again first, `depth` times deep.
+add_nested: function (depth: Int) nothing {
+    guard: Sync.ReentrantMutexGuard[Int] = counted.lock()
+    if depth > 0 {
+        add_nested(depth - 1)
+        return
+    }
+    guard.value() += 1
+}
+
+work: function (argument: ref unknown) nothing {
+    index: Int = 0
+    loop if index < 10000 {
+        add_nested(3)
+        raw.lock()
+        raw.lock()
+        raw_count = @i_add_32(raw_count, 0x1)
+        raw.unlock()
+        raw_count = @i_add_32(raw_count, 0x1)
+        raw.unlock()
+        index += 1
+    }
+}
+
+test "Under contention each count comes out exact" {
+    threads: @array(Os.Thread, 4) = @array(Os.Thread, 4) {}
+    running: ref @array(Os.Thread, 4) = ref threads
+    index: @bit_native = 0x0
+    loop if index != 0x4 {
+        thread: Os.Thread = Os.spawn(ref work, ref counted as ref unknown).get() else {
+            expect_with(false, $"a thread did not start")
+            return
+        }
+        stored: ref Os.Thread = @array_at(running, index)
+        stored = thread
+        index = @i_add_native(index, 0x1)
+    }
+    index = 0x0
+    loop if index != 0x4 {
+        match Os.join(@array_at(running, index)) {
+            .Some => expect_with(false, $"a thread did not join")
+        }
+        index = @i_add_native(index, 0x1)
+    }
+    expect(not raw.is_locked())
+    expect(counted.lock().value() == 40000 as Int)
+    expect(raw_count as Uint32 == 80000 as Uint32)
+}
+
+test "A mutex being set up is reached with no lock" {
+    local: Sync.ReentrantMutex[Int] = Sync.ReentrantMutex[Int].new(1)
+    local.get_unlocked() += 1
+    expect(@move(local).into_inner() == 2 as Int)
+}

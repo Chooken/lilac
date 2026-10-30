@@ -51,15 +51,14 @@ Text: structure {
     used: @bit_native
     bytes: @array(@bit8, 0x1000)
 
-    push: function (self, text: @byte_buffer) nothing {
-        data: ref @bit8 = @byte_buffer_ptr(text)
-        length: @bit_native = @byte_buffer_len(text)
-        index: @bit_native = 0x0
+    push: function (self, bytes: Slice[Byte]) nothing {
+        index: Int = 0
         loop {
-            if index == length or self.used == @array_len(self.bytes) { break }
-            @store_u8(@array_at(ref self.bytes, 0x0), self.used, @load_u8(data, index))
+            if index == bytes.get_count() or self.used == @array_len(self.bytes) { break }
+            byte: Byte = bytes.get(index)
+            @store_u8(@array_at(ref self.bytes, 0x0), self.used, byte as @bit8)
             self.used = @i_add_native(self.used, 0x1)
-            index = @i_add_native(index, 0x1)
+            index += 1
         }
     }
 

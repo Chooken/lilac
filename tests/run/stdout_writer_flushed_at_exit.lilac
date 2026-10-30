@@ -1,0 +1,16 @@
+// expect-stdout: one
+// expect-stdout: two three
+// Text left in `standard_output()`'s buffer is written out when `main`
+// returns (`Standard.Runtime`'s `@exit`), after what `print` wrote.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    out: Writer = standard_output()
+    print_line("one")
+    out.write_line($"two {"three"}") else {
+        print_error_line("write failed")
+        return
+    }
+}

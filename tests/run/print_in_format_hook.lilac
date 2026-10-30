@@ -1,0 +1,22 @@
+// expect-stdout: start inner(hole) end
+// expect-stdout: after
+// A `@format` hook that prints while `print_line` holds standard output
+// locks it again (the lock is reentrant), so nothing hangs. Its print
+// flushes what the outer print had written so far, then the outer one
+// goes on.
+
+using Standard
+using Standard.Io
+
+Noisy: structure {
+    @format: function (self, out: ref Formatter) nothing {
+        print("inner")
+        out.write_bytes("(hole)")
+    }
+}
+
+main: function () nothing {
+    noisy: Noisy = Noisy {}
+    print_line($"start {noisy} end")
+    print_line("after")
+}

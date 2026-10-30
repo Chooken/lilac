@@ -1,0 +1,15 @@
+// build-arg: --stack-traces=off
+// expect-exit: 101
+// expect-stderr: panic: get_ref_unchecked on a None
+// expect-stderr:   at Standard.Optional[Standard.Int32].get_ref_unchecked (Standard/optional.lilac:57:17)
+// expect-stderr:   (stack trace disabled; build with --stack-traces=on)
+// A Debug build checks `Optional.get_ref_unchecked` and panics on a
+// `None`, where a Release build would read garbage.
+
+using Standard
+
+main: function () nothing {
+    missing: Optional[Int32] = .None
+    value: ref Int32 = missing.get_ref_unchecked()
+    value = 1 as Int32
+}

@@ -29,7 +29,10 @@ using Standard.Testing as Testing
     Testing.run()
 }
 
+/// Writes out standard output (`Io.flush_standard`), then ends the
+/// process with `code`.
 @exit: function (code: @bit32) nothing {
+    Io.flush_standard()
     Os.exit(code)
 }
 
