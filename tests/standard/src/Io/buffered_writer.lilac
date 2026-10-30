@@ -1,0 +1,160 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+
+// A writer that keeps what it is given and counts its writes.
+Recorder: structure {
+    used: Int
+    writes: Int
+    flushes: Int
+    failing: Bool
+    bytes: @array(Byte, 0x4000)
+
+    written: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), self.used)
+    whole: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
+}
+
+recorder_write: function (recorder: ref Recorder, bytes: Slice[Byte]) result: Result[Int, Error] {
+    recorder.writes += 1
+    if recorder.failing {
+        result = .Error(.BrokenPipe)
+        return
+    }
+    bytes.copy_to(recorder.whole(), recorder.used)
+    recorder.used += bytes.get_count()
+    result = .Ok(bytes.get_count())
+}
+
+recorder_flush: function (recorder: ref Recorder) result: Result[Empty, Error] {
+    recorder.flushes += 1
+    result = .Ok(Empty {})
+}
+
+recorder_table: WriterTable[Recorder] = WriterTable {
+    write = ref recorder_write
+    flush = ref recorder_flush
+}
+
+new_recorder: function () Recorder => Recorder { used = 0, writes = 0, flushes = 0, failing = false, bytes = @array(Byte, 0x4000) {} }
+
+// `count` bytes of `byte`, in `into`.
+filled: function (into: Slice[Byte], count: Int, byte: Byte) bytes: Slice[Byte] {
+    index: Int = 0
+    loop if index < count {
+        into.get(index) = byte
+        index += 1
+    }
+    bytes = into.slice(Range.of(0, count))
+}
+
+test "Small writes reach the inner writer in one write at flush" {
+    recorder: Recorder = new_recorder()
+    buffered: BufferedWriter = BufferedWriter.over(Writer.over[Recorder](ref recorder, ref recorder_table), false)
+    writer: Writer = buffered.writer()
+    writer.write($"one {2} three") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    writer.write_bytes(", four\n") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(recorder.writes == 0 as Int)
+    writer.flush() else -> error: Error {
+        expect_with(false, $"flush failed: {error}")
+        return
+    }
+    expect(recorder.writes == 1 as Int)
+    expect(Standard.Memory.equal_bytes(recorder.written(), "one 2 three, four\n"))
+}
+
+test "A write as large as the buffer goes straight through" {
+    recorder: Recorder = new_recorder()
+    buffered: BufferedWriter = BufferedWriter.over(Writer.over[Recorder](ref recorder, ref recorder_table), false)
+    writer: Writer = buffered.writer()
+    space: @array(Byte, 0x2000) = @array(Byte, 0x2000) {}
+    big: Slice[Byte] = filled(Slice[Byte].new(@array_at(ref space, 0x0), @array_len(space)), BUFFER_COUNT, 0x61)
+    writer.write_bytes("ab") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    writer.write_bytes(big) else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    // The buffered "ab" first, then the large write unbuffered.
+    expect(recorder.writes == 2 as Int)
+    expect(recorder.used == BUFFER_COUNT + 2)
+    expect(Standard.Memory.equal_bytes(recorder.written().slice(Range.of(0, 3)), "aba"))
+}
+
+test "A write that overflows the buffer writes the buffer out first" {
+    recorder: Recorder = new_recorder()
+    buffered: BufferedWriter = BufferedWriter.over(Writer.over[Recorder](ref recorder, ref recorder_table), false)
+    writer: Writer = buffered.writer()
+    space: @array(Byte, 0x2000) = @array(Byte, 0x2000) {}
+    whole: Slice[Byte] = Slice[Byte].new(@array_at(ref space, 0x0), @array_len(space))
+    writer.write_bytes(filled(whole, BUFFER_COUNT - 10, 0x61)) else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(recorder.writes == 0 as Int)
+    writer.write_bytes(filled(whole, 20, 0x62)) else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(recorder.writes == 1 as Int)
+    expect(recorder.used == BUFFER_COUNT - 10)
+    writer.flush() else -> error: Error {
+        expect_with(false, $"flush failed: {error}")
+        return
+    }
+    expect(recorder.writes == 2 as Int)
+    expect(recorder.used == BUFFER_COUNT + 10)
+    expect(recorder.written().get(BUFFER_COUNT - 10) == 0x62 as Byte)
+}
+
+test "Line mode writes through the last newline" {
+    recorder: Recorder = new_recorder()
+    buffered: BufferedWriter = BufferedWriter.over(Writer.over[Recorder](ref recorder, ref recorder_table), true)
+    writer: Writer = buffered.writer()
+    writer.write_bytes("no newline") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(recorder.writes == 0 as Int)
+    writer.write_bytes(" yet\nsecond\nthird") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    // The buffered start and both lines in one write; "third" waits.
+    expect(recorder.writes == 1 as Int)
+    expect(Standard.Memory.equal_bytes(recorder.written(), "no newline yet\nsecond\n"))
+    writer.flush() else -> error: Error {
+        expect_with(false, $"flush failed: {error}")
+        return
+    }
+    expect(Standard.Memory.equal_bytes(recorder.written(), "no newline yet\nsecond\nthird"))
+}
+
+test "A failed write drops the buffer" {
+    recorder: Recorder = new_recorder()
+    buffered: BufferedWriter = BufferedWriter.over(Writer.over[Recorder](ref recorder, ref recorder_table), true)
+    writer: Writer = buffered.writer()
+    writer.write_bytes("lost") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    recorder.failing = true
+    error: Error = failure_of(writer, " line\n") else {
+        expect_with(false, $"writing to a failing writer succeeded")
+        return
+    }
+    expect_text($"{error}", "broken pipe")
+    recorder.failing = false
+    writer.write_bytes("kept\n") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    expect(Standard.Memory.equal_bytes(recorder.written(), "kept\n"))
+}

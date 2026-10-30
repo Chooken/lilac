@@ -1,0 +1,179 @@
+// `BufferedWriter`: a `Writer` over another writer that collects small
+// writes and passes them on in large pieces, so a format with many holes
+// is one write to the writer below, not one per piece.
+
+/// How many bytes a `BufferedWriter` holds before it writes them out.
+BUFFER_COUNT: Int => 0x2000
+
+/// Collects bytes and writes them to the writer under it in large pieces:
+/// when the buffer fills, at `flush`, and, in line mode, at the end of
+/// each line (for a terminal, where a line should show once it is
+/// written). It borrows nothing but what its inner writer borrows. It
+/// does not flush when dropped, so flush it when done.
+///
+///     buffered: BufferedWriter = BufferedWriter.over(file.writer(), false)
+///     writer: Writer = buffered.writer()
+///     writer.write_line($"{count} items") else -> e: Error { ... }
+///     writer.flush() else -> e: Error { ... }
+BufferedWriter: structure {
+
+    private {
+
+        /// Where the bytes go once they leave the buffer.
+        inner_writer: Writer
+        /// Room for bytes not yet written; the first `used` are waiting.
+        buffer: @array(Byte, 0x2000)
+        /// How many bytes of `buffer` are waiting.
+        used: Int
+        /// Line mode: write out through each newline as it arrives.
+        line: Bool
+
+    }
+
+    /// An empty buffer over `writer`, in line mode when `lines`. A `=>`, so
+    /// a constant global can hold one.
+    over: function (writer: Writer, lines: Bool) BufferedWriter => BufferedWriter {
+        inner_writer = writer
+        buffer = @array(Byte, 0x2000) {}
+        used = 0
+        line = lines
+    }
+
+    /// A writer over this buffer. It holds the buffer's address, so keep
+    /// the buffer where it lies while the writer is in use.
+    writer: function (self) Writer => Writer.over[BufferedWriter](
+        self,
+        ref buffered_writer_table
+    )
+
+    /// The table's `write`: takes all of `bytes`. They join the buffer
+    /// when they fit; otherwise the buffer is written out first, and a
+    /// write as large as the buffer goes straight to the inner writer. In
+    /// line mode everything through the last newline is written out now.
+    /// On an error the buffer is dropped, so a closed pipe fails once, not
+    /// on every later write.
+    write: function (self, bytes: Slice[Byte]) result: Result[Int, Error] {
+
+        rest: Slice[Byte] = bytes
+
+        // Line mode: the lines go out now, the unfinished line waits.
+        if self.line {
+            if last_newline(rest) -> newline: Int {
+                self.write_through(rest.slice(Range.of(0, newline + 1))) else -> error: Error {
+                    result = .Error(error)
+                    return
+                }
+                rest = rest.slice(Range.of(newline + 1, rest.get_count()))
+            }
+        }
+
+        if self.used + rest.get_count() > BUFFER_COUNT {
+            self.flush_buffer() else -> error: Error {
+                result = .Error(error)
+                return
+            }
+        }
+
+        // Copying a write the buffer would fill alone gains nothing.
+        if rest.get_count() >= BUFFER_COUNT {
+            self.inner_writer.write_bytes(rest) else -> error: Error {
+                result = .Error(error)
+                return
+            }
+        } else {
+            rest.copy_to(self.buffer_view(), self.used)
+            self.used += rest.get_count()
+        }
+
+        result = .Ok(bytes.get_count())
+    }
+
+    /// Writes out what is buffered, then flushes the inner writer. The
+    /// buffer is emptied even when the write fails.
+    flush: function (self) result: Result[Empty, Error] {
+
+        self.flush_buffer() else -> error: Error {
+            result = .Error(error)
+            return
+        }
+
+        self.inner_writer.flush() else -> error: Error {
+            result = .Error(error)
+            return
+        }
+
+        result = .Ok(Empty{})
+    }
+
+    private {
+
+        /// The whole buffer, used or not.
+        buffer_view: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.buffer, 0x0), @array_len(self.buffer))
+
+        /// Writes out what is buffered and empties the buffer, also when
+        /// the write fails.
+        flush_buffer: function (self) nothing else error: Error {
+
+            if self.used == 0 as Int {
+                return
+            }
+
+            used: Int = self.used
+            self.used = 0
+
+            self.inner_writer.write_bytes(self.buffer_view().slice(Range.of(0, used))) else -> write_error: Error {
+                error = write_error
+                fail
+            }
+        }
+
+        /// Writes out the buffer and then `text`, which ends a line: in
+        /// one write when `text` fits after what is buffered.
+        write_through: function (self, text: Slice[Byte]) nothing else error: Error {
+
+            if self.used + text.get_count() <= BUFFER_COUNT {
+                text.copy_to(self.buffer_view(), self.used)
+                self.used += text.get_count()
+                self.flush_buffer() else -> write_error: Error {
+                    error = write_error
+                    fail
+                }
+                return
+            }
+
+            self.flush_buffer() else -> write_error: Error {
+                error = write_error
+                fail
+            }
+            self.inner_writer.write_bytes(text) else -> write_error: Error {
+                error = write_error
+                fail
+            }
+        }
+    }
+}
+
+private {
+
+    /// Where the last newline in `bytes` is; fails when there is none.
+    last_newline: function (bytes: Slice[Byte]) at: Int else nothing {
+
+        index: Int = bytes.get_count()
+
+        loop if index > 0 {
+            index -= 1
+            if bytes.get(index) == 0x0A as Byte {
+                at = index
+                return
+            }
+        }
+
+        fail
+    }
+
+    /// `BufferedWriter`'s functions, behind every `writer()`.
+    buffered_writer_table: WriterTable[BufferedWriter] {
+        write = ref BufferedWriter.write
+        flush = ref BufferedWriter.flush
+    }
+}
