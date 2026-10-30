@@ -225,6 +225,51 @@ close: function (handle: Handle) error: Optional[Error] {
     }
 }
 
+/// Removes the file at `path` (UTF-8). A file still open elsewhere goes
+/// once the last handle to it closes.
+remove_file: function (path: @byte_buffer) error: Optional[Error] {
+    error = .None
+    match @builtin.Target.os {
+        .Windows => {
+            wide: ref @bit16 = wide_path(path).get() else -> why: Error {
+                error = .Some(why)
+                return
+            }
+            ok: @bit32 = Windows.DeleteFileW(wide)
+            code: @bit32 = Windows.GetLastError()
+            unmap_pages(wide as ref unknown, wide_path_size(path))
+            if ok == Windows.FALSE {
+                error = .Some(error_of_windows(code))
+            }
+        }
+        .Linux => {
+            c: ref @bit8 = c_path(path).get() else -> why: Error {
+                error = .Some(why)
+                return
+            }
+            result: @bit_native = Linux.unlinkat(Linux.AT_FDCWD, c, 0x0)
+            unmap_pages(c as ref unknown, c_path_size(path))
+            if Linux.is_error(result) {
+                error = .Some(error_of_errno(Linux.errno_of(result)))
+            }
+        }
+        .MacOs => {
+            c: ref @bit8 = c_path(path).get() else -> why: Error {
+                error = .Some(why)
+                return
+            }
+            removed: @bit32 = MacOs.unlink(c)
+            code: @bit32 = MacOs.errno()
+            unmap_pages(c as ref unknown, c_path_size(path))
+            if removed == 0xFFFFFFFF {
+                error = .Some(error_of_errno(code))
+            }
+        }
+    } else {
+        error = .Some(.Unsupported)
+    }
+}
+
 /// Moves `handle`'s position to `offset` bytes from `from`: the new
 /// position from the start.
 seek: function (handle: Handle, offset: @bit64, from: SeekFrom) result: Result[@bit64, Error] {

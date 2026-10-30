@@ -1,7 +1,11 @@
 // Writing text to the standard output and error streams. Text is a
 // `Format`: an f-string, a literal or one formattable value. Each call is
 // written out before it returns, so a program's output shows as it runs,
-// and is one write, so the text of two threads never mixes.
+// and is one write, so the text of two threads never mixes. Then whole
+// files: read as text, written, appended to and removed.
+
+using Standard.Collections
+using Standard.Os as Os
 
 /// Writes `text` to standard output.
 print: function (text: Format) nothing {
@@ -40,7 +44,126 @@ print_char: function (c: @bit32) nothing {
     print(scalar)
 }
 
+/// The whole file at `path` as text: `.InvalidData` when it is not UTF-8.
+///
+///     notes: String = read_file($"{folder}/notes.txt") else -> e: Error { ... }
+read_file: function (path: Format) text: String else error: Error {
+
+    file: File = File.open(path) else -> open_error: Error {
+        error = open_error
+        fail
+    }
+
+    bytes: List[Byte] = List[Byte].new()
+
+    // Only a hint: the file can change size while it is read.
+    if file.size() -> size: Uint64 {
+        if size.to_int() -> count: Int {
+            bytes.reserve(count)
+        }
+    }
+
+    chunk: @array(Byte, 0x2000) = @array(Byte, 0x2000) {}
+    whole: Slice[Byte] = Slice[Byte].new(@array_at(ref chunk, 0x0), @array_len(chunk))
+
+    loop {
+
+        count: Int = file.read(whole) else -> read_error: Error {
+            error = read_error
+            fail
+        }
+
+        if count == 0 as Int {
+            break
+        }
+
+        bytes.add_slice(whole.slice(Range.of(0, count)))
+    }
+
+    // Validated once, whole, so no scalar is split between two reads.
+    valid: String = String.from_bytes(bytes.get_slice()) else {
+        error = .InvalidData
+        fail
+    }
+    text = valid
+}
+
+/// Writes `text` to the file at `path`, created if missing and replaced if
+/// not.
+write_file: function (path: Format, text: Format) nothing else error: Error {
+    file: File = File.create(path) else -> open_error: Error {
+        error = open_error
+        fail
+    }
+    write_and_close(@move(file), text) else -> write_error: Error {
+        error = write_error
+        fail
+    }
+}
+
+/// Writes `text` at the end of the file at `path`, created if missing.
+append_file: function (path: Format, text: Format) nothing else error: Error {
+    file: File = File.open_with(path, .Append) else -> open_error: Error {
+        error = open_error
+        fail
+    }
+    write_and_close(@move(file), text) else -> write_error: Error {
+        error = write_error
+        fail
+    }
+}
+
+/// Removes the file at `path`.
+remove_file: function (path: Format) nothing else error: Error {
+
+    buffer: PathBuffer = PathBuffer.empty()
+    buffer.format(path) else -> path_error: Error {
+        error = path_error
+        fail
+    }
+
+    match Os.remove_file(buffer.text()) {
+        .Some -> remove_error: Error {
+            error = remove_error
+            fail
+        }
+    }
+}
+
 private {
+
+    /// Writes `text` to `file` through a buffer, so a format of many
+    /// pieces is few system calls, then closes it: a close can report a
+    /// write the system held back.
+    write_and_close: function (file: File, text: Format) nothing else error: Error {
+
+        write_buffered(ref file, text) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+
+        @move(file).close() else -> close_error: Error {
+            error = close_error
+            fail
+        }
+    }
+
+    /// Writes `text` to `file` through a `BufferedWriter`, and flushes it.
+    write_buffered: function (file: ref File, text: Format) nothing else error: Error {
+
+        buffered: BufferedWriter = BufferedWriter.over(file.writer(), false)
+        writer: Writer = buffered.writer()
+
+        writer.write(text) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+
+        writer.flush() else -> flush_error: Error {
+            error = flush_error
+            fail
+        }
+    }
 
     /// Writes `text` to standard error, then a newline when `line`. The
     /// stream itself is unbuffered, so the text gathers in a buffer on

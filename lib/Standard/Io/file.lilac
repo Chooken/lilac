@@ -1,15 +1,27 @@
-// `File`: a handle the system writes to, an open file or a standard
-// stream, as a writer.
+// `File`: a handle the system reads and writes, an open file or a
+// standard stream.
 
 using Standard.Os as Os
 
-/// A handle to write to: an open file, or a standard stream. It closes the
-/// handle when it drops only if it owns it, so a standard stream's is
-/// never closed. A Windows console shows UTF-16 whatever its code page, so
-/// there the bytes are converted; anything else gets them as they are.
+/// How `File.open_with` opens a file: `.Read`, `.Write` (created if
+/// missing, emptied if not), `.Append` (created if missing) or
+/// `.ReadWrite`.
+OpenMode: alias Os.OpenMode
+
+/// Where a `File.seek` offset counts from: `.Start`, `.Current` or `.End`.
+SeekFrom: alias Os.SeekFrom
+
+/// An open file, or a standard stream. A file `open` opens is owned:
+/// dropping it closes it, and `close` closes it and reports the error. A
+/// standard stream's `File` never closes its handle. It is unbuffered, a
+/// system call per read or write; wrap its `writer()` in a
+/// `BufferedWriter` for many small writes. A Windows console shows
+/// UTF-16 whatever its code page, so there the bytes are converted;
+/// anything else gets them as they are.
 ///
-///     out: File = File.standard_output()
-///     out.writer().write_line($"{count} items") else -> e: Error { ... }
+///     file: File = File.create($"{folder}/notes.txt") else -> e: Error { ... }
+///     file.write_line($"{count} items") else -> e: Error { ... }
+///     file.close() else -> e: Error { ... }
 File: structure {
 
     private {
@@ -20,6 +32,42 @@ File: structure {
 
     WRITER_TABLE: ref WriterTable[File] => ref file_table
 
+    /// Opens the existing file at `path` to read.
+    open: function (path: Format) file: File else error: Error {
+        opened: File = open_with(path, .Read) else -> open_error: Error {
+            error = open_error
+            fail
+        }
+        file = opened
+    }
+
+    /// Creates the file at `path` to write, emptying it if it exists.
+    create: function (path: Format) file: File else error: Error {
+        opened: File = open_with(path, .Write) else -> open_error: Error {
+            error = open_error
+            fail
+        }
+        file = opened
+    }
+
+    /// Opens the file at `path` as `mode` says. A path longer than
+    /// `MAX_PATH_BYTES`, or holding a zero byte, is `.InvalidInput`.
+    open_with: function (path: Format, mode: OpenMode) file: File else error: Error {
+
+        buffer: PathBuffer = PathBuffer.empty()
+        buffer.format(path) else -> path_error: Error {
+            error = path_error
+            fail
+        }
+
+        handle: Os.Handle = Os.open(buffer.text(), mode).get() else -> open_error: Error {
+            error = open_error
+            fail
+        }
+
+        file = File { handle = handle, owned = true }
+    }
+
     /// Standard output, not owned. Each call looks the handle up, so keep
     /// the `File` to look it up once.
     standard_output: function () File => File { handle = Os.standard_output(), owned = false }
@@ -27,11 +75,99 @@ File: structure {
     /// Standard error, not owned, as `standard_output`.
     standard_error: function () File => File { handle = Os.standard_error(), owned = false }
 
-    /// A writer over this file. It holds the file's address, so keep the
-    /// file where it lies while the writer is in use.
+    /// Reads up to `into`'s count of bytes into it: how many, 0 at the end
+    /// of the file. A read a signal cut short (`.Interrupted`) is retried.
+    read: function (self, into: Slice[Byte]) count: Int else error: Error {
+
+        loop {
+
+            got: @bit_native = Os.read(self.handle, into.base() as ref unknown, into.get_count() as @bit_native).get() else -> read_error: Error {
+
+                match read_error {
+                    .Interrupted {
+                        continue
+                    }
+                }
+
+                error = read_error
+                fail
+            }
+
+            count = got as Int
+            return
+        }
+    }
+
+    /// Writes all of `bytes`, as they are.
+    write_bytes: function (self, bytes: Slice[Byte]) nothing else error: Error {
+        self.writer().write_bytes(bytes) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+    }
+
+    /// Writes `text`'s text. Each piece of it is a system call: for many,
+    /// write through a `BufferedWriter`.
+    write: function (self, text: Format) nothing else error: Error {
+        self.writer().write(text) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+    }
+
+    /// Writes `text`'s text, then a newline.
+    write_line: function (self, text: Format) nothing else error: Error {
+        self.writer().write_line(text) else -> write_error: Error {
+            error = write_error
+            fail
+        }
+    }
+
+    /// Moves the position to `offset` bytes from `from`: the new position,
+    /// from the start.
+    seek: function (self, offset: Int64, from: SeekFrom) position: Uint64 else error: Error {
+        moved: @bit64 = Os.seek(self.handle, offset as @bit64, from).get() else -> seek_error: Error {
+            error = seek_error
+            fail
+        }
+        position = moved as Uint64
+    }
+
+    /// The file's size in bytes.
+    size: function (self) size: Uint64 else error: Error {
+        bytes: @bit64 = Os.size(self.handle).get() else -> size_error: Error {
+            error = size_error
+            fail
+        }
+        size = bytes as Uint64
+    }
+
+    /// A writer over this file, unbuffered. It holds the file's address,
+    /// so keep the file where it lies while the writer is in use.
     writer: function (self) Writer => Writer.from[File](self)
 
     is_terminal: function (self) Bool => Os.is_terminal(self.handle)
+
+    /// Closes the file now and reports the error, which can be a write's
+    /// that the system held back (a full disk, a network file). Dropping
+    /// closes too, but drops the error. A `File` that does not own its
+    /// handle (a standard stream) is only given up.
+    close: function (self: File) nothing else error: Error {
+
+        handle: Os.Handle = self.handle
+        owned: Bool = self.owned
+        // Closed here, so the drop must not close it again.
+        @discard(self)
+
+        if owned {
+            match Os.close(handle) {
+                .Some -> close_error: Error {
+                    error = close_error
+                    fail
+                }
+            }
+        }
+    }
 
     @on_drop: function (self) nothing {
         // An error closing is dropped; `close` will report it.
@@ -70,7 +206,68 @@ File: structure {
     }
 }
 
+/// The longest path `File` opens, in bytes.
+MAX_PATH_BYTES: Int => 0x1000
+
 private {
+
+    /// A path formatted on the stack, so opening allocates nothing.
+    /// `overflowed` once it is longer than `MAX_PATH_BYTES`.
+    PathBuffer: structure {
+        bytes: @array(Byte, 0x1000)
+        used: Int
+        overflowed: Bool
+
+        empty: function () PathBuffer => PathBuffer {
+            bytes = @array(Byte, 0x1000) {}
+            used = 0
+            overflowed = false
+        }
+
+        /// Formats `path` into the buffer: `.InvalidInput` when it is too
+        /// long, or holds a zero byte, where the system would end it.
+        format: function (self, path: Format) nothing else error: Error {
+
+            out: Formatter = Formatter.over[PathBuffer](self, ref PathBuffer.push)
+            out.write(path)
+
+            if self.overflowed {
+                error = .InvalidInput
+                fail
+            }
+
+            text: Slice[Byte] = self.text()
+            index: Int = 0
+
+            loop if index < text.get_count() {
+                if text.get(index) == 0 as Byte {
+                    error = .InvalidInput
+                    fail
+                }
+                index += 1
+            }
+        }
+
+        /// The path formatted so far.
+        text: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.bytes, 0x0), self.used)
+
+        /// The formatter's sink: appends `bytes`, unless they do not fit.
+        push: function (self, bytes: Slice[Byte]) nothing {
+
+            if self.overflowed {
+                return
+            }
+
+            if bytes.get_count() > MAX_PATH_BYTES - self.used {
+                self.overflowed = true
+                return
+            }
+
+            whole: Slice[Byte] = Slice[Byte].new(@array_at(ref self.bytes, 0x0), @array_len(self.bytes))
+            bytes.copy_to(whole, self.used)
+            self.used += bytes.get_count()
+        }
+    }
 
     /// `File`'s functions, behind every `writer()`.
     file_table: WriterTable[File] {

@@ -453,7 +453,12 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 > per piece. `standard_output()` and `standard_error()` are the streams as
 > `Writer`s; `@exit` and `Process.exit` flush standard output.
 > `print_char` (a code point, as UTF-8) and `print_byte` stay until
-> `Standard` has a `Char` type.
+> `Standard` has a `Char` type. `File` opens files (`open`, `create`,
+> `open_with` an `OpenMode`, each taking a `Format` path of at most
+> `MAX_PATH_BYTES`) and reads, writes, seeks, sizes and closes them;
+> dropping an owned one closes it. `read_file` (the text, `.InvalidData`
+> when it is not UTF-8), `write_file`, `append_file` and `remove_file`
+> are one call each.
 > `Standard.Process.exit` and `Standard.Heap.Allocator` likewise sit on
 > `Standard.Os` (`exit`, `allocate`/`deallocate`), and `Standard.Runtime`
 > defines the platform hooks (SPEC §8) over it; its `@compiler_print`
@@ -486,7 +491,8 @@ exists, else a compile error):
   `standard_output()`, `standard_error()`; `read`, `write` (both
   `Result[@bit_native, Error]`), `write_all` (`Optional[Error]`),
   `open(path, OpenMode) Result[Handle, Error]`, `close`,
-  `seek(handle, offset, SeekFrom) Result[@bit64, Error]`, `size`.
+  `seek(handle, offset, SeekFrom) Result[@bit64, Error]`, `size`,
+  `remove_file(path) Optional[Error]`.
 * **Memory:** `allocate(size)` (zeroed) and `reallocate(memory, size)`
   (both `Result[ref unknown, Error]`; a failed `reallocate` leaves
   `memory` as it was), `deallocate(memory)`; `map_pages(size)

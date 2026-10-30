@@ -464,65 +464,68 @@ return .Ok(all of bytes)
 Interleaving with stderr: `run.rs` captures each stream on its own, so
 tests never relied on their order.
 
-## Phase 3: File
+## Phase 3: File (done)
 
 ### `Io/file.lilac`
 
 `File` and its writer come from phase 2. This phase adds opening,
-reading and closing. A file it opens is owned, so dropping it closes it,
-and `close()` closes it and reports the error.
+reading, seeking and closing. A file it opens is owned, so dropping it
+closes it, and `close()` closes it and reports the error.
 
 It is move-only because it has `@on_drop` and no `@on_copy`, like `Box`.
 That holds for the standard streams' `File`s too.
 
-**Paths:**
+`OpenMode` and `SeekFrom` are aliases of `Os`'s, so `Io` code names
+neither `Os` nor its modes' module.
+
+**Paths** are `Format`s, formatted on the stack, so opening allocates
+nothing:
 
 ```lilac
+/// The longest path `File` opens, in bytes.
+MAX_PATH_BYTES: Int => 0x1000
+
 private {
-    MAX_PATH_BYTES: Int => 4096
-    /// A path formatted on the stack. `overflowed` once it is too long.
     PathBuffer: structure {
-        bytes: @array(@bit8, 4096)
+        bytes: @array(Byte, 0x1000)
         used: Int
         overflowed: Bool
-        push: function (self, text: @byte_buffer) nothing   // copy what fits; past the end set overflowed
-        text: function (self) @byte_buffer
-    }
-    /// Formats `path` and opens it.
-    open_path: function (path: Format, mode: Os.OpenMode) handle: Os.Handle else error: Error {
-        buffer: PathBuffer = PathBuffer { ... used = 0, overflowed = false }
-        formatter: Formatter = Formatter.over[PathBuffer](ref buffer, ref PathBuffer.push)
-        formatter.write(path)
-        if buffer.overflowed { fail .InvalidInput }
-        if the bytes contain a 0 byte { fail .InvalidInput }     // C would cut the path there
-        match Os.open(buffer.text(), mode) { .Ok -> h => handle = h, .Error -> e => fail e }
+        empty: function () PathBuffer => ...         // every field set
+        /// `.InvalidInput` when too long, or holding a zero byte
+        /// (C would end the path there).
+        format: function (self, path: Format) nothing else error: Error
+        text: function (self) Slice[Byte]
+        push: function (self, bytes: Slice[Byte]) nothing   // the sink: past the end sets `overflowed`
     }
 }
 ```
 
-`Os.open` already converts the path (UTF-16 for `CreateFileW` on
-Windows, NUL-terminated in pages on Linux and macOS), so `Io` passes
-bytes. The path buffer is 4 KiB of stack; a thread's default stack is
-large enough (threads plan phase 1).
+`Os.open` and `Os.remove_file` convert the bytes (UTF-16 for
+`CreateFileW`/`DeleteFileW` on Windows, NUL-terminated in pages on Linux
+and macOS), so `Io` passes bytes. The path buffer is 4 KiB of stack; a
+thread's default stack is large enough.
 
 **Methods:**
 
 | Method | Algorithm |
 |---|---|
-| `open(path)` | `open_path(path, .Read)` → `File { handle, owned = true }` |
+| `open(path)` | `open_with(path, .Read)` |
 | `create(path)` | `.Write` (create + truncate, as `Os.open` defines it) |
-| `open_with(path, mode)` | as given |
-| `read(self, into: Slice[Uint8]) count: Int else error` | `Os.read(handle, into.base(), into.get_count())`; retry `.Interrupted` |
-| `write_bytes(self, bytes)` | `self.writer().write_bytes(bytes)`, so a console gets the console path |
-| `write(self, text: Format)` | `self.writer().write(text)` |
-| `seek`, `size` | forward to `Os` |
+| `open_with(path, mode)` | `PathBuffer.format`, then `Os.open` → `File { handle, owned = true }` |
+| `read(self, into: Slice[Byte]) count: Int else error` | `Os.read` into `into`; retries `.Interrupted` |
+| `write_bytes`, `write`, `write_line` | through `self.writer()`, so a console gets the console path |
+| `seek(self, offset: Int64, from) position: Uint64`, `size(self) size: Uint64` | forward to `Os` |
 | `writer(self) Writer` | phase 2's, unbuffered, with the console path |
 | `reader(self) Reader` | phase 4 |
-| `close(self: File) nothing else error: Error` | `handle = self.handle; owned = self.owned; @discard(self)`; when `owned`, `Os.close(handle)` and fail with its error |
+| `close(self: File) nothing else error: Error` | copy out `handle` and `owned`, `@discard(self)`; when `owned`, `Os.close(handle)` and fail with its error |
 
 `close` takes `self` by value and discards it, so `@on_drop` doesn't run
 and the handle isn't closed twice. Closing a `File` that doesn't own its
 handle (a standard stream) only gives it up, as dropping it does.
+
+A guard binds only a declaration, so a function that opens into its out
+binds a local first (`opened: File = open_with(...) else ...`, then
+`file = opened`).
 
 ### The file functions (`io.lilac`)
 
@@ -530,17 +533,17 @@ handle (a standard stream) only gives it up, as dropping it does.
 
 ```text
 file = File.open(path) else fail
-bytes: List[Uint8] = List.new()
-file.size() -> size: bytes.reserve(size + 1)     // a hint: the file can change size; +1 so the end-of-file read needs no grow
-chunk: @array(@bit8, 0x1000) {}
+bytes: List[Byte] = List.new()
+file.size() -> size: bytes.reserve(size)      // a hint: the file can change size
+chunk: @array(Byte, 0x2000) {}
 loop:
     n = file.read(chunk as a Slice) else fail
     if n == 0: break
     bytes.add_slice(chunk[..n])
-text = String.from_bytes(bytes) else -> _: Utf8Error: fail .InvalidData
+text = String.from_bytes(bytes) else fail .InvalidData   // validated once, whole
 ```
 
-- Reading through a 4 KiB chunk costs one extra copy. `List` has no
+- Reading through an 8 KiB chunk costs one extra copy. `List` has no
   "spare capacity" API to read straight into. If profiling asks, add
   `List.reserve_slice(n) Slice[T]` plus `List.commit(n)`. That is a
   `Collections` change, so give it its own small review.
@@ -548,42 +551,34 @@ text = String.from_bytes(bytes) else -> _: Utf8Error: fail .InvalidData
   a private `String.adopt(List[Uint8])` could take the block, but a
   `String` block is not a `List` block. Leave it unless it is measured.
 
-**`write_file(path, text: Format)`:**
+**`write_file(path, text: Format)`** and **`append_file`** (`.Append`)
+open the file and hand it to the private `write_and_close`:
 
-```text
-file = File.create(path) else fail
-file.write(text) else fail      // the Catch adapter; unbuffered, so wrap it:
-// better: buffered = BufferedWriter.over(file.writer()); buffered.writer().write(text); buffered.flush()
-file.close() else fail          // report the close error: it can be the real write error (NFS, quota)
-```
+- `write_buffered(ref file, text)` writes through a `BufferedWriter`
+  over `file.writer()` and flushes, so a format with many holes is few
+  system calls. It is its own function so the buffered writer's borrow
+  of `file` ends before the close; in one body `file` would stay
+  borrowed for the rest of its scope.
+- Then `@move(file).close()`, reporting the close error: it can be the
+  real write error (NFS, quota).
 
-Use the buffered form: a format with many holes would otherwise be one
-system call per piece. The `BufferedWriter` borrows `file`, so drop it
-(or let its scope end) before `close`. A move of `file` while it is
-borrowed is `E079`, so give the buffered writer an inner block.
+**`remove_file(path)`** formats the path the same way and calls
+`Os.remove_file` (`DeleteFileW`, `unlinkat`, `unlink`). `Os` opens every
+file with `FILE_SHARE_DELETE` on Windows, so an open file can be
+removed there too.
 
-`append_file` is the same with `.Append`.
+### Tests
 
-### Tests (`tests/standard/src/Io/files/`)
+| Test | Where | Checks |
+|---|---|---|
+| `files` | `tests/standard/src/Io` | `write_file` then `read_file` at 0, 1, 4095, 4096, 4097, 8192, 8193 and 100,000 bytes; a scalar split between two reads; `write_file` replaces; `append_file` appends and creates; a missing file is `.NotFound` (`read_file`, `File.open`, `remove_file`); bad UTF-8 is `.InvalidData`; a path of `MAX_PATH_BYTES + 1` bytes and one with a zero byte are `.InvalidInput`; 10,000 opens and drops; `seek`/`read`/`size`; `.ReadWrite` writes in place; `close` keeps what was written and `File.write` writes a format; closing a standard stream's `File` leaves the stream open |
+| `io_link` | `crates/lilac-cli/tests` | a program using every `File` function and file function and `standard_output()`, linked for the six native targets at `debug` and `release` |
 
-Use a temporary folder: name files under `Os.temporary_directory()` if it
-exists; otherwise add a `Testing.temporary_path(name)` helper that
-formats the process id and test index into the system temp folder.
-
-- `write_file`, then `read_file`, round trip (empty, 1 byte, 4095, 4096,
-  4097, 100,000 bytes).
-- `append_file` twice.
-- A missing file is `.NotFound`.
-- A file with invalid UTF-8 is `.InvalidData`.
-- A path of 4,097 bytes is `.InvalidInput`.
-- A path with a NUL is `.InvalidInput`.
-- Open and drop 10,000 times in a loop: no handle leak (it would run out).
-- `seek` then `read`; `size`.
-- `close()` reports `.None` normally, and a closed file is not closed
-  again: no `.BadHandle` from the drop.
-- `crates/lilac-cli/tests/io_link.rs`: copy `sync_link.rs`, with a
-  program that uses `File`, `read_file` and `standard_output`, linked for
-  the six native targets.
+The tests name their files under the system's temporary folder (`TEMP`
+on Windows, else `TMPDIR`, else `/tmp`) with a random part from
+`Os.fill_random`, since tests, and the Debug and Release runs, run at
+once, and remove them when done. That helper is the test file's own; a
+`Testing.temporary_path` can follow when a second suite needs it.
 
 ## Phase 4: reading
 

@@ -250,6 +250,7 @@
   its names, argument orders, constant values and failure convention
   (`GetLastError`, raw `-errno` with `is_error`/`errno_of`, `errno()`).
   `Os` itself is the portable surface (`Handle`, `read`/`write`, `open`,
+  `remove_file`,
   `map_pages`, clocks, `fill_random`, `exit`, `Error`, threads:
   `spawn`/`join`/`yield_thread`, waiting on an address:
   `wait_on_address`/`_timeout`, `wake_one`/`wake_all`,

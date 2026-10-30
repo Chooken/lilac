@@ -65,12 +65,12 @@ Files under `lib/Standard/Io/`:
 
 | File | Contents |
 |---|---|
-| `io.lilac` | The beginner functions |
+| `io.lilac` | The beginner functions, `read_file`, `write_file`, `append_file`, `remove_file` |
 | `error.lilac` | `Error: alias Os.Error` |
 | `writer.lilac` | `Writer`, `WriterTable[T]`, the formatter adapter |
 | `reader.lilac` | `Reader`, `ReaderTable[T]` |
 | `buffered.lilac` | `BufferedWriter`, `BufferedReader` |
-| `file.lilac` | `File`, `OpenMode` re-export, `read_file`, `write_file` |
+| `file.lilac` | `File`, the `OpenMode` and `SeekFrom` aliases, `MAX_PATH_BYTES` |
 | `standard.lilac` | the standard streams and their globals |
 | `memory.lilac` | `String`/`List[Uint8]` writers, `ByteReader` over a slice |
 
@@ -160,7 +160,7 @@ input, `.Some(e)` a real error, so a `loop if` reads every line.
 
 ```lilac
 File: structure {
-    private { handle: Os.Handle }
+    private { handle: Os.Handle, owned: Bool }   // a standard stream is not owned
 
     /// Opens an existing file to read.
     open: function (path: Format) file: File else error: Error
@@ -169,9 +169,10 @@ File: structure {
     /// Opens with an explicit mode (`.Read`, `.Write`, `.Append`, `.ReadWrite`).
     open_with: function (path: Format, mode: OpenMode) file: File else error: Error
 
-    read: function (self, into: Slice[Uint8]) count: Int else error: Error
-    write_bytes: function (self, bytes: @byte_buffer) nothing else error: Error
+    read: function (self, into: Slice[Byte]) count: Int else error: Error
+    write_bytes: function (self, bytes: Slice[Byte]) nothing else error: Error
     write: function (self, text: Format) nothing else error: Error
+    write_line: function (self, text: Format) nothing else error: Error
     seek: function (self, offset: Int64, from: SeekFrom) position: Uint64 else error: Error
     size: function (self) size: Uint64 else error: Error
 
@@ -238,6 +239,7 @@ ask: function (text: Format) line: String else nothing
 read_file: function (path: Format) text: String else error: Error
 write_file: function (path: Format, text: Format) nothing else error: Error
 append_file: function (path: Format, text: Format) nothing else error: Error
+remove_file: function (path: Format) nothing else error: Error
 ```
 
 `read_line` panics on a real read error (with the error formatted) and
@@ -265,7 +267,7 @@ Errors on standard output are dropped, as today and as C's `printf`;
    `memory.lilac` (`String` and `List[Uint8]` get `WRITER_TABLE`).
    Tests: a `Writer` over a string, over a writer that fails after N
    bytes (first error reported, the rest skipped).
-2. **Standard output on the backbone.** `BufferedWriter`, `Os.is_terminal`,
+2. **Standard output on the backbone** (done). `BufferedWriter`, `Os.is_terminal`,
    `standard.lilac`, `@exit` flushing, `print*` rewritten.
    `print_char`/`print_byte` rewritten over `print`. Tests: the existing
    `standard_print`/`standard_io` pass byte-for-byte; `standard_output()`
@@ -273,7 +275,7 @@ Errors on standard output are dropped, as today and as C's `printf`;
    `Process.exit` and `@panic`;
    two threads printing lines never mix a line; a panic inside a
    `@format` during `print_line` exits 101 rather than hanging.
-3. **File.** `file.lilac`, `read_file`/`write_file`/`append_file`,
+3. **File** (done). `file.lilac`, `read_file`/`write_file`/`append_file`/`remove_file`,
    `File`'s path formatting. Tests: write, reopen, read back; append;
    `.NotFound` on a missing file; a dropped file closes (open many in a
    loop); `seek`/`size`. Cross-link test like `sync_link.rs` for the six
