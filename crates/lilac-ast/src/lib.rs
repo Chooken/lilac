@@ -34,10 +34,13 @@ pub struct Item {
 pub enum ItemKind {
     /// `name: function ...` (or `extern function ...` with no body).
     Func(FuncDecl),
-    /// `name: structure { ... }`.
+    /// `name: structure { ... }`, or `name: scoped structure { ... }`.
     Object {
         /// Member declarations.
         members: Vec<Item>,
+        /// Declared `scoped`: a view, held only by locals and parameters
+        /// (`E072`).
+        scoped: bool,
         /// Generic parameters (`GenObj[T]`).
         generic_params: Vec<String>,
         /// Each generic parameter's name span, in order.

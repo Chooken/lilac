@@ -524,7 +524,7 @@ impl Checker<'_> {
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(self.diags.already_reported());
         };
-        if let Err(error) = self.no_format_slots(&layout, &spans) {
+        if let Err(error) = self.no_scoped_slots(def, &layout, &spans) {
             self.type_states.insert(ty.id, TypeState::Failed);
             return Err(error);
         }

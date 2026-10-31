@@ -87,7 +87,7 @@ impl Checker<'_> {
         let TypeKind::Array { elem, len } = *self.types.kind(id) else {
             return Ok(());
         };
-        self.format_place(TypeRef::value(elem), len_span, "an array element")?;
+        self.scoped_place(TypeRef::value(elem), len_span, "an array element")?;
         let elem = self.size_of_laid_out(TypeRef::value(elem));
         match lilac_layout::array_layout(&self.target, elem, len) {
             Ok(sized) => {

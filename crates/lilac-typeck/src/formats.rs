@@ -13,6 +13,7 @@ use lilac_hir::intrinsics::{Intrinsic, Slot};
 use lilac_hir::{
     HirCallee, HirExpr, HirExprKind, HirFormat, HirHole, HirStmt, Layout, LocalId, SemanticKind,
 };
+use lilac_resolve::DefId;
 use lilac_span::Span;
 use lilac_ty::{Builtin, TypeId, TypeKind, TypeRef};
 
@@ -22,6 +23,10 @@ use crate::{Checker, Requirement};
 
 /// Why a format may not be somewhere (`E072`).
 const LIVES_IN_LOCALS: &str = "a format borrows its holes, so only locals and parameters hold one";
+
+/// Why a scoped structure may not be somewhere (`E072`).
+const SCOPED_LIVES_IN_LOCALS: &str =
+    "a scoped structure borrows what it views, so only locals and parameters hold one";
 
 impl Checker<'_> {
     /// Resolves `@format_args(W)` syntax: `W` by value.
@@ -335,8 +340,25 @@ impl Checker<'_> {
         })
     }
 
+    /// The definition of the scoped structure `id` is (plain or an
+    /// instance), if it is one.
+    pub(crate) fn scoped_structure(&self, id: TypeId) -> Option<DefId> {
+        let def = match self.types.kind(id) {
+            TypeKind::Object(def) => *def,
+            TypeKind::Instance { base, .. } => *base,
+            _ => return None,
+        };
+        self.res.def(def).scoped.then_some(def)
+    }
+
+    /// Whether a by-value `id` borrows, so only locals and parameters may
+    /// hold it: a format, or a scoped structure.
+    pub(crate) fn is_scoped(&self, id: TypeId) -> bool {
+        self.format_writer(id).is_some() || self.scoped_structure(id).is_some()
+    }
+
     /// `E072` when a by-value `ty` is a format: `what` names where it would
-    /// be ("a field"). Through the requirement path, so a generic instance
+    /// be ("an out"). Through the requirement path, so a generic instance
     /// that puts a format there fails as `E042`.
     pub(crate) fn format_place(
         &mut self,
@@ -352,50 +374,86 @@ impl Checker<'_> {
             .label(span, true, format!("`{shown}` here"))
             .note(LIVES_IN_LOCALS)
             .help("to keep the text, format it into a value that owns it, such as a `String`");
-        Err(self.emit_requirement(diagnostic, Requirement::FormatPlace, &[ty.id]))
+        Err(self.emit_requirement(diagnostic, Requirement::ScopedPlace, &[ty.id]))
     }
 
-    /// `E072` for each field or enum payload of `layout` that is a format;
-    /// `spans[i]` is where slot `i` is declared.
-    pub(crate) fn no_format_slots(
+    /// `E072` when a by-value `ty` is a format or a scoped structure:
+    /// `what` names where it would be ("a field").
+    pub(crate) fn scoped_place(
         &mut self,
+        ty: TypeRef,
+        span: Span,
+        what: &str,
+    ) -> Result<(), ErrorGuaranteed> {
+        self.format_place(ty, span, what)?;
+        if ty.is_ref || self.scoped_structure(ty.id).is_none() {
+            return Ok(());
+        }
+        let shown = self.show_id(ty.id);
+        let diagnostic = Diagnostic::error(codes::E072, format!("a scoped value cannot be {what}"))
+            .label(span, true, format!("`{shown}` here"))
+            .note(SCOPED_LIVES_IN_LOCALS)
+            .help("keep what it views instead, or make the holder a `scoped structure`");
+        Err(self.emit_requirement(diagnostic, Requirement::ScopedPlace, &[ty.id]))
+    }
+
+    /// `E072` for each field or enum payload of `layout` (the layout of
+    /// `def`) that is a format, or a scoped structure in anything but a
+    /// scoped structure's field; `spans[i]` is where slot `i` is declared.
+    pub(crate) fn no_scoped_slots(
+        &mut self,
+        def: DefId,
         layout: &Layout,
         spans: &[Span],
     ) -> Result<(), ErrorGuaranteed> {
-        let what = match layout {
-            Layout::Object { .. } => "a field",
-            Layout::Enum { .. } => "an either payload",
+        let (what, holder_scoped) = match layout {
+            Layout::Object { .. } => ("a field", self.res.def(def).scoped),
+            Layout::Enum { .. } => ("an either payload", false),
         };
         let mut result = Ok(());
         for (index, (_, ty)) in layout.slots().into_iter().enumerate() {
             let span = spans.get(index).copied().unwrap_or_else(Span::dummy);
-            if let Err(error) = self.format_place(ty, span, what) {
+            let checked = if holder_scoped {
+                self.format_place(ty, span, what)
+            } else {
+                self.scoped_place(ty, span, what)
+            };
+            if let Err(error) = checked {
                 result = Err(error);
             }
         }
         result
     }
 
-    /// `E072` for a format stored where it may outlive its holes: through
-    /// a `ref` (`store_through_ref`), or, when one of its holes is a
-    /// temporary, into a local that outlives the statement.
-    pub(crate) fn format_store(
+    /// `E072` for a format or scoped value stored where it may outlive
+    /// what it borrows: through a `ref` (`store_through_ref`), or, for a
+    /// format with a temporary hole, into a local that outlives the
+    /// statement.
+    pub(crate) fn scoped_store(
         &mut self,
         value: &HirExpr,
         store_through_ref: bool,
         span: Span,
     ) -> Result<(), ErrorGuaranteed> {
-        if value.ty.is_error() || value.ty.is_ref || self.format_writer(value.ty.id).is_none() {
+        if value.ty.is_error() || value.ty.is_ref || !self.is_scoped(value.ty.id) {
             return Ok(());
         }
+        let is_format = self.format_writer(value.ty.id).is_some();
         if store_through_ref {
-            let diagnostic =
-                Diagnostic::error(codes::E072, "a format cannot be stored through a `ref`")
-                    .label(span, true, "the target may outlive this call")
-                    .note(LIVES_IN_LOCALS);
+            let (message, note) = if is_format {
+                ("a format cannot be stored through a `ref`", LIVES_IN_LOCALS)
+            } else {
+                (
+                    "a scoped value cannot be stored through a `ref`",
+                    SCOPED_LIVES_IN_LOCALS,
+                )
+            };
+            let diagnostic = Diagnostic::error(codes::E072, message)
+                .label(span, true, "the target may outlive this call")
+                .note(note);
             return Err(self.emit_involving(diagnostic, &[value.ty.id]));
         }
-        if has_temporary_hole(value) {
+        if is_format && has_temporary_hole(value) {
             let diagnostic = Diagnostic::error(
                 codes::E072,
                 "this format borrows a temporary that ends with the statement",

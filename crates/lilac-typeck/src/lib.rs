@@ -271,8 +271,9 @@ pub(crate) enum Requirement {
     Size,
     /// A hole has no `@format` for its type and the format's `W` (`E071`).
     Format,
-    /// A format where only locals and parameters may hold one (`E072`).
-    FormatPlace,
+    /// A format or scoped structure where only locals and parameters may
+    /// hold one (`E072`).
+    ScopedPlace,
 }
 
 pub(crate) struct Checker<'a> {

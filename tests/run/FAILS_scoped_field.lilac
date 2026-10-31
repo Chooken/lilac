@@ -1,0 +1,16 @@
+// expect-error: E072
+// A scoped structure borrows what it views, so an ordinary structure
+// cannot hold one in a field.
+Data: structure {
+    value: @bit32
+}
+
+View: scoped structure {
+    data: ref Data
+}
+
+Holder: structure {
+    view: View
+}
+
+main: function () nothing {}

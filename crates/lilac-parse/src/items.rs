@@ -145,6 +145,14 @@ impl Parser {
         generic_params: Vec<String>,
         mut kind_token: Token,
     ) -> Result<Item, ErrorGuaranteed> {
+        // `scoped structure`: `scoped` is a marker only before `structure`,
+        // so it stays a valid name everywhere else.
+        let scoped = kind_token.kind == TokenKind::Ident
+            && kind_token.text == "scoped"
+            && self.peek().kind == TokenKind::KwStructure;
+        if scoped {
+            kind_token = self.bump();
+        }
         if let Some(kind) = self.old_type_keyword(&kind_token) {
             let keyword = if kind == TokenKind::KwStructure {
                 "structure"
@@ -208,6 +216,7 @@ impl Parser {
                     name,
                     kind: ItemKind::Object {
                         members,
+                        scoped,
                         generic_params,
                         generic_spans: Vec::new(),
                     },

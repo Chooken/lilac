@@ -50,7 +50,7 @@ impl Checker<'_> {
                     // The value or `coerce` reported it.
                     return Err(self.diags.already_reported());
                 }
-                self.format_store(&value, true, args[1].span())?;
+                self.scoped_store(&value, true, args[1].span())?;
                 Ok(Called::Call {
                     callee: HirCallee::Intrinsic(intrinsic),
                     args: vec![pointer, value],

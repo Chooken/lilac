@@ -3962,3 +3962,36 @@ main: function () nothing {{}}
         assert_eq!(diags.error_count(), 1, "{body}: {diags:?}");
     }
 }
+
+const SCOPED_PRELUDE: &str = "Data: structure {\n    value: @bit32\n}\n\nView: scoped structure {\n    data: ref Data\n}\n\nmake: function (data: ref Data) view: View {\n    view = View { data = data }\n}\n\n";
+
+fn check_scoped(body: &str) -> Diags {
+    check_src(&format!("{SCOPED_PRELUDE}{body}"))
+}
+
+#[test]
+fn a_scoped_value_where_it_cannot_live_is_e072() {
+    for (what, src, code) in [
+        ("field", "Holder: structure {\n    view: View\n}\n\nmain: function () nothing {}\n", "E072"),
+        ("payload", "Choice: either {\n    Some: View\n}\n\nmain: function () nothing {}\n", "E072"),
+        ("array", "main: function () nothing {\n    x: @array(View, 2) = @array(View, 2) {}\n}\n", "E072"),
+        ("global", "kept: View\n\nmain: function () nothing {}\n", "E072"),
+        ("store through ref", "put: function (to: ref View, from: View) nothing {\n    to = from\n}\n\nmain: function () nothing {}\n", "E072"),
+        ("@write", "put: function (to: ref View, from: View) nothing {\n    @write(to, from)\n}\n\nmain: function () nothing {}\n", "E072"),
+        ("generic instance", "Wrap[T]: structure {\n    value: T\n}\n\nmain: function () nothing {\n    d: Data = Data { value = 0x1 }\n    w: Wrap[View] = Wrap[View] { value = make(ref d) }\n}\n", "E072"),
+    ] {
+        let diags = check_scoped(src);
+        assert!(has_code(&diags, code), "{what}: {diags:?}");
+    }
+}
+
+#[test]
+fn a_scoped_value_lives_in_locals_parameters_outs_and_scoped_fields() {
+    let diags = check_scoped(
+        "Pair: scoped structure {\n    first: View\n    second: View\n\n    set: function (self, view: View) nothing {\n        self.first = view\n    }\n}\n\n\
+         Keeper: structure {\n    view: ref View\n}\n\n\
+         read: function (view: View) value: @bit32 {\n    value = view.data.value\n}\n\n\
+         main: function () nothing {\n    scoped: Data = Data { value = 0x1 }\n    view: View = make(ref scoped)\n    pair: Pair = Pair { first = view, second = make(ref scoped) }\n    pair.set(view)\n    n: @bit32 = read(pair.second)\n}\n",
+    );
+    assert!(!diags.has_errors(), "{diags:?}");
+}

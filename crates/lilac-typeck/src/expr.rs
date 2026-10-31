@@ -2105,7 +2105,7 @@ impl Checker<'_> {
         } else {
             "a constant"
         };
-        if self.format_place(resolved, ty.span, what).is_err() {
+        if self.scoped_place(resolved, ty.span, what).is_err() {
             resolved = TypeRef::ERROR;
         }
         self.const_types.insert(def, resolved);

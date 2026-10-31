@@ -108,6 +108,8 @@ pub struct Def {
     pub slots: Vec<DefId>,
     /// The doc comment on its declaration.
     pub doc: Option<Doc>,
+    /// A `scoped structure`: a view, held only by locals and parameters.
+    pub scoped: bool,
 }
 
 impl Def {
@@ -596,6 +598,7 @@ impl Collector<'_> {
             hooks: Vec::new(),
             slots: Vec::new(),
             doc: None,
+            scoped: false,
         }
     }
 
@@ -691,6 +694,7 @@ impl Collector<'_> {
         let mut def = self.new_def(&item.name, kind, item.span, vis);
         def.parent = parent;
         def.doc.clone_from(&item.doc);
+        def.scoped = matches!(item.kind, ItemKind::Object { scoped: true, .. });
         (def.generic_params, def.generic_spans) = match &item.kind {
             ItemKind::Func(decl) => (decl.generic_params.clone(), decl.generic_spans.clone()),
             ItemKind::Object {

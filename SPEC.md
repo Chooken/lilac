@@ -1183,6 +1183,29 @@ instance's type. A constant in a `private { }` block is named only from
 the type's namespace and those inside it (`E026`). A type's body declares no
 globals: `NAME: Type = value` there is `E001`.
 
+A **`scoped structure`** is a view: a structure that borrows what it
+points at, such as a `ref` to a container and a range of it. Like a
+format, it stays in the frames that can see what it borrows (`E072`):
+
+- Locals, parameters (by value or `ref`), outs and the fields of another
+  `scoped structure` hold one; a field of an ordinary structure, an either
+  payload, an array element, a global or a constant never does, nor does
+  a generic instance that would put one there. A `ref` to one may be
+  anywhere a `ref` may.
+- It is never stored through a `ref` or with `@write`. A field of a scoped
+  value may be assigned through `self`: the target is scoped too.
+- `scoped` marks a declaration only before `structure`; it is an ordinary
+  name everywhere else.
+
+```lilac
+ListView: scoped structure {
+    private {
+        list: ref List[Int]
+        front: Int
+    }
+}
+```
+
 ```lilac
 Int: structure {
     private {

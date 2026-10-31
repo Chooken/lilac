@@ -50,6 +50,9 @@ pub fn declaration(resolved: &Resolved, def: DefId, slots: usize) -> Rendered {
             };
             out.push(&generic_name(&data.name, &data.generic_params));
             out.push(": ");
+            if data.scoped {
+                out.push("scoped ");
+            }
             out.push(keyword);
             if slots > 0 {
                 if data.slots.is_empty() {

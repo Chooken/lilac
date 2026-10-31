@@ -121,6 +121,15 @@
   structure `Formatter` (`lib/Standard/format.lilac`; `Format` is its
   alias): `Io.print*` and `Runtime`'s `@compiler_print` take a `Format`,
   so the compiler still names no formatter.
+- Scoped structures (`docs/views-plan.md`): `Name: scoped structure { … }`
+  (`ItemKind::Object::scoped`, `Def::scoped`; `scoped` is contextual,
+  only before `structure`) is a view, confined like a format by `E072`
+  (`formats.rs`: `is_scoped`, `scoped_place`, `no_scoped_slots`,
+  `scoped_store`, `Requirement::ScopedPlace`): locals, parameters, outs
+  and a scoped structure's fields hold one; an ordinary field, payload,
+  array element, global or constant does not, and it is never stored
+  through a `ref` or `@write` (a field assigned through `self` is fine).
+  A format may still not be an out. What an out may borrow is phase 2.
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/

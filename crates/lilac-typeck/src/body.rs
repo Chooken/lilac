@@ -698,7 +698,7 @@ impl Checker<'_> {
             place.kind,
             HirExprKind::Deref(_) | HirExprKind::Assumed { .. }
         );
-        if self.format_store(&value_hir, through_ref, span).is_err() {
+        if self.scoped_store(&value_hir, through_ref, span).is_err() {
             return;
         }
         out.push(HirStmt::Assign {

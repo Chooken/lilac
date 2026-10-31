@@ -1,0 +1,16 @@
+// expect-error: E072
+// A scoped value cannot be stored through a `ref`: the target may outlive
+// what it views.
+Data: structure {
+    value: @bit32
+}
+
+View: scoped structure {
+    data: ref Data
+}
+
+put: function (to: ref View, from: View) nothing {
+    to = from
+}
+
+main: function () nothing {}
