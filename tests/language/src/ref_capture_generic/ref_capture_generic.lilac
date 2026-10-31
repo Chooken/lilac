@@ -12,7 +12,7 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -49,15 +49,15 @@ through_fresh[T]: function (value: T) nothing {
 program: function () nothing {
     letter: Optional[@bit32] = .Some('a')
     set_some[@bit32](ref letter, 'b')
-    print_char(peek[@bit32](ref letter))
-    print_char(0xA)
+    print($"{@read(peek[@bit32](ref letter)) as Scalar}")
+    print("\n")
 
     {
         leaf: Optional[Leaf] = .Some(Leaf { c = 'x' })
         set_some[Leaf](ref leaf, Leaf { c = 'y' })
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 
     // `T = ref @bit32`: `slot = value` rebinds the capture, so the
     // optional still refers to `target`; `peek` gives that reference.
@@ -65,17 +65,17 @@ program: function () nothing {
     other: @bit32 = 'o'
     pointer: Optional[ref @bit32] = .Some(ref target)
     set_some[ref @bit32](ref pointer, ref other)
-    print_char(peek[ref @bit32](ref pointer))
-    print_char('|')
+    print($"{@read(peek[ref @bit32](ref pointer)) as Scalar}")
+    print("|")
     reference: ref @bit32 = peek[ref @bit32](ref pointer)
     reference = 'r'
-    print_char(target)
-    print_char(0xA)
+    print($"{target as Scalar}")
+    print("\n")
 
     written: @bit32 = 's'
     through_fresh[ref @bit32](ref written)
-    print_char(written)
-    print_char(0xA)
+    print($"{written as Scalar}")
+    print("\n")
 }
 
 test "ref_capture_generic" {

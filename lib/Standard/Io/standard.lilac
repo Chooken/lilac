@@ -90,22 +90,6 @@ private {
         }
     }
 
-    /// Writes `bytes` to standard output as they are and flushes, as
-    /// `print_standard`.
-    print_standard_bytes: function (bytes: Slice[Byte]) nothing {
-
-        guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = standard_out.lock()
-        writer: Writer = set_up(guard.value()).buffer.writer()
-
-        writer.write_bytes(bytes) else {
-            return
-        }
-
-        writer.flush() else {
-            return
-        }
-    }
-
     /// `standard_output()`'s `write`: into the buffer, under the lock.
     output_write: function (state: ref Sync.ReentrantMutex[Optional[StandardOutput]], bytes: Slice[Byte]) result: Result[Int, Error] {
         guard: Sync.ReentrantMutexGuard[Optional[StandardOutput]] = state.lock()

@@ -1,0 +1,34 @@
+// stdin-raw: one\r\nb\xFFad\nthree\r\nrest\nof it
+// expect-stdout: one
+// expect-stdout: invalid UTF-8
+// expect-stdout: three
+// expect-stdout: [rest
+// expect-stdout: of it]
+// `StandardInput.read_line` drops `\r\n`, fails on a line that is not
+// UTF-8 and goes on with the next, and its `reader()` hands out the rest
+// through the same buffer.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    input: StandardInput = standard_input()
+    count: Int = 0
+    loop if count < 3 {
+        count += 1
+        line: String = $""
+        input.read_line(ref line) else -> line_error: Optional[Error] {
+            if line_error.get() -> error: Error {
+                print_line($"{error}")
+            }
+            continue
+        }
+        print_line($"{line}")
+    }
+    rest: String = $""
+    input.reader().read_all_text(ref rest) else -> error: Error {
+        print_line($"read failed: {error}")
+        return
+    }
+    print_line($"[{rest}]")
+}

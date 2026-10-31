@@ -36,9 +36,9 @@ Getter: alias function (ref Counter) @bit32
 
 say: function (answer: @bit8) nothing {
     if answer {
-        print_char('1')
+        print("1")
     } else {
-        print_char('0')
+        print("0")
     }
 }
 
@@ -48,7 +48,7 @@ fields[T]: function () nothing {
     say(@has_field(T, count, @bit64))
     say(@has_field(T, label, ref Counter))
     say(@has_field(ref T, count, Count))
-    print_char(' ')
+    print(" ")
 }
 
 methods[T]: function () nothing {
@@ -56,7 +56,7 @@ methods[T]: function () nothing {
     say(@has_method(T, get, Getter))
     say(@has_method(T, take, function (T) @bit32))
     say(@has_method(T, next, function (ref T) @bit32 else nothing))
-    print_char(' ')
+    print(" ")
 }
 
 // Never instantiated: checked as a template, where a test whose answer
@@ -84,33 +84,33 @@ main: function () nothing {
     say(@has_method(Counter, zero, function () Counter))
     say(@has_function(Counter, get, function (ref Counter) @bit32))
     say(@has_method(Counter, missing, function (ref Counter) @bit32))
-    print_char(' ')
+    print(" ")
     // Constants.
     say(@has_constant(Counter, LIMIT, @bit32))
     say(@has_constant(Counter, LIMIT, @bit64))
     say(@has_constant(Counter, count, @bit32))
     say(@has_method(Counter, convert, function (ref Counter, @bit8) @bit8))
-    print_char(' ')
+    print(" ")
     // A private member is not there from outside its namespace.
     say(@has_field(Secretive, shown, @bit32))
     say(@has_field(Secretive, count, @bit32))
     say(@has_method(Secretive, peek, function (ref Secretive) @bit32))
     say(@has_field(@bit32, count, @bit32))
-    print_char(' ')
+    print(" ")
     // `@is_same`: aliases are transparent, `ref` counts.
     say(@is_same(Count, @bit32))
     say(@is_same(Getter, function (ref Counter) @bit32))
     say(@is_same(ref Counter, Counter))
     say(@is_same(Counter, Other))
-    print_char(' ')
+    print(" ")
     // A value stands for its type.
     c: Counter = Counter.zero()
     say(@is_same(c, Counter))
-    print_char(' ')
+    print(" ")
     // `@is_copyable`: a structure copies unless a hook stops it.
     say(@is_copyable(Counter))
     say(@is_copyable(Box[@bit8]))
     say(@is_copyable(ref Box[@bit8]))
     say(@is_copyable(Other) == 0x0)
-    print_char(0xA)
+    print("\n")
 }

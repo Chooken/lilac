@@ -1,0 +1,345 @@
+// `Reader`: anything bytes can be read from, as one handle, and
+// `BufferedReader`, which reads in large pieces and hands out lines.
+
+using Standard.Collections
+
+/// The functions behind a `Reader` over a `T`. A type keeps one as a
+/// constant global and names it `READER_TABLE`, so `Reader.from[T]` finds
+/// it:
+///
+///     READER_TABLE: ref ReaderTable[Pipe] => ref pipe_table
+ReaderTable[T]: structure {
+
+    /// Reads up to `into`'s count of bytes into it, and says how many: 0
+    /// only at the end of the input (or for an empty `into`).
+    read: ref function (target: ref T, into: Slice[Byte]) result: Result[Int, Error]
+}
+
+/// Anything bytes can be read from: a file, standard input, bytes in
+/// memory. It borrows its source, never owns it, so keep the source where
+/// it lies while the reader is in use.
+///
+///     reader: Reader = file.reader()
+///     count: Int = reader.read(chunk) else -> e: Error { ... }
+Reader: structure {
+
+    private {
+        /// What is read from, with its type erased.
+        target: ref unknown
+        /// The source type's `ReaderTable`, erased the same way.
+        functions: ref ReaderFunctions
+    }
+
+    /// A reader over `target`, through its type's `READER_TABLE`.
+    from[T]: function (target: ref T) Reader => over[T](target, T.READER_TABLE)
+
+    /// A reader over `target`, through `table`: for a type with no
+    /// `READER_TABLE`, or one with several ways to read.
+    over[T]: function (target: ref T, table: ref ReaderTable[T]) reader: Reader {
+        // Every slot of a table is a `ref`, so the erased layout is the
+        // same for every `T`.
+        reader = Reader {
+            target = target as ref unknown
+            functions = table as ref unknown as ref ReaderFunctions
+        }
+    }
+
+    /// Reads up to `into`'s count of bytes into it: how many, 0 at the end
+    /// of the input. A read a signal cut short (`.Interrupted`) is
+    /// retried.
+    read: function (self, into: Slice[Byte]) count: Int else error: Error {
+
+        loop {
+
+            got: Int = self.functions.read(self.target, into).get() else -> read_error: Error {
+
+                match read_error {
+                    .Interrupted {
+                        continue
+                    }
+                }
+
+                error = read_error
+                fail
+            }
+
+            count = got
+            return
+        }
+    }
+
+    /// Reads to the end of the input, appending every byte to `into`. On
+    /// an error, what was read before it stays in `into`.
+    read_all: function (self, into: ref List[Byte]) nothing else error: Error {
+
+        chunk: @array(Byte, 0x2000) = @array(Byte, 0x2000) {}
+        whole: Slice[Byte] = Slice[Byte].new(@array_at(ref chunk, 0x0), @array_len(chunk))
+
+        loop {
+
+            count: Int = self.read(whole) else -> read_error: Error {
+                error = read_error
+                fail
+            }
+
+            if count == 0 as Int {
+                break
+            }
+
+            into.add_slice(whole.slice(Range.of(0, count)))
+        }
+    }
+
+    /// Reads to the end of the input and appends it to `into` as text:
+    /// `.InvalidData`, with `into` unchanged, when it is not UTF-8. It is
+    /// validated once, whole, so no scalar is split between two reads.
+    read_all_text: function (self, into: ref String) nothing else error: Error {
+
+        bytes: List[Byte] = List[Byte].new()
+        self.read_all(ref bytes) else -> read_error: Error {
+            error = read_error
+            fail
+        }
+
+        into.add_bytes(bytes.get_slice()) else {
+            error = .InvalidData
+            fail
+        }
+    }
+}
+
+/// Reads from the reader under it in large pieces and hands the bytes out
+/// as asked: as lines (`read_line`), or through its `reader()`. It borrows
+/// nothing but what its inner reader borrows. Bytes it has read ahead are
+/// lost when it drops.
+///
+///     buffered: BufferedReader = BufferedReader.over(file.reader())
+///     line: String = String.new("")
+///     buffered.read_line(ref line) else -> e: Optional[Error] { ... }
+BufferedReader: structure {
+
+    private {
+
+        /// Where the bytes come from.
+        inner_reader: Reader
+        /// Bytes read ahead; those from `start` up to `end` are unread.
+        buffer: @array(Byte, 0x2000)
+        /// The first unread byte.
+        start: Int
+        /// One past the last byte read in.
+        end: Int
+        /// A line that spans refills, gathered here; kept for reuse once
+        /// a line needs it.
+        scratch: Optional[List[Byte]]
+    }
+
+    /// An empty buffer over `reader`. A `=>`, so a constant global can
+    /// hold one.
+    over: function (reader: Reader) BufferedReader => BufferedReader {
+        inner_reader = reader
+        buffer = @array(Byte, 0x2000) {}
+        start = 0
+        end = 0
+        // Explicitly: a zeroed `Optional` is `.Some`.
+        scratch = .None
+    }
+
+    /// A reader over this buffer: buffered bytes first, then the inner
+    /// reader. It holds the buffer's address, so keep the buffer where it
+    /// lies while the reader is in use.
+    reader: function (self) Reader => Reader.over[BufferedReader](
+        self,
+        ref buffered_reader_table
+    )
+
+    /// Reads the next line and appends it to `into`, without its `\n` or
+    /// `\r\n`. A last line with no newline is a line too. Fails with
+    /// `.None` at the end of the input, and with `.Some` of the error
+    /// otherwise: `.InvalidData` when the line is not UTF-8, with `into`
+    /// unchanged and the line consumed, so the next call reads the next
+    /// line.
+    read_line: function (self, into: ref String) nothing else error: Optional[Error] {
+        self.read_line_with(into, false) else -> line_error: Optional[Error] {
+            error = line_error
+            fail
+        }
+    }
+
+    /// `read_line`, but bytes that are not UTF-8 become U+FFFD, so it
+    /// fails only at the end of the input or on a read's error.
+    read_line_lossy: function (self, into: ref String) nothing else error: Optional[Error] {
+        self.read_line_with(into, true) else -> line_error: Optional[Error] {
+            error = line_error
+            fail
+        }
+    }
+
+    /// The table's `read`: buffered bytes first. With none buffered, a
+    /// read as large as the buffer goes straight to the inner reader.
+    read: function (self, into: Slice[Byte]) result: Result[Int, Error] {
+
+        if self.start == self.end and into.get_count() >= BUFFER_COUNT {
+            result = self.direct_read(into)
+            return
+        }
+
+        available: Int = self.fill() else -> read_error: Error {
+            result = .Error(read_error)
+            return
+        }
+
+        count: Int = Int.min(available, into.get_count())
+        self.buffer_view().slice(Range.of(self.start, self.start + count)).copy_to(into, 0)
+        self.start += count
+        result = .Ok(count)
+    }
+
+    private {
+
+        /// The whole buffer, read into or not.
+        buffer_view: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.buffer, 0x0), @array_len(self.buffer))
+
+        /// The inner reader's `read`, as a table result.
+        direct_read: function (self, into: Slice[Byte]) result: Result[Int, Error] {
+            count: Int = self.inner_reader.read(into) else -> read_error: Error {
+                result = .Error(read_error)
+                return
+            }
+            result = .Ok(count)
+        }
+
+        /// How many unread bytes are buffered, reading more when there
+        /// are none: 0 only at the end of the input. It never moves
+        /// unread bytes; it refills only an empty buffer.
+        fill: function (self) available: Int else error: Error {
+
+            if self.start < self.end {
+                available = self.end - self.start
+                return
+            }
+
+            self.start = 0
+            self.end = 0
+
+            count: Int = self.inner_reader.read(self.buffer_view()) else -> read_error: Error {
+                error = read_error
+                fail
+            }
+
+            self.end = count
+            available = count
+        }
+
+        /// The scratch list, emptied, made on first need.
+        empty_scratch: function (self) list: ref List[Byte] {
+            if self.scratch.is_none() {
+                self.scratch = .Some(List[Byte].new())
+            }
+            list = self.scratch.get_ref_unchecked()
+            list.remove_range(Range.of(0, list.get_count()))
+        }
+
+        /// `read_line`, repairing bad UTF-8 when `lossy`. A line that lies
+        /// whole in the buffer goes straight to `into`; one that spans
+        /// refills gathers in the scratch list first, so it is validated
+        /// once, whole, and no scalar splits at a refill.
+        read_line_with: function (self, into: ref String, lossy: Bool) nothing else error: Optional[Error] {
+
+            spanned: Bool = false
+            got_any: Bool = false
+
+            loop {
+
+                available: Int = self.fill() else -> read_error: Error {
+                    error = .Some(read_error)
+                    fail
+                }
+
+                if available == 0 as Int {
+                    // Nothing since the last line: the end of the input.
+                    if not got_any {
+                        error = .None
+                        fail
+                    }
+                    // A last line without a newline.
+                    break
+                }
+
+                got_any = true
+                unread: Slice[Byte] = self.buffer_view().slice(Range.of(0, self.end))
+
+                if Memory.find_byte(unread, 0x0A, self.start) -> newline: Int {
+
+                    piece: Slice[Byte] = unread.slice(Range.of(self.start, newline))
+                    self.start = newline + 1
+
+                    // The common case: the whole line was buffered.
+                    if not spanned {
+                        if not finish_line(into, piece, lossy) {
+                            error = .Some(.InvalidData)
+                            fail
+                        }
+                        return
+                    }
+
+                    self.scratch.get_ref_unchecked().add_slice(piece)
+                    break
+                }
+
+                if not spanned {
+                    self.empty_scratch()
+                    spanned = true
+                }
+
+                self.scratch.get_ref_unchecked().add_slice(unread.slice(Range.of(self.start, self.end)))
+                self.start = self.end
+            }
+
+            // The line spanned a refill: a read with no newline sets
+            // `spanned`, and one with a newline returned above.
+            if not finish_line(into, self.scratch.get_ref_unchecked().get_slice(), lossy) {
+                error = .Some(.InvalidData)
+                fail
+            }
+        }
+    }
+}
+
+private {
+
+    /// `ReaderTable[T]` with `T` erased: the same layout for every `T`.
+    ReaderFunctions: structure {
+
+        read: ref function (target: ref unknown, into: Slice[Byte]) result: Result[Int, Error]
+    }
+
+    /// `BufferedReader`'s functions, behind every `reader()`.
+    buffered_reader_table: ReaderTable[BufferedReader] {
+        read = ref BufferedReader.read
+    }
+
+    /// Appends `line` to `into` without a `\r` that ends it: repaired when
+    /// `lossy`, else validated. False, with `into` unchanged, when it is
+    /// not UTF-8.
+    finish_line: function (into: ref String, line: Slice[Byte], lossy: Bool) appended: Bool {
+
+        text: Slice[Byte] = line
+        count: Int = text.get_count()
+
+        if count > 0 and text.get(count - 1) == 0x0D as Byte {
+            text = text.slice(Range.of(0, count - 1))
+        }
+
+        appended = true
+
+        if lossy {
+            into.add_bytes_lossy(text)
+            return
+        }
+
+        into.add_bytes(text) else {
+            appended = false
+            return
+        }
+    }
+}

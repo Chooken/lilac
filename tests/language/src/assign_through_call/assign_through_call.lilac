@@ -20,7 +20,7 @@ Leaf: structure {
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -58,13 +58,13 @@ program: function () nothing {
     {
         leaves: List[Leaf] = List[Leaf].new()
         leaves.add(Leaf { c = 'a' })
-        print_char('[')
+        print("[")
         leaves.get(0) = Leaf { c = 'b' }
-        print_char(']')
+        print("]")
         leaves.add(Leaf { c = 'x' })
-        print_char('[')
+        print("[")
         leaves.remove(1)
-        print_char(']')
+        print("]")
     }
     print_line("")
 }

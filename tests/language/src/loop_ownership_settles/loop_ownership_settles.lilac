@@ -10,7 +10,7 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -20,7 +20,7 @@ Pair: structure {
 }
 
 keep: function (leaf: Leaf) nothing {
-    print_char('k')
+    print("k")
 }
 
 // A field moves out in the inner loop's `continue` path and is set again
@@ -47,9 +47,9 @@ nested_fields: function () nothing {
             }
             pair.right = Leaf { c = 'm' }
         }
-        print_char('|')
+        print("|")
     }
-    print_char(';')
+    print(";")
 }
 
 // The inner loop leaves through three `break`s: one after a move, one
@@ -76,7 +76,7 @@ break_paths: function () nothing {
         }
         leaf = Leaf { c = 'y' }
     }
-    print_char(';')
+    print(";")
 }
 
 // Three levels: the innermost loop moves a field on some rounds and
@@ -108,22 +108,22 @@ three_levels: function () nothing {
                 break
             }
         }
-        print_char('|')
+        print("|")
         if i == 0x3 {
             break
         }
         pair.left = Leaf { c = 'q' }
     }
-    print_char(';')
+    print(";")
 }
 
 program: function () nothing {
     nested_fields()
-    print_char(0xA)
+    print("\n")
     break_paths()
-    print_char(0xA)
+    print("\n")
     three_levels()
-    print_char(0xA)
+    print("\n")
 }
 
 test "loop_ownership_settles" {

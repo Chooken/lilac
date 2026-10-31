@@ -2,6 +2,7 @@
 // first): a call statement drops them all, a call used as a value is its
 // first out, and a multi-`let` binds the outs left to right.
 
+using Standard
 using Transcript
 
 Noisy: structure {
@@ -12,7 +13,7 @@ Noisy: structure {
         if self.c == 0x0 {
             return
         }
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -32,18 +33,18 @@ take: function (v: Noisy) nothing {
 
 program: function () nothing {
     two('b', 'a')
-    print_char('|')
+    print("|")
     {
         kept: Noisy = two('d', 'c')
-        print_char('|')
+        print("|")
     }
     take(two('e', 'f'))
-    print_char('|')
+    print("|")
     {
         a: Noisy, b: Noisy = three()
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "discarded_returns" {

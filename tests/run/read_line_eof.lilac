@@ -1,0 +1,13 @@
+// expect-stdout: 0 lines
+// With nothing on standard input, `Io.read_line` fails at once.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    count: Int = 0
+    loop if read_line() -> line: String {
+        count += 1
+    }
+    print_line($"{count} lines")
+}

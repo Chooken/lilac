@@ -5,8 +5,8 @@
 // expect-stderr: to a file over standard error
 // The writers over the standard streams: `File`s (unbuffered, a write
 // each), `standard_output()` (buffered, flushed here) and
-// `standard_error()`, beside `print_byte` and `print_char` (a code
-// point that is no scalar prints U+FFFD).
+// `standard_error()`, beside `print` of scalars (a code point that is no
+// scalar converts to U+FFFD through `Scalar.from`).
 
 using Standard
 using Standard.Io
@@ -29,17 +29,18 @@ main: function () nothing {
     }
 
     print("printed: ")
-    print_byte(0x27)
-    print_char('A')
-    print_byte(0x27)
+    print("'")
+    letter: Scalar = 'A'
+    print(letter)
+    print("'")
     print(" ")
-    print_char(0xE9)
+    print_code_point(0xE9)
     print(" ")
-    print_char(0x2713)
+    print_code_point(0x2713)
     print(" ")
-    print_char(0x1F30D)
+    print_code_point(0x1F30D)
     print(" ")
-    print_char(0xD800)
+    print_code_point(0xD800)
     print_line("")
 
     error: Writer = standard_error()
@@ -50,4 +51,13 @@ main: function () nothing {
     error_file.writer().write_line("to a file over standard error") else {
         return
     }
+}
+
+/// Prints the code point `value` as UTF-8, or U+FFFD when it is no scalar.
+print_code_point: function (value: Uint32) nothing {
+    scalar: Scalar = Scalar.from(value) else {
+        print(Scalar.REPLACEMENT)
+        return
+    }
+    print(scalar)
 }

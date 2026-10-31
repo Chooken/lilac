@@ -32,6 +32,8 @@ File: structure {
 
     WRITER_TABLE: ref WriterTable[File] => ref file_table
 
+    READER_TABLE: ref ReaderTable[File] => ref file_reader_table
+
     /// Opens the existing file at `path` to read.
     open: function (path: Format) file: File else error: Error {
         opened: File = open_with(path, .Read) else -> open_error: Error {
@@ -71,6 +73,11 @@ File: structure {
     /// Standard output, not owned. Each call looks the handle up, so keep
     /// the `File` to look it up once.
     standard_output: function () File => File { handle = Os.standard_output(), owned = false }
+
+    /// Standard input, not owned, as `standard_output`. It reads the
+    /// stream as it is: a Windows console gives bytes in its code page,
+    /// where `Io.standard_input()` converts them to UTF-8.
+    standard_input: function () File => File { handle = Os.standard_input(), owned = false }
 
     /// Standard error, not owned, as `standard_output`.
     standard_error: function () File => File { handle = Os.standard_error(), owned = false }
@@ -142,6 +149,10 @@ File: structure {
         size = bytes as Uint64
     }
 
+    /// A reader over this file, unbuffered. It holds the file's address,
+    /// so keep the file where it lies while the reader is in use.
+    reader: function (self) Reader => Reader.from[File](self)
+
     /// A writer over this file, unbuffered. It holds the file's address,
     /// so keep the file where it lies while the writer is in use.
     writer: function (self) Writer => Writer.from[File](self)
@@ -199,6 +210,15 @@ File: structure {
             }
 
             result = .Ok(written as Int)
+        }
+
+        /// The reader table's `read`: one system call.
+        read_raw: function (self, into: Slice[Byte]) result: Result[Int, Error] {
+            got: @bit_native = Os.read(self.handle, into.base() as ref unknown, into.get_count() as @bit_native).get() else -> error: Error {
+                result = .Error(error)
+                return
+            }
+            result = .Ok(got as Int)
         }
 
         /// The table's `flush`: a file holds nothing back.
@@ -273,6 +293,11 @@ private {
     file_table: WriterTable[File] {
         write = ref File.write_raw
         flush = ref File.flush_raw
+    }
+
+    /// `File`'s functions, behind every `reader()`.
+    file_reader_table: ReaderTable[File] {
+        read = ref File.read_raw
     }
 
     /// Writes `bytes` to a console as UTF-16. A bad sequence shows as

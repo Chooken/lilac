@@ -74,10 +74,12 @@ SDL_GUIDToString: extern function (guid: Guid, text: ref GuidText, size: @bit32)
 /// Prints a C string.
 print_c: function (text: ref @bit8) nothing {
     at: ref @bit8 = text
+    count: Int = 0
     loop if at != 0x0 {
-        print_byte(at)
+        count += 1
         at = @ptr_add(at as ref unknown, 0x1) as ref @bit8
     }
+    print(@byte_buffer_from(text, count))
 }
 
 die: function (what: @byte_buffer) nothing {

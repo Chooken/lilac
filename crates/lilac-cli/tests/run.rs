@@ -32,6 +32,11 @@
 //! - `// c-source: <file>` — a C file, relative to the program's folder,
 //!   compiled freestanding by the toolchain `clang` for the host and linked
 //!   in (`--link-arg=`) (repeatable).
+//! - `// stdin: <text>` — adds `<text>` and a newline to the program's
+//!   standard input (repeatable, in order).
+//! - `// stdin-raw: <text>` — adds `<text>` with Rust escapes (`\n`, `\r`,
+//!   `\t`, `\\`, `\xHH`) read and no newline, for exact bytes. With neither,
+//!   standard input is empty: the program reads its end at once.
 //!
 //! `lilac` runs in `tests/run` and is given the program's bare name, so
 //! source locations (in diagnostics and stack traces) read the same on every
@@ -79,6 +84,8 @@ struct Expect {
     libc: bool,
     no_standard: bool,
     c_sources: Vec<String>,
+    /// The program's standard input; `None` leaves it empty.
+    stdin: Option<Vec<u8>>,
 }
 
 fn parse_header(text: &str) -> Expect {
@@ -96,6 +103,15 @@ fn parse_header(text: &str) -> Expect {
             expect
                 .stderr
                 .push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        } else if let Some(rest) = comment.strip_prefix("stdin-raw:") {
+            let text = rest.strip_prefix(' ').unwrap_or(rest);
+            let input = expect.stdin.get_or_insert_with(Vec::new);
+            input.extend(unescape(text));
+        } else if let Some(rest) = comment.strip_prefix("stdin:") {
+            let text = rest.strip_prefix(' ').unwrap_or(rest);
+            let input = expect.stdin.get_or_insert_with(Vec::new);
+            input.extend_from_slice(text.as_bytes());
+            input.push(b'\n');
         } else if let Some(rest) = comment.strip_prefix("build-arg:") {
             expect.build_args.push(rest.trim().to_owned());
         } else if let Some(rest) = comment.strip_prefix("c-source:") {
@@ -123,6 +139,36 @@ fn parse_header(text: &str) -> Expect {
         expect.libs.push(lib_flag("Standard", "lib/Standard"));
     }
     expect
+}
+
+/// The bytes of a `stdin-raw:` line: `\n`, `\r`, `\t`, `\\` and `\xHH`
+/// escapes, everything else as it is.
+fn unescape(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut rest = text.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        rest = after;
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let (&kind, after) = rest.split_first().expect("stdin-raw: `\\` ends the line");
+        rest = after;
+        match kind {
+            b'n' => bytes.push(b'\n'),
+            b'r' => bytes.push(b'\r'),
+            b't' => bytes.push(b'\t'),
+            b'\\' => bytes.push(b'\\'),
+            b'x' => {
+                let digits = rest.get(..2).expect("stdin-raw: `\\x` takes two digits");
+                let digits = std::str::from_utf8(digits).expect("stdin-raw: hex digits");
+                bytes.push(u8::from_str_radix(digits, 16).expect("stdin-raw: hex digits"));
+                rest = &rest[2..];
+            }
+            other => panic!("stdin-raw: unknown escape `\\{}`", other as char),
+        }
+    }
+    bytes
 }
 
 /// `--lib=<name>=<dir>`, with `dir` relative to the repository root.
@@ -247,10 +293,7 @@ fn run_one(
         ));
     }
     // In the scratch folder, so a program's files land there.
-    let run = Command::new(&exe)
-        .current_dir(scratch)
-        .output()
-        .expect("runs executable");
+    let run = run_program(&exe, scratch, expect.stdin.as_deref());
 
     let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
     let want = if expect.stdout.is_empty() {
@@ -286,6 +329,36 @@ fn run_one(
         ));
     }
     Ok(())
+}
+
+/// Runs `exe` in `scratch`, with `stdin` as its standard input. Without
+/// one, `output()` gives the child an empty one. The input is written from
+/// a thread: a write larger than the pipe's buffer blocks until the child
+/// reads, while the child may wait for its output to be read.
+fn run_program(exe: &Path, scratch: &Path, stdin: Option<&[u8]>) -> std::process::Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut command = Command::new(exe);
+    command.current_dir(scratch);
+    let Some(input) = stdin else {
+        return command.output().expect("runs executable");
+    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("runs executable");
+    let mut pipe = child.stdin.take().expect("piped stdin");
+    let input = input.to_vec();
+    // A child that exits without reading it all closes the pipe: no error.
+    let writer = std::thread::spawn(move || {
+        let _ = pipe.write_all(&input);
+    });
+    let output = child.wait_with_output().expect("waits for executable");
+    writer.join().expect("stdin writer");
+    output
 }
 
 /// Whether a process stopped on a trap instruction rather than exiting:

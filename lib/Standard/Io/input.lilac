@@ -1,0 +1,276 @@
+// Standard input: one buffer shared by every thread, behind a lock. Each
+// read flushes standard output first, so a prompt shows before the
+// program waits for its answer. A Windows console gives UTF-16, which is
+// converted to UTF-8 on the way in.
+
+using Standard.Os as Os
+
+/// Standard input, shared by every thread. Each call takes the lock for
+/// its read, so two threads never split one line. It is a handle with
+/// nothing in it: `standard_input()` gives one.
+///
+///     line: String = String.new("")
+///     standard_input().read_line(ref line) else -> e: Optional[Error] { ... }
+StandardInput: structure {
+
+    /// Reads the next line and appends it to `into`, as
+    /// `BufferedReader.read_line` does: without its newline, `.None` at
+    /// the end of the input, `.Some(.InvalidData)` for a line that is not
+    /// UTF-8.
+    read_line: function (self, into: ref String) nothing else error: Optional[Error] {
+        read_input_line(into, false) else -> line_error: Optional[Error] {
+            error = line_error
+            fail
+        }
+    }
+
+    /// `read_line`, but bytes that are not UTF-8 become U+FFFD.
+    read_line_lossy: function (self, into: ref String) nothing else error: Optional[Error] {
+        read_input_line(into, true) else -> line_error: Optional[Error] {
+            error = line_error
+            fail
+        }
+    }
+
+    /// A reader over standard input, through the same buffer as
+    /// `read_line`, so the two can take turns.
+    reader: function (self) Reader => Reader.over[StandardInputTarget](ref standard_input_target, ref input_table)
+}
+
+/// Standard input, to read lines or bytes from.
+standard_input: function () StandardInput => StandardInput {}
+
+private {
+
+    /// Standard input once it is used: where the bytes come from and the
+    /// buffer over it.
+    StandardInputState: structure {
+        source: InputSource
+        buffer: BufferedReader
+    }
+
+    /// `None` until the first read sets it up (`set_up_input`).
+    standard_in: Sync.Mutex[Optional[StandardInputState]] = Sync.Mutex[Optional[StandardInputState]].new(.None)
+
+    /// The state behind a locked `state`, set up on first use.
+    set_up_input: function (state: ref Optional[StandardInputState]) input: ref StandardInputState {
+
+        if state.is_none() {
+            source: InputSource = InputSource.new()
+            // The buffer's reader holds the source's address, so it is
+            // made again once the source is in place.
+            placeholder: Reader = source.reader()
+            state = .Some(StandardInputState {
+                source = @move(source)
+                buffer = BufferedReader.over(placeholder)
+            })
+            input = state.get_ref_unchecked()
+            input.buffer = BufferedReader.over(input.source.reader())
+            return
+        }
+
+        input = state.get_ref_unchecked()
+    }
+
+    /// A line from standard input into `into`, under the lock, after
+    /// flushing standard output.
+    read_input_line: function (into: ref String, lossy: Bool) nothing else error: Optional[Error] {
+
+        flush_standard()
+        guard: Sync.MutexGuard[Optional[StandardInputState]] = standard_in.lock()
+        input: ref StandardInputState = set_up_input(guard.value())
+
+        if lossy {
+            input.buffer.read_line_lossy(into) else -> line_error: Optional[Error] {
+                error = line_error
+                fail
+            }
+        } else {
+            input.buffer.read_line(into) else -> line_error: Optional[Error] {
+                error = line_error
+                fail
+            }
+        }
+    }
+
+    /// What `StandardInput.reader()` points at: nothing, since the state
+    /// is the global behind the lock.
+    StandardInputTarget: structure {}
+
+    standard_input_target: StandardInputTarget = StandardInputTarget {}
+
+    /// `StandardInput.reader()`'s `read`: from the buffer, under the
+    /// lock, after flushing standard output.
+    input_read: function (_target: ref StandardInputTarget, into: Slice[Byte]) result: Result[Int, Error] {
+        flush_standard()
+        guard: Sync.MutexGuard[Optional[StandardInputState]] = standard_in.lock()
+        result = set_up_input(guard.value()).buffer.read(into)
+    }
+
+    /// `StandardInput.reader()`'s functions.
+    input_table: ReaderTable[StandardInputTarget] {
+        read = ref input_read
+    }
+
+    /// How many UTF-16 units a console read takes at once.
+    CONSOLE_READ_UNITS: Int => 0x200
+
+    /// Where standard input's bytes come from: the stream as it is, or, for
+    /// a Windows console, its UTF-16 converted to UTF-8.
+    InputSource: structure {
+
+        handle: Os.Handle
+        /// A Windows console: read with `Os.read_console`.
+        console: Bool
+        /// UTF-8 converted from the console and not yet handed out: those
+        /// from `start` up to `end`. 512 units are at most 1,536 bytes.
+        pending: @array(Byte, 0x800)
+        start: Int
+        end: Int
+        /// A high surrogate a console read ended on, waiting for its low
+        /// half; 0 when there is none.
+        high: @bit16
+        /// Whether the next byte starts a line, where Ctrl+Z ends the
+        /// input.
+        line_start: Bool
+
+        /// Standard input, looked up now.
+        new: function () source: InputSource {
+            handle: Os.Handle = Os.standard_input()
+            source = InputSource {
+                handle = handle
+                console = @builtin.Target.os == .Windows and Os.is_terminal(handle)
+                pending = @array(Byte, 0x800) {}
+                start = 0
+                end = 0
+                high = 0x0
+                line_start = true
+            }
+        }
+
+        reader: function (self) Reader => Reader.over[InputSource](self, ref input_source_table)
+
+        /// The table's `read`: one system call, or converted console
+        /// input.
+        read: function (self, into: Slice[Byte]) result: Result[Int, Error] {
+
+            if not self.console {
+                got: @bit_native = Os.read(self.handle, into.base() as ref unknown, into.get_count() as @bit_native).get() else -> error: Error {
+                    result = .Error(error)
+                    return
+                }
+                result = .Ok(got as Int)
+                return
+            }
+
+            loop if self.start == self.end {
+                more: Bool = self.read_console() else -> error: Error {
+                    result = .Error(error)
+                    return
+                }
+                if not more {
+                    result = .Ok(0)
+                    return
+                }
+            }
+
+            count: Int = Int.min(into.get_count(), self.end - self.start)
+            self.pending_view().slice(Range.of(self.start, self.start + count)).copy_to(into, 0)
+            self.start += count
+            result = .Ok(count)
+        }
+
+        /// The whole pending buffer.
+        pending_view: function (self) Slice[Byte] => Slice[Byte].new(@array_at(ref self.pending, 0x0), @array_len(self.pending))
+
+        /// Reads units from the console and converts them into the
+        /// pending bytes, which may come out empty (a read of only a high
+        /// surrogate). False at the end of the input: a read of nothing,
+        /// or Ctrl+Z (`0x1A`) at the start of a line, as C reads it.
+        read_console: function (self) more: Bool else error: Error {
+
+            units: @array(@bit16, 0x200) = @array(@bit16, 0x200) {}
+            got: @bit_native = Os.read_console(self.handle, @array_at(ref units, 0x0), CONSOLE_READ_UNITS as @bit_native).get() else -> read_error: Error {
+                error = read_error
+                fail
+            }
+
+            self.start = 0
+            self.end = 0
+
+            count: Int = got as Int
+            if count == 0 as Int {
+                if self.high != 0x0 {
+                    self.high = 0x0
+                    self.add(Scalar.REPLACEMENT)
+                }
+                more = self.end > 0
+                return
+            }
+
+            whole: Slice[@bit16] = Slice[@bit16].new(@array_at(ref units, 0x0), count)
+            index: Int = 0
+
+            loop if index < count {
+
+                unit: @bit16 = whole.get(index)
+                index += 1
+                value: @bit32 = @extend_zero(unit)
+
+                if self.high != 0x0 {
+                    high: @bit32 = @extend_zero(self.high)
+                    self.high = 0x0
+                    if @i_greater_than_or_equal_u_32(value, 0xDC00) and @i_less_than_or_equal_u_32(value, 0xDFFF) {
+                        // 0x10000 + (high - 0xD800) * 0x400 + (low - 0xDC00)
+                        scalar: @bit32 = @i_add_32(
+                            @i_add_32(0x10000, @bit_shift_left_32(@i_sub_32(high, 0xD800), 0xA)),
+                            @i_sub_32(value, 0xDC00)
+                        )
+                        self.add(scalar)
+                        continue
+                    }
+                    // A high surrogate with no low half.
+                    self.add(Scalar.REPLACEMENT)
+                }
+
+                if @i_greater_than_or_equal_u_32(value, 0xD800) and @i_less_than_or_equal_u_32(value, 0xDBFF) {
+                    // Its low half may come in the next read.
+                    self.high = unit
+                    continue
+                }
+
+                if @i_greater_than_or_equal_u_32(value, 0xDC00) and @i_less_than_or_equal_u_32(value, 0xDFFF) {
+                    // A low surrogate with no high half.
+                    self.add(Scalar.REPLACEMENT)
+                    continue
+                }
+
+                self.add(value)
+            }
+
+            if self.end == 0 as Int {
+                more = true
+                return
+            }
+
+            if self.line_start and self.pending_view().get(0) == 0x1A as Byte {
+                self.end = 0
+                more = false
+                return
+            }
+
+            self.line_start = self.pending_view().get(self.end - 1) == 0x0A as Byte
+            more = true
+        }
+
+        /// Appends `scalar` to the pending bytes as UTF-8.
+        add: function (self, scalar: Scalar) nothing {
+            self.end += Unicode.encode(scalar, self.pending_view().slice(Range.of(self.end, @array_len(self.pending))))
+        }
+    }
+
+    /// `InputSource`'s functions, for `Reader`.
+    input_source_table: ReaderTable[InputSource] {
+        read = ref InputSource.read
+    }
+}

@@ -14,23 +14,23 @@ Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {
-        print_char('+')
+        print("+")
         copy = Leaf { c = self.c }
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
 show: function (list: ref List[Leaf]) nothing {
-    print_char('[')
+    print("[")
     index: Int = 0
     loop if index < list.get_count() {
-        print_char(list.get(index).c)
+        print($"{list.get(index).c as Scalar}")
         index += 1
     }
-    print_char(']')
+    print("]")
 }
 
 program: function () nothing {
@@ -59,13 +59,13 @@ program: function () nothing {
         {
             popped: Optional[Leaf] = list.pop()
         }
-        print_char('|')
+        print("|")
         list.remove_range(Range.of(3, 1))
         list.remove_range(Range.of(1, 1))
         list.trim()
         show(ref list)
     }
-    print_char(0xA)
+    print("\n")
 
     ints: Slice[Int] = get_default_allocator().allocate[Int](3)
     print_line($"{ints} {Range.of(1, 3)}")

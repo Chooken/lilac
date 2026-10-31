@@ -24,12 +24,12 @@ Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {
-        print_char('+')
+        print("+")
         copy = Leaf { c = self.c }
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -87,18 +87,18 @@ program: function () nothing {
         leaves: Map[Key, Leaf] = Map[Key, Leaf].new()
         leaves.add(Key { n = 1 }, Leaf { c = 'a' })
         leaves.add(Key { n = 1 }, Leaf { c = 'b' })
-        print_char('|')
+        print("|")
         leaves.remove(Key { n = 1 })
-        print_char('|')
+        print("|")
         leaves.add(Key { n = 2 }, Leaf { c = 'd' })
         copy: Map[Key, Leaf] = leaves
-        print_char('|')
+        print("|")
         leaves.add(Key { n = 3 }, Leaf { c = 'c' })
         leaves.remove(Key { n = 9 })
         leaves.remove(Key { n = 3 })
         copy.add(Key { n = 4 }, Leaf { c = 'e' })
         copy.remove(Key { n = 4 })
-        print_char('|')
+        print("|")
     }
     print_line("")
 

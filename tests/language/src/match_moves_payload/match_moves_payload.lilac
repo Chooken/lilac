@@ -2,13 +2,14 @@
 // up, so it does not drop again), and out of a temporary; when no arm
 // takes the payload, the temporary still drops.
 
+using Standard
 using Transcript
 
 Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -30,26 +31,26 @@ program: function () nothing {
         value: Either = .One(Leaf { c = 'a' })
         match value {
             .One -> leaf: Leaf {
-                print_char('<')
+                print("<")
             }
         }
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
     match make(0x1, 'b') {
         .One -> leaf: Leaf {
-            print_char('>')
+            print(">")
         }
     }
-    print_char('|')
-    print_char(0xA)
+    print("|")
+    print("\n")
     match make(0x0, 'c') {
         .One -> leaf: Leaf {
-            print_char('>')
+            print(">")
         }
     }
-    print_char('|')
-    print_char(0xA)
+    print("|")
+    print("\n")
 }
 
 test "match_moves_payload" {

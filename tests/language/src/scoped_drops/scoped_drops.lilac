@@ -4,7 +4,7 @@ Noisy: structure {
     tag: @bit32
 
     @on_drop: function (self) nothing {
-        print_char('d')
+        print("d")
     }
 }
 
@@ -19,8 +19,8 @@ program: function () nothing {
     {
         m: Noisy = Noisy { tag = 0x9 }
     }
-    print_char('!')
-    print_char(0xA)
+    print("!")
+    print("\n")
 }
 
 test "scoped_drops" {

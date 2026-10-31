@@ -2,13 +2,14 @@
 // drops live locals, a structure drops itself before its fields (in
 // declaration order), and locals drop in reverse declaration order.
 
+using Standard
 using Transcript
 
 Inner: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -17,7 +18,7 @@ Outer: structure {
     b: Inner
 
     @on_drop: function (self) nothing {
-        print_char('O')
+        print("O")
     }
 }
 
@@ -35,9 +36,9 @@ program: function () nothing {
         o: Outer = Outer { a = Inner { c = 'a' }, b = Inner { c = 'b' } }
         take(Inner { c = 'p' })
         early()
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "drop_order" {

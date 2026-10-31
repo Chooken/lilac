@@ -445,25 +445,81 @@ Char) to: String`, and `@format(ref T, ref String)` for the types it formats.
 
 ### 3.5 `Standard.Io`
 
-> **Today:** `print`, `print_line`, `print_error` and `print_error_line`
-> take a `Format` (an f-string, a literal or one formattable value, §3.1a)
-> and write it out before they return: standard output through its shared
-> `BufferedWriter` (behind a `Sync.ReentrantMutex`, flushed by each print),
-> standard error through one on the stack, so a call is one write, not one
-> per piece. `standard_output()` and `standard_error()` are the streams as
-> `Writer`s; `@exit` and `Process.exit` flush standard output.
-> `print_char` (a code point, as UTF-8) and `print_byte` stay until
-> `Standard` has a `Char` type. `File` opens files (`open`, `create`,
-> `open_with` an `OpenMode`, each taking a `Format` path of at most
-> `MAX_PATH_BYTES`) and reads, writes, seeks, sizes and closes them;
-> dropping an owned one closes it. `read_file` (the text, `.InvalidData`
-> when it is not UTF-8), `write_file`, `append_file` and `remove_file`
-> are one call each.
-> `Standard.Process.exit` and `Standard.Heap.Allocator` likewise sit on
-> `Standard.Os` (`exit`, `allocate`/`deallocate`), and `Standard.Runtime`
-> defines the platform hooks (SPEC §8) over it; its `@compiler_print`
-> takes a `Format` and writes it to standard error through `print_error`.
-> The inventory below is the target design.
+Bytes in and out: two handle types any byte source or sink plugs into,
+buffers over them, files, memory, the standard streams, and one-call
+text functions on top. Text is a `Format` (an f-string, a literal or one
+formattable value, §3.1a). Every failure is an `Io.Error` (an alias of
+`Os.Error`: `.NotFound`, `.PermissionDenied`, `.InvalidData`,
+`.WriteZero`, `.Interrupted`, ..., `.Other(code)` for a code with no name).
+
+**Handles** (`writer.lilac`, `reader.lilac`):
+
+| Type | Purpose | Key methods |
+|---|---|---|
+| `Writer` | anything bytes go to, as a target address and a table of its functions (`WriterTable[T]`: `write`, `flush`) | `from[T]` (the type's `WRITER_TABLE`), `over[T](target, table)`, `write_bytes`, `write(Format)`, `write_line`, `flush` |
+| `Reader` | anything bytes come from (`ReaderTable[T]`: `read`) | `from[T]` (`READER_TABLE`), `over[T]`, `read(into) count`, `read_all(ref List[Byte])`, `read_all_text(ref String)` (`.InvalidData`, string unchanged, when not UTF-8) |
+
+A type becomes a writer or reader by keeping its table as a constant
+global and naming it; the handle forwards to it. Table functions return
+a `Result` (a function value cannot fail), and the handle's methods turn
+it into a failing call. `write_bytes` writes everything (retrying
+`.Interrupted`, `.WriteZero` on a zero write), and `write` formats
+through a formatter that keeps the first error: a `@format` hook cannot
+fail, so the format runs to its end and the call then fails.
+
+**Buffers** (`buffered.lilac`, `reader.lilac`):
+
+* `BufferedWriter.over(writer, lines)`: holds `BUFFER_COUNT` (8 KiB)
+  bytes and passes them on when full, at `flush` and, in line mode, at
+  each line end. It does not flush when dropped.
+* `BufferedReader.over(reader)`: reads 8 KiB at a time; `read_line(ref
+  String)` appends one line without its `\n` (or `\r\n`), validated
+  whole (`.InvalidData` and the string unchanged when not UTF-8),
+  `read_line_lossy` repairs bad UTF-8 to U+FFFD; both fail with `.None`
+  at the end of the input. `read` and `reader()` read through the
+  buffer.
+
+**Files** (`file.lilac`): `File` is a system handle and whether it owns
+it. `open`, `create`, `open_with(path, OpenMode)` (`.Read`, `.Write`,
+`.Append`, `.ReadWrite`; the path a `Format` of at most
+`MAX_PATH_BYTES`) give owned files, closed when dropped or by
+`close`; `standard_output`/`_input`/`_error` give the streams, not
+owned. `read`, `write_bytes`, `write`, `write_line`, `seek(offset,
+SeekFrom)`, `size`, `is_terminal`, `reader()`, `writer()`. Written to a
+Windows console, UTF-8 is shown as UTF-16 (bad sequences as U+FFFD), so
+text shows the same in any code page.
+
+**Memory** (`memory.lilac`): `ByteListWriter.over(ref List[Byte])`
+appends raw bytes; `StringWriter.over(ref String)` appends text and
+keeps the string valid UTF-8 (a scalar split between writes is joined,
+bad bytes become U+FFFD); `ByteReader.over(Slice[Byte])` reads from bytes. Each points
+at what it was made over, so keep it in place while its handle is used.
+
+**Standard streams** (`standard.lilac`, `input.lilac`):
+
+* `standard_output()`: one `BufferedWriter` shared by every thread
+  behind a `Sync.ReentrantMutex` (a `@format` hook may print), set up
+  on first use, in line mode on a terminal. `flush_standard()` writes
+  it out; `Standard.Runtime`'s `@exit` and `Process.exit` call it.
+* `standard_error()`: unbuffered, a system call per write.
+* `standard_input()`: one buffer behind a lock; each read flushes
+  standard output first, so a prompt shows. `read_line`,
+  `read_line_lossy` and `reader()` as `BufferedReader`'s. A Windows
+  console is read as UTF-16 and converted (a lone surrogate becomes
+  U+FFFD; Ctrl+Z at a line start ends the input).
+
+**Text functions** (`io.lilac`): `print`, `print_line`, `print_error`,
+`print_error_line` (each one write, flushed before it returns; an error
+is dropped, as `printf` does), `read_line() String else nothing` (lossy;
+fails at the end of input), `ask(prompt) String else nothing` (prints,
+then reads a line), and the whole-file calls `read_file` (the text,
+`.InvalidData` when not UTF-8), `write_file`, `append_file`,
+`remove_file`.
+
+`Standard.Process.exit` and `Standard.Heap.Allocator` likewise sit on
+`Standard.Os` (`exit`, `map_pages`), and `Standard.Runtime` defines the
+platform hooks (SPEC §8) over it; its `@compiler_print` takes a
+`Format` and writes it to standard error through `print_error`.
 
 ### 3.5a `Standard.Os` (the OS layer)
 

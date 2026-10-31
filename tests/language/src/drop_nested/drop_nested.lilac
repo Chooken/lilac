@@ -15,7 +15,7 @@ Leaf: structure {
         if self.c == 0x0 {
             return
         }
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -33,7 +33,7 @@ Top: structure {
         if self.c.c == 0x0 {
             return
         }
-        print_char('T')
+        print("T")
     }
 }
 
@@ -43,7 +43,7 @@ Holder[T]: structure {
 
     @on_drop: function (self) nothing {
         if self.live {
-            print_char('H')
+            print("H")
         }
     }
 }
@@ -61,29 +61,29 @@ top: function () value: Top {
 program: function () nothing {
     {
         t: Top = top()
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
     {
         h: Holder[Holder[Top]] = Holder[Holder[Top]] {
             value = Holder[Top] { value = top(), live = true },
             live = true
         }
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
     {
         one: Choice = .One(top())
         two: Choice = .Two(Leaf { c = '2' })
         empty: Choice = .Empty
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
     {
         o: Optional[Holder[Leaf]] = .Some(Holder[Leaf] { value = Leaf { c = 'o' }, live = true })
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "drop_nested" {

@@ -2,13 +2,14 @@
 // reads it. Setting it drops nothing (it is empty then), and after the
 // last move nothing is left to drop.
 
+using Standard
 using Transcript
 
 Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.id)
+        print($"{self.id as Scalar}")
     }
 }
 
@@ -26,7 +27,7 @@ program: function () nothing {
         }
         handle = Handle { id = @i_add_32('a', round) }
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "move_in_loop" {

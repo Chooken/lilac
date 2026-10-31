@@ -1,8 +1,8 @@
-// What a test program prints, kept instead of written. `print`,
-// `print_line`, `print_byte` and `print_char` take what `Standard.Io`'s
-// do, so a program written for `Io` checks its output with `using
-// Transcript` in its place; `expect_printed` then compares the text.
-// `tests/language` and `tests/standard` mount it.
+// What a test program prints, kept instead of written. `print` and
+// `print_line` take what `Standard.Io`'s do, so a program written for
+// `Io` checks its output with `using Transcript` in its place;
+// `expect_printed` then compares the text. `tests/language` and
+// `tests/standard` mount it.
 
 using Standard
 using Standard.Testing
@@ -21,30 +21,6 @@ print_line: function (text: Format) nothing {
 /// Keeps `bytes` as they are (a writer's sink in place of the output).
 record: function (bytes: @byte_buffer) nothing {
     recorded.push(bytes)
-}
-
-print_byte: function (byte: @bit8) nothing {
-    b: Byte = byte as Byte
-    recorded.push(Slice[Byte].new(ref b, 1))
-}
-
-/// Keeps the code point `c` as UTF-8.
-print_char: function (c: @bit32) nothing {
-    if @i_less_than_u_32(c, 0x80) {
-        print_byte(@truncate(c))
-    } else if @i_less_than_u_32(c, 0x800) {
-        print_byte(@truncate(@i_add_32(0xC0, @i_div_u_32(c, 0x40))))
-        print_continuation(c, 0x1)
-    } else if @i_less_than_u_32(c, 0x10000) {
-        print_byte(@truncate(@i_add_32(0xE0, @i_div_u_32(c, 0x1000))))
-        print_continuation(c, 0x40)
-        print_continuation(c, 0x1)
-    } else {
-        print_byte(@truncate(@i_add_32(0xF0, @i_div_u_32(c, 0x40000))))
-        print_continuation(c, 0x1000)
-        print_continuation(c, 0x40)
-        print_continuation(c, 0x1)
-    }
 }
 
 /// Fails the test unless what was printed is exactly `expected`, showing
@@ -94,8 +70,4 @@ private {
     }
 
     recorded: Recorder
-
-    print_continuation: function (c: @bit32, scale: @bit32) nothing {
-        print_byte(@truncate(@i_add_32(0x80, @i_mod_u_32(@i_div_u_32(c, scale), 0x40))))
-    }
 }

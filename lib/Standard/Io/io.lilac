@@ -1,8 +1,9 @@
-// Writing text to the standard output and error streams. Text is a
-// `Format`: an f-string, a literal or one formattable value. Each call is
-// written out before it returns, so a program's output shows as it runs,
-// and is one write, so the text of two threads never mixes. Then whole
-// files: read as text, written, appended to and removed.
+// Writing text to the standard output and error streams, and reading
+// lines from standard input. Text is a `Format`: an f-string, a literal
+// or one formattable value. Each call is written out before it returns,
+// so a program's output shows as it runs, and is one write, so the text
+// of two threads never mixes. Then whole files: read as text, written,
+// appended to and removed.
 
 using Standard.Collections
 using Standard.Os as Os
@@ -27,21 +28,35 @@ print_error_line: function (text: Format) nothing {
     print_error_text(text, true)
 }
 
-/// Writes one byte to standard output, as it is.
-print_byte: function (byte: @bit8) nothing {
-    bytes: @array(Byte, 0x1) = @array(Byte, 0x1) {}
-    @array_at(ref bytes, 0x0) = byte as Byte
-    print_standard_bytes(Slice[Byte].new(@array_at(ref bytes, 0x0), 1))
+/// One line from standard input, without its newline; fails at the end of
+/// the input. Bytes that are not UTF-8 become U+FFFD. Standard output is
+/// flushed first, so a prompt shows. A failed read panics.
+///
+///     loop if read_line() -> line: String { print_line($"you said {line}") }
+read_line: function () line: String else nothing {
+
+    text: String = String.new("")
+
+    standard_input().read_line_lossy(ref text) else -> line_error: Optional[Error] {
+        if line_error.get() -> error: Error {
+            @panic($"reading standard input failed: {error}")
+        }
+        fail
+    }
+
+    line = text
 }
 
-/// Writes the code point `c` (a character literal such as 'H') as UTF-8;
-/// one that is not a scalar value writes U+FFFD.
-print_char: function (c: @bit32) nothing {
-    scalar: Scalar = Scalar.from(c as Uint32) else {
-        print(Scalar.REPLACEMENT)
-        return
+/// Writes `text` to standard output, then reads the answer: one line, as
+/// `read_line` reads it.
+///
+///     name: String = ask("Your name: ") else { return }
+ask: function (text: Format) line: String else nothing {
+    print(text)
+    answer: String = read_line() else {
+        fail
     }
-    print(scalar)
+    line = answer
 }
 
 /// The whole file at `path` as text: `.InvalidData` when it is not UTF-8.
@@ -63,21 +78,9 @@ read_file: function (path: Format) text: String else error: Error {
         }
     }
 
-    chunk: @array(Byte, 0x2000) = @array(Byte, 0x2000) {}
-    whole: Slice[Byte] = Slice[Byte].new(@array_at(ref chunk, 0x0), @array_len(chunk))
-
-    loop {
-
-        count: Int = file.read(whole) else -> read_error: Error {
-            error = read_error
-            fail
-        }
-
-        if count == 0 as Int {
-            break
-        }
-
-        bytes.add_slice(whole.slice(Range.of(0, count)))
+    file.reader().read_all(ref bytes) else -> read_error: Error {
+        error = read_error
+        fail
     }
 
     // Validated once, whole, so no scalar is split between two reads.

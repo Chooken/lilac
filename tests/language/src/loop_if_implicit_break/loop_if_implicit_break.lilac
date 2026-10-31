@@ -10,7 +10,7 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -49,14 +49,14 @@ program: function () nothing {
     loop if count.next() -> n: Int {
         print($"{n} ")
     }
-    print_char('[')
+    print("[")
     {
         again: Countdown { left = 0 }
         loop if again.next() -> n: Int {
             print($"{n} ")
         }
     }
-    print_char(']')
+    print("]")
     print_line("")
 
     // The odd numbers up to 9.

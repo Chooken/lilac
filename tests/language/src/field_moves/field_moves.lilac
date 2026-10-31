@@ -9,7 +9,7 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -19,15 +19,15 @@ Pair: structure {
 }
 
 keep: function (leaf: Leaf) nothing {
-    print_char('k')
+    print("k")
 }
 
 whole_again: function () nothing {
     pair: Pair = Pair { left = Leaf { c = 'l' }, right = Leaf { c = 'r' } }
     keep(pair.left)
-    print_char('|')
+    print("|")
     pair.left = Leaf { c = 'n' }
-    print_char('|')
+    print("|")
 }
 
 maybe_keep: function (give: Bool) nothing {
@@ -35,16 +35,16 @@ maybe_keep: function (give: Bool) nothing {
     if give {
         keep(pair.left)
     }
-    print_char('|')
+    print("|")
 }
 
 program: function () nothing {
     whole_again()
-    print_char(0xA)
+    print("\n")
     maybe_keep(true)
-    print_char(0xA)
+    print("\n")
     maybe_keep(false)
-    print_char(0xA)
+    print("\n")
 }
 
 test "field_moves" {

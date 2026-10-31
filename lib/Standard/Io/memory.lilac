@@ -1,5 +1,6 @@
-// Writers over memory: `ByteListWriter` appends raw bytes to a list, and
-// `StringWriter` appends to a string, keeping it valid UTF-8.
+// Writers and a reader over memory: `ByteListWriter` appends raw bytes to
+// a list, `StringWriter` appends to a string, keeping it valid UTF-8, and
+// `ByteReader` reads from bytes in memory.
 
 using Standard.Collections
 
@@ -180,4 +181,51 @@ private {
     /// How many bytes the sequence a lead byte `C2..F4` starts takes.
     sequence_length: function (lead: Byte) Int =>
         if lead < 0xE0 then 2 else if lead < 0xF0 then 3 else 4
+}
+
+/// Reads from bytes in memory, from the first on: each read copies as
+/// many as fit and moves on, and the end of the bytes is the end of the
+/// input. For input known in advance, such as in tests.
+///
+/// Keep it where it lies while its `reader()` is in use: the reader
+/// points at it.
+///
+///     input: ByteReader = ByteReader.over("first\nsecond\n")
+///     lines: BufferedReader = BufferedReader.over(input.reader())
+ByteReader: structure {
+
+    private {
+        /// The bytes read from; borrowed, never owned.
+        bytes: Slice[Byte]
+        /// The first byte not yet read.
+        at: Int
+    }
+
+    /// The table `Reader.from[ByteReader]` finds.
+    READER_TABLE: ref ReaderTable[ByteReader] => ref byte_reader_table
+
+    /// A reader over `bytes`, at the first.
+    over: function (bytes: Slice[Byte]) ByteReader => ByteReader {
+        bytes = bytes
+        at = 0
+    }
+
+    /// A `Reader` over the bytes through this one.
+    reader: function (self) Reader => Reader.over[ByteReader](self, ref byte_reader_table)
+
+    /// Copies as many of the unread bytes as fit into `into`; never fails.
+    read: function (self, into: Slice[Byte]) result: Result[Int, Error] {
+        count: Int = Int.min(into.get_count(), self.bytes.get_count() - self.at)
+        self.bytes.slice(Range.of(self.at, self.at + count)).copy_to(into, 0)
+        self.at += count
+        result = .Ok(count)
+    }
+}
+
+private {
+
+    /// `ByteReader`'s functions, for `Reader`.
+    byte_reader_table: ReaderTable[ByteReader] {
+        read = ref ByteReader.read
+    }
 }

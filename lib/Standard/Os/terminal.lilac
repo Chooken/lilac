@@ -1,4 +1,5 @@
-// Terminals: whether a handle is one, and Windows' console output.
+// Terminals: whether a handle is one, and Windows' console output and
+// input.
 
 using Standard.Os.Windows as Windows
 using Standard.Os.Linux as Linux
@@ -38,6 +39,22 @@ write_console: function (handle: Handle, units: ref @bit16, count: @bit_native) 
             written: @bit32 = 0x0
             ok: @bit32 = Windows.WriteConsoleW(handle_ptr(handle), units as ref unknown, windows_count(count), ref written, null())
             result = windows_count_result(ok, written)
+        }
+    } else {
+        result = .Error(.Unsupported)
+    }
+}
+
+/// Reads up to `count` UTF-16 units into `units` from the Windows console
+/// `handle` (`ReadConsoleW`): how many were read. A console gives UTF-16
+/// whatever its code page; `is_terminal` says whether `handle` is one.
+/// `.Unsupported` off Windows.
+read_console: function (handle: Handle, units: ref @bit16, count: @bit_native) result: Result[@bit_native, Error] {
+    match @builtin.Target.os {
+        .Windows => {
+            got: @bit32 = 0x0
+            ok: @bit32 = Windows.ReadConsoleW(handle_ptr(handle), units as ref unknown, windows_count(count), ref got, null())
+            result = windows_count_result(ok, got)
         }
     } else {
         result = .Error(.Unsupported)

@@ -9,18 +9,18 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
 program: function () nothing {
     {
         box: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
-        print_char('|')
+        print("|")
         leaf: Leaf = box.into_inner()
     }
-    print_char('|')
-    print_char(0xA)
+    print("|")
+    print("\n")
 }
 
 test "box_into_inner" {

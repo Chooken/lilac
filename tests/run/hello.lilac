@@ -5,8 +5,8 @@ using Standard.Io
 using Standard.Process
 
 main: function () nothing {
-    print_char('H')
-    print_char('i')
-    print_char(0xA)
+    print("H")
+    print("i")
+    print("\n")
     exit(0x3)
 }

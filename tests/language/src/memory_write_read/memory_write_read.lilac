@@ -12,12 +12,12 @@ Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {
-        print_char('!')
+        print("!")
         copy = Leaf { c = self.c }
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -28,15 +28,15 @@ program: function () nothing {
     {
         @write(first, Leaf { c = 'a' })
         @write(second, Leaf { c = 'b' })
-        print_char(@read(first).c)
+        print($"{@read(first).c as Scalar}")
         @drop(second)
-        print_char('|')
+        print("|")
         @write(second, Leaf { c = 'b' })
         moved: Leaf = @read(second)
-        print_char('|')
+        print("|")
     }
     get_default_allocator().deallocate[Leaf](slots)
-    print_char(0xA)
+    print("\n")
 }
 
 test "memory_write_read" {

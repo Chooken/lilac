@@ -8,12 +8,12 @@ Handle: structure {
     id: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.id)
+        print($"{self.id as Scalar}")
     }
 }
 
 take: function (handle: Handle) nothing {
-    print_char('t')
+    print("t")
 }
 
 maybe: function (give: Bool) nothing {
@@ -21,14 +21,14 @@ maybe: function (give: Bool) nothing {
     if give {
         take(handle)
     }
-    print_char('|')
+    print("|")
 }
 
 program: function () nothing {
     maybe(true)
-    print_char(0xA)
+    print("\n")
     maybe(false)
-    print_char(0xA)
+    print("\n")
 }
 
 test "move_on_branch" {

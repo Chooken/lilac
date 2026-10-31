@@ -580,7 +580,14 @@ on Windows, else `TMPDIR`, else `/tmp`) with a random part from
 once, and remove them when done. That helper is the test file's own; a
 `Testing.temporary_path` can follow when a second suite needs it.
 
-## Phase 4: reading
+## Phase 4: reading (done)
+
+Built as below, with these differences: `scratch` is an
+`Optional[List[Uint8]]` (`List.new` takes the default allocator, so it is
+not constant), standard input lives in `Io/input.lilac` (`StandardInput`,
+`standard_input()`, the private `InputSource` that converts a Windows
+console's UTF-16), `File` is a reader too (`File.reader()`,
+`File.standard_input()`), and `read_file` reads through `read_all`.
 
 ### `Io/reader.lilac`
 
@@ -733,7 +740,7 @@ Run tests (they need real stdin):
 - `ask_prompt`: the prompt comes out before the answer is read;
 - `read_line_eof`: empty stdin ends the loop at once.
 
-## Phase 5: cleanup
+## Phase 5: cleanup (done)
 
 1. Once `Scalar` has a `@format` (string phase 1), migrate
    `print_char(c)` to `print($"{c as Scalar}")`, or to `print("…")` where

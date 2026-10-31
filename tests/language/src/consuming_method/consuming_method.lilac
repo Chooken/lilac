@@ -2,17 +2,18 @@
 // method drops it unless it moves it on. The caller's variable is empty
 // after, so it does not drop again.
 
+using Standard
 using Transcript
 
 Token: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 
     spend: function (self: Token) nothing {
-        print_char('<')
+        print("<")
     }
 }
 
@@ -20,10 +21,10 @@ program: function () nothing {
     {
         token: Token = Token { c = 'x' }
         token.spend()
-        print_char('>')
-        print_char('|')
+        print(">")
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "consuming_method" {

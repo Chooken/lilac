@@ -1,0 +1,21 @@
+// stdin: Ada
+// expect-stdout: Your name? Hello, Ada!
+// expect-stdout: Your age? no answer
+// `Io.ask` writes its prompt (flushed before the read), then reads the
+// answer; at the end of the input it fails.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    name: String = ask("Your name? ") else {
+        print_line("no answer")
+        return
+    }
+    print_line($"Hello, {name}!")
+    age: String = ask("Your age? ") else {
+        print_line("no answer")
+        return
+    }
+    print_line($"{age}")
+}

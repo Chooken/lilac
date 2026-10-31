@@ -10,21 +10,21 @@ Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {
-        print_char('+')
+        print("+")
         copy = Leaf { c = self.c }
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
 program: function () nothing {
     {
         b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "box_moves_copyable" {

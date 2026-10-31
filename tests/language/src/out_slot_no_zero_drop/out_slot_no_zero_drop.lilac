@@ -1,6 +1,7 @@
 // The first assignment of an out slot fills it: nothing was there, so
 // nothing drops. A zero drop would print `z`.
 
+using Standard
 using Transcript
 
 Tag: structure {
@@ -8,9 +9,9 @@ Tag: structure {
 
     @on_drop: function (self) nothing {
         if self.c == 0x0 {
-            print_char('z')
+            print("z")
         } else {
-            print_char(self.c)
+            print($"{self.c as Scalar}")
         }
     }
 }
@@ -22,9 +23,9 @@ make: function () value: Tag {
 program: function () nothing {
     {
         t: Tag = make()
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "out_slot_no_zero_drop" {

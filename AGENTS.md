@@ -325,6 +325,42 @@
   `T` is copyable), so `create`, `Box` and `List.add` need no `@move`
   (`tests/language/src/box_moves_copyable`); one read again later, or
   borrowed, copies unless it says `@move(value)`.
+- `Standard.Io` (`docs/io-implementation.md`): `Writer` and `Reader` are
+  handles like `Allocator`: a target address and a `ref` to a static
+  table (`WriterTable[T]`: `write`, `flush`; `ReaderTable[T]`: `read`),
+  erased, from the type's `WRITER_TABLE`/`READER_TABLE` (`from[T]`) or
+  any table (`over[T]`). Table functions return `Result`s, since a
+  function value cannot fail (`E057`); the handle's methods fail
+  instead, retry `.Interrupted`, and `write_bytes` makes a zero write
+  `.WriteZero`. `Writer.write(Format)` formats through the private
+  `WriterFormatter` (the plan's `Catch`), a formatter sink that keeps
+  the first error and writes nothing after it: a `@format` hook cannot
+  fail, so the format runs out, then `write` fails. It points at itself,
+  so it lives on `write`'s stack, never returned. `BufferedWriter`
+  (8 KiB, line mode for a terminal) never flushes on drop. Standard
+  output (`standard.lilac`) is one `BufferedWriter` over a `File`, set
+  up on first use inside a `Sync.ReentrantMutex[Optional[…]]` global,
+  reentrant so a `@format` hook may print and the exit flush may run
+  inside a print that panicked; `print`/`print_line` flush per call,
+  and `flush_standard` (`try_lock`: skipped while another thread holds
+  it) runs from `Standard.Runtime`'s `@exit` and `Process.exit`.
+  Standard error is unbuffered. `File` is an `Os.Handle` and `owned`
+  (`open`/`create`/`open_with` own theirs, closed on drop; the standard
+  streams do not); written to a Windows console it converts UTF-8 to
+  UTF-16 (`write_to_console`, bad sequences U+FFFD). Standard input
+  (`input.lilac`) is a `Sync.Mutex`'d buffer that flushes standard
+  output before each read; on a Windows console it reads `ReadConsoleW`
+  and converts UTF-16 to UTF-8 (`InputSource`: a high surrogate ending
+  one read waits for the next, a lone one is U+FFFD, Ctrl+Z at a line
+  start ends the input). `BufferedReader.read_line` strips `\n`/`\r\n`
+  and validates the line whole (a long line gathers in a scratch list
+  first, so no scalar is split): `.InvalidData` leaves the string
+  unchanged, `read_line_lossy` repairs, and the end of input fails with
+  `.None`; `Io.read_line` is the lossy one. Tests: `tests/standard/src/Io`
+  (writers, files, `reading`), and run tests for real streams, which
+  feed standard input with `// stdin:` (a line, newline added) or
+  `// stdin-raw:` (exact bytes, with `\n`, `\r`, `\t`, `\\`, `\xHH`
+  escapes); with neither it is empty (`crates/lilac-cli/tests/run.rs`).
 - `Standard.Sync` locks (`docs/mutex-plan.md`): `RawMutex` is the
   futex mutex over one zeroed `@bit32` (unlocked, locked, contended:
   Drepper's three states, after Rust's), plus an `owner` thread id

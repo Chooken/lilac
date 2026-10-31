@@ -1,0 +1,275 @@
+using Standard
+using Standard.Testing
+using Standard.Io
+using Standard.Collections
+
+// Every line `reader` gives through a `BufferedReader`, each followed by
+// `|`, with `!|` for a line that is not UTF-8.
+lines: function (reader: Reader) text: String {
+    text = $""
+    buffered: BufferedReader = BufferedReader.over(reader)
+    loop {
+        line: String = $""
+        buffered.read_line(ref line) else -> line_error: Optional[Error] {
+            if line_error.get() -> error: Error {
+                if error == .InvalidData {
+                    text.add("!|")
+                    continue
+                }
+                expect_with(false, $"read failed: {error}")
+            }
+            break
+        }
+        text.add($"{line}|")
+    }
+}
+
+// The lines of `bytes`, as `lines` shows them.
+lines_of: function (bytes: Slice[Byte]) text: String {
+    input: ByteReader = ByteReader.over(bytes)
+    text = lines(input.reader())
+}
+
+// The byte count of each line `bytes` holds, each followed by `|`.
+line_counts: function (bytes: Slice[Byte]) text: String {
+    text = $""
+    input: ByteReader = ByteReader.over(bytes)
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    loop {
+        line: String = $""
+        buffered.read_line(ref line) else -> line_error: Optional[Error] {
+            if line_error.get() -> error: Error {
+                expect_with(false, $"read failed: {error}")
+            }
+            break
+        }
+        text.add($"{line.get_count()}|")
+    }
+}
+
+// `count` copies of `byte` added to `list`.
+add_repeated: function (list: ref List[Byte], byte: Byte, count: Int) nothing {
+    index: Int = 0
+    loop if index < count {
+        list.add(byte)
+        index += 1
+    }
+}
+
+// A reader that hands out one byte per read.
+Dribble: structure {
+    input: ByteReader
+}
+
+dribble_read: function (dribble: ref Dribble, into: Slice[Byte]) result: Result[Int, Error] {
+    result = dribble.input.read(into.slice(Range.of(0, Int.min(1, into.get_count()))))
+}
+
+dribble_table: ReaderTable[Dribble] = ReaderTable {
+    read = ref dribble_read
+}
+
+// A reader whose first read is cut short by a signal.
+Interrupted: structure {
+    input: ByteReader
+    interrupted: Bool
+}
+
+interrupted_read: function (source: ref Interrupted, into: Slice[Byte]) result: Result[Int, Error] {
+    if not source.interrupted {
+        source.interrupted = true
+        result = .Error(.Interrupted)
+        return
+    }
+    result = source.input.read(into)
+}
+
+interrupted_table: ReaderTable[Interrupted] = ReaderTable {
+    read = ref interrupted_read
+}
+
+test "read_line splits on newlines" {
+    expect_text($"{lines_of("a\nb\n")}", "a|b|")
+}
+
+test "read_line reads a last line without a newline" {
+    expect_text($"{lines_of("a\nb")}", "a|b|")
+}
+
+test "read_line drops a carriage return before the newline" {
+    expect_text($"{lines_of("a\x0D\nb\x0D\n")}", "a|b|")
+}
+
+test "read_line keeps a carriage return inside a line" {
+    expect_text($"{lines_of("a\x0Db\n")}", "a\x0Db|")
+}
+
+test "read_line gives no lines for empty input" {
+    expect_text($"{lines_of("")}", "")
+}
+
+test "read_line gives empty lines for bare newlines" {
+    expect_text($"{lines_of("\n")}", "|")
+    expect_text($"{lines_of("\n\n")}", "||")
+}
+
+test "read_line reads a line that spans refills" {
+    bytes: List[Byte] = List[Byte].new()
+    add_repeated(ref bytes, 0x78, 20000)
+    bytes.add(0x0A)
+    bytes.add(0x79)
+    expect_text($"{line_counts(bytes.get_slice())}", "20000|1|")
+}
+
+test "read_line reads a line exactly as long as the buffer" {
+    bytes: List[Byte] = List[Byte].new()
+    add_repeated(ref bytes, 0x78, 8192)
+    bytes.add(0x0A)
+    bytes.add(0x7A)
+    bytes.add(0x0A)
+    expect_text($"{line_counts(bytes.get_slice())}", "8192|1|")
+}
+
+test "read_line drops a carriage return split from its newline by a refill" {
+    bytes: List[Byte] = List[Byte].new()
+    add_repeated(ref bytes, 0x78, 8191)
+    bytes.add(0x0D)
+    bytes.add(0x0A)
+    bytes.add(0x7A)
+    expect_text($"{line_counts(bytes.get_slice())}", "8191|1|")
+}
+
+test "read_line keeps a scalar split by a refill whole" {
+    bytes: List[Byte] = List[Byte].new()
+    add_repeated(ref bytes, 0x78, 8191)
+    bytes.add(0xC3)
+    bytes.add(0xA9)
+    bytes.add(0x0A)
+    // 8,191 bytes, the two of `é` and the `|`: not `!|`.
+    text: String = lines_of(bytes.get_slice())
+    expect(text.get_count() == 8194 as Int)
+}
+
+test "read_line fails on a line that is not UTF-8 and goes on with the next" {
+    expect_text($"{lines_of("a\n\xFF\nc\n")}", "a|!|c|")
+}
+
+test "read_line leaves the string unchanged on a line that is not UTF-8" {
+    input: ByteReader = ByteReader.over("b\xFF\n")
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    line: String = $"a"
+    buffered.read_line(ref line) else -> line_error: Optional[Error] {
+        expect_text($"{line_error}", "Some(invalid UTF-8)")
+        expect_text($"{line}", "a")
+        return
+    }
+    expect_with(false, $"a line that is not UTF-8 was read")
+}
+
+test "read_line appends to the string" {
+    input: ByteReader = ByteReader.over("b\n")
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    line: String = $"a"
+    buffered.read_line(ref line) else {
+        expect_with(false, $"no line was read")
+        return
+    }
+    expect_text($"{line}", "ab")
+}
+
+test "read_line_lossy repairs a line that is not UTF-8" {
+    input: ByteReader = ByteReader.over("a\xFFb\nc")
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    text: String = $""
+    loop {
+        line: String = $""
+        buffered.read_line_lossy(ref line) else {
+            break
+        }
+        text.add($"{line}|")
+    }
+    expect_text($"{text}", "a\xEF\xBF\xBDb|c|")
+}
+
+test "read_line reads from a reader that gives one byte at a time" {
+    dribble: Dribble = Dribble { input = ByteReader.over("ab\x0D\ncd\n\xC3\xA9") }
+    expect_text($"{lines(Reader.over[Dribble](ref dribble, ref dribble_table))}", "ab|cd|\xC3\xA9|")
+}
+
+test "a BufferedReader's reader hands out what read_line left buffered" {
+    input: ByteReader = ByteReader.over("first\nrest")
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    line: String = $""
+    buffered.read_line(ref line) else {
+        expect_with(false, $"no line was read")
+        return
+    }
+    rest: String = $""
+    buffered.reader().read_all_text(ref rest) else -> error: Error {
+        expect_with(false, $"read failed: {error}")
+        return
+    }
+    expect_text($"{line}/{rest}", "first/rest")
+}
+
+test "a BufferedReader reads a large request straight through" {
+    bytes: List[Byte] = List[Byte].new()
+    add_repeated(ref bytes, 0x61, 10000)
+    input: ByteReader = ByteReader.over(bytes.get_slice())
+    buffered: BufferedReader = BufferedReader.over(input.reader())
+    into: List[Byte] = List[Byte].new()
+    add_repeated(ref into, 0x0, 9000)
+    count: Int = buffered.reader().read(into.get_slice()) else -> error: Error {
+        expect_with(false, $"read failed: {error}")
+        return
+    }
+    expect(count == 9000 as Int)
+}
+
+test "Reader.read retries a read a signal cut short" {
+    source: Interrupted = Interrupted { input = ByteReader.over("ok"), interrupted = false }
+    text: String = $""
+    Reader.over[Interrupted](ref source, ref interrupted_table).read_all_text(ref text) else -> error: Error {
+        expect_with(false, $"read failed: {error}")
+        return
+    }
+    expect_text($"{text}", "ok")
+}
+
+test "read_all appends every byte" {
+    input: ByteReader = ByteReader.over("a\x00\xFFb")
+    bytes: List[Byte] = List[Byte].new()
+    bytes.add(0x7A)
+    input.reader().read_all(ref bytes) else -> error: Error {
+        expect_with(false, $"read failed: {error}")
+        return
+    }
+    expect(Standard.Memory.equal_bytes(bytes.get_slice(), "za\x00\xFFb"))
+}
+
+test "read_all_text fails on bytes that are not UTF-8 and leaves the string unchanged" {
+    input: ByteReader = ByteReader.over("a\xFF")
+    text: String = $"x"
+    input.reader().read_all_text(ref text) else -> error: Error {
+        expect_text($"{error}", "invalid UTF-8")
+        expect_text($"{text}", "x")
+        return
+    }
+    expect_with(false, $"bytes that are not UTF-8 were read as text")
+}
+
+test "a file reads back through its reader" {
+    write_file("reading_file.txt", "one\ntwo\n") else -> error: Error {
+        expect_with(false, $"write failed: {error}")
+        return
+    }
+    file: File = File.open("reading_file.txt") else -> error: Error {
+        expect_with(false, $"open failed: {error}")
+        return
+    }
+    text: String = lines(file.reader())
+    expect_text($"{text}", "one|two|")
+    remove_file("reading_file.txt") else {
+        return
+    }
+}

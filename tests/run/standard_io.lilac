@@ -14,7 +14,7 @@ Noisy: structure {
     // The box drops its value once, at the end of the block (`Box.new`
     // moves it onto the heap, so nothing drops early).
     @on_drop: function (self) nothing {
-        print_char(self.char)
+        print($"{self.char as Scalar}")
     }
 }
 

@@ -12,7 +12,7 @@ Leaf: structure {
     c: @bit32
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -29,7 +29,7 @@ Guarded: either {
     @on_drop: function (self) nothing {
         match self {
             .Held -> c: @bit32 {
-                print_char(@i_sub_32(c, 0x20))
+                print($"{@i_sub_32(c, 0x20) as Scalar}")
             }
         }
     }
@@ -39,9 +39,9 @@ global_leaf: Optional[Leaf] = .None
 
 show: function (optional: Optional[@bit32]) nothing {
     match optional {
-        .Some -> c: @bit32 => print_char(c)
+        .Some -> c: @bit32 => print($"{c as Scalar}")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 bump: function (optional: ref Optional[@bit32]) nothing {
@@ -72,9 +72,9 @@ program: function () nothing {
         leaf.c = 'd'
     }
     if global_leaf.get_ref() -> leaf: ref Leaf {
-        print_char(leaf.c)
+        print($"{leaf.c as Scalar}")
     }
-    print_char(0xA)
+    print("\n")
 
     // A field.
     holder: Holder = Holder { slot = .Some('a') }
@@ -98,16 +98,16 @@ program: function () nothing {
         match leaf {
             .Some -> v: ref Leaf {
                 v = Leaf { c = 'y' }
-                print_char('|')
+                print("|")
                 v = ref other
                 v.c = 'p'
             }
         }
         // The optional drops its `y` once, then `other` its `p`.
-        print_char(other.c)
-        print_char('|')
+        print($"{other.c as Scalar}")
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 
     // `Optional[ref X]`: the stored reference.
     target: @bit32 = 'q'
@@ -115,8 +115,8 @@ program: function () nothing {
     if pointer.get_ref() -> c: ref @bit32 {
         c = 'r'
     }
-    print_char(target)
-    print_char(0xA)
+    print($"{target as Scalar}")
+    print("\n")
 
     // Nested: a reference to an inner optional, then into it.
     nested: Optional[Optional[@bit32]] = .Some(.Some('l'))
@@ -145,14 +145,14 @@ program: function () nothing {
             }
         }
         match guarded {
-            .Held -> c: @bit32 => print_char(c)
+            .Held -> c: @bit32 => print($"{c as Scalar}")
         }
-        print_char('|')
+        print("|")
         match guarded {
-            .Held -> c: ref @bit32 => print_char(c)
+            .Held -> c: ref @bit32 => print($"{@read(c) as Scalar}")
         }
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "ref_capture" {

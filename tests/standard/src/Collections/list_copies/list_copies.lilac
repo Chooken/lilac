@@ -12,12 +12,12 @@ Leaf: structure {
     c: @bit32
 
     @on_copy: function (self) copy: Leaf {
-        print_char('+')
+        print("+")
         copy = Leaf { c = self.c }
     }
 
     @on_drop: function (self) nothing {
-        print_char(self.c)
+        print($"{self.c as Scalar}")
     }
 }
 
@@ -35,24 +35,24 @@ program: function () nothing {
         leaves.add(Leaf { c = 'a' })
         leaves.add(Leaf { c = 'b' })
         copied: List[Leaf] = leaves
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 
     {
         moved: List[Leaf] = make('c')
         last: List[Leaf] = moved
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 
     {
         borrowed: List[Leaf] = make('d')
         count: Int = borrowed.get_count()
         copied: List[Leaf] = borrowed
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 
     empty: List[Leaf] = List[Leaf].new()
     empty_copy: List[Leaf] = empty

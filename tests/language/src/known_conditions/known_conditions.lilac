@@ -26,9 +26,9 @@ dead: function () result: @bit8 {
 
 say: function (answer: @bit8) nothing {
     if answer {
-        print_char('1')
+        print("1")
     } else {
-        print_char('0')
+        print("0")
     }
 }
 
@@ -74,9 +74,9 @@ program: function () nothing {
     } else {
         say(calls == 0xa)
     }
-    print_char(' ')
+    print(" ")
     say(calls == 0xa)
-    print_char('\n')
+    print("\n")
 }
 
 test "known_conditions" {

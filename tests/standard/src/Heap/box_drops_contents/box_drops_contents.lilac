@@ -10,9 +10,9 @@ Leaf: structure {
 
     @on_drop: function (self) nothing {
         if self.c == 0x0 {
-            print_char('z')
+            print("z")
         } else {
-            print_char(self.c)
+            print($"{self.c as Scalar}")
         }
     }
 }
@@ -20,9 +20,9 @@ Leaf: structure {
 program: function () nothing {
     {
         b: Box[Leaf] = Box[Leaf].new(Leaf { c = 'x' })
-        print_char('|')
+        print("|")
     }
-    print_char(0xA)
+    print("\n")
 }
 
 test "box_drops_contents" {

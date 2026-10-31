@@ -1,0 +1,20 @@
+// stdin: first
+// stdin: second line
+// stdin: é
+// expect-stdout: 1: first
+// expect-stdout: 2: second line
+// expect-stdout: 3: é
+// expect-stdout: 3 lines
+// `Io.read_line` reads standard input a line at a time until it ends.
+
+using Standard
+using Standard.Io
+
+main: function () nothing {
+    count: Int = 0
+    loop if read_line() -> line: String {
+        count += 1
+        print_line($"{count}: {line}")
+    }
+    print_line($"{count} lines")
+}
