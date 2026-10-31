@@ -3995,3 +3995,34 @@ fn a_scoped_value_lives_in_locals_parameters_outs_and_scoped_fields() {
     );
     assert!(!diags.has_errors(), "{diags:?}");
 }
+
+const SCOPED_PAIR: &str = "Pair: scoped structure {\n    first: View\n\n    set: function (self, view: View) nothing {\n        self.first = view\n    }\n}\n\nagain: function (view: View) out: View {\n    out = view\n}\n\n";
+
+#[test]
+fn a_scoped_value_that_outlives_what_it_borrows_is_e080() {
+    for (what, body) in [
+        ("returns a local", "leak: function () view: View {\n    d: Data = Data { value = 0x1 }\n    view = make(ref d)\n}\n"),
+        ("returns a by-value parameter", "leak: function (d: Data) view: View {\n    view = make(ref d)\n}\n"),
+        ("returns through another view", "leak: function () view: View {\n    d: Data = Data { value = 0x1 }\n    v: View = make(ref d)\n    view = again(v)\n}\n"),
+        ("stores through a ref", "put: function (pair: ref Pair) nothing {\n    d: Data = Data { value = 0x1 }\n    pair.first = make(ref d)\n}\n"),
+        ("inner scope", "f: function () nothing {\n    a: Data = Data { value = 0x1 }\n    v: View = make(ref a)\n    loop {\n        b: Data = Data { value = 0x2 }\n        v = make(ref b)\n        break\n    }\n}\n"),
+        ("declared later", "f: function () nothing {\n    a: Data = Data { value = 0x1 }\n    v: View = make(ref a)\n    b: Data = Data { value = 0x2 }\n    v = make(ref b)\n}\n"),
+        ("stored by a call", "f: function () nothing {\n    a: Data = Data { value = 0x1 }\n    p: Pair = Pair { first = make(ref a) }\n    loop {\n        b: Data = Data { value = 0x2 }\n        p.set(make(ref b))\n        break\n    }\n}\n"),
+        ("stores a parameter through self", "Holder: scoped structure {\n    view: View\n\n    keep: function (self, data: Data) nothing {\n        self.view = make(ref data)\n    }\n}\n"),
+        ("used after a move", "f: function () nothing {\n    a: Data = Data { value = 0x1 }\n    v: View = make(ref a)\n    moved: Data = @move(a)\n    n: @bit32 = v.data.value\n}\n"),
+    ] {
+        let diags = check_scoped(&format!("{SCOPED_PAIR}{body}\nmain: function () nothing {{}}\n"));
+        assert!(has_code(&diags, "E080"), "{what}: {diags:?}");
+    }
+}
+
+#[test]
+fn a_scoped_value_may_borrow_what_outlives_it() {
+    let diags = check_scoped(&format!(
+        "{SCOPED_PAIR}\
+         pass: function (d: ref Data) view: View {{\n    view = make(d)\n}}\n\n\
+         chain: function (view: View) out: View {{\n    out = again(view)\n}}\n\n\
+         main: function () nothing {{\n    a: Data = Data {{ value = 0x1 }}\n    v: View = make(ref a)\n    loop {{\n        b: Data = Data {{ value = 0x2 }}\n        w: View = make(ref b)\n        w = v\n        break\n    }}\n    p: Pair = Pair {{ first = v }}\n    p.set(make(ref a))\n    n: @bit32 = v.data.value\n    moved: Data = @move(a)\n}}\n"
+    ));
+    assert!(!diags.has_errors(), "{diags:?}");
+}

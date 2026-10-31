@@ -1197,12 +1197,28 @@ format, it stays in the frames that can see what it borrows (`E072`):
 - `scoped` marks a declaration only before `structure`; it is an ordinary
   name everywhere else.
 
+A scoped value also never outlives what it borrows (`E080`). It borrows
+the function's own variables it may point at: `ref x` borrows `x`, and a
+call returning a scoped value borrows what its `ref` and scoped arguments
+borrow (`list.view()` borrows `list`). A `ref` parameter or `ref`
+variable borrows nothing the function owns. A scoped value that borrows
+a variable cannot be set into an out or stored through a `ref` (`self`
+included), a scoped variable cannot take a value borrowing a variable
+that drops before it (declared in an inner block, or later in the same
+one), and it cannot be used after a variable it borrows moved by
+`@move`. A call that takes a `ref` to a scoped variable may store its
+other arguments in it, so the variable borrows what they borrow.
+
 ```lilac
 ListView: scoped structure {
     private {
         list: ref List[Int]
         front: Int
     }
+}
+
+first_view: function (list: ref List[Int]) view: ListView {
+    view = ListView { list = list, front = 0 }    // borrows the caller's list
 }
 ```
 

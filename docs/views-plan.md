@@ -1,6 +1,6 @@
 # Views Plan
 
-> Status: phase 1 implemented, 2026-10-31; phases 2-4 proposed.
+> Status: phases 1 and 2 implemented, 2026-10-31; phases 3-4 proposed.
 >
 > Goal: a beginner never holds a `ref` without writing `ref`. Today
 > `Slice[T]` and the planned string views hold one inside them, so
@@ -106,13 +106,20 @@ may hold.
   deeper scope than the local is an error: the source drops first.
   (Locals drop in reverse order, so a view declared after its container
   in one scope is always fine.)
-- **`@move(x)`** of a source while a scoped value from it is still used
-  later (`liveness`) is an error. Implicit moves are already `E079`, since
-  taking the view borrowed `x`.
+- **`@move(x)`** of a source turns each scoped value from it stale, and a
+  later use of a stale one is an error (a forward walk, so a view that is
+  never used again is fine; setting it again clears it). Implicit moves
+  are already `E079`, since taking the view borrowed `x`.
+- **A call that takes `ref v` of a scoped local** may store its other
+  arguments in `v` (`pair.set(view)`), so `v` takes their sources (and
+  the scope rule applies to them).
 - New code `E080` ("a scoped value outlives what it borrows"), through
   `emit_requirement` so a generic instance folds it into `E042`.
 - `Flow` carries the sources per scoped local, merged as a union; the
   loop bound grows by the number of locals per scoped local.
+- Implemented 2026-10-31 (`places.rs`: `Pass::sources`, `store_sources`,
+  `hold`, `call_stores`, `invalidate`, `check_stale`); tests beside the
+  phase 1 ones and `tests/run/FAILS_scoped_returns_local.lilac`.
 
 ## Phase 3: `UnsafeSlice` and `MemoryView`
 

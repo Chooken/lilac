@@ -20,6 +20,10 @@
 //!   of its scope, on the paths that took it ([`Flow::borrowed`]); a
 //!   borrowed local moves only by `@move`, and an implicit move of one is
 //!   `E079` (`docs/moves-plan.md`).
+//! - A scoped value (a view) tracks the owned locals it borrows
+//!   ([`Flow::sources`]), and may not outlive them: returned, stored
+//!   through a `ref`, set into a scoped local that outlives one, or used
+//!   after one moved is `E080` (`docs/views-plan.md`, phase 2).
 //! - A copyable local's last by-value use moves it instead of copying
 //!   ([`Pass::last_use`], over [`crate::liveness::last_uses`]) when no
 //!   `ref` to it was taken.
@@ -179,13 +183,25 @@ struct Flow {
     /// where the first was: never moved but by `@move` (`E079`). A `ref`
     /// has no lifetime, so a local stays borrowed until its scope ends.
     borrowed: HashMap<LocalId, Span>,
+    /// What each scoped local may borrow ([`Pass::sources`]): the owned
+    /// locals whose address it may hold, each with where it was taken.
+    sources: HashMap<LocalId, Sources>,
+    /// The scoped locals one of whose sources `@move` emptied: the source
+    /// and where it moved. A use of one is `E080`.
+    stale: HashMap<LocalId, (LocalId, Span)>,
 }
+
+/// The owned locals a value may hold the address of, each with where the
+/// first `ref` to it was taken.
+type Sources = HashMap<LocalId, Span>;
 
 impl Flow {
     /// Forgets `local`, whose scope ended.
     fn forget(&mut self, local: LocalId) {
         self.owns.remove(&local);
         self.borrowed.remove(&local);
+        self.sources.remove(&local);
+        self.stale.remove(&local);
     }
 }
 
@@ -451,6 +467,7 @@ impl Pass<'_, '_> {
             HirStmt::Let { local, mut value } => {
                 self.expr(&mut value, true);
                 self.init(local, Own::Full);
+                self.bind_sources(local, &value);
                 out.push(HirStmt::Let { local, value });
             }
             HirStmt::MultiLet { locals, mut call } => {
@@ -465,6 +482,7 @@ impl Pass<'_, '_> {
                         _ => Own::Full,
                     };
                     self.init(*local, own);
+                    self.bind_sources(*local, &call);
                 }
                 out.push(HirStmt::MultiLet { locals, call });
             }
@@ -474,6 +492,7 @@ impl Pass<'_, '_> {
                 ..
             } => {
                 self.expr(&mut value, true);
+                self.store_sources(&place, &value);
                 let old = self.assign(&mut place);
                 out.push(HirStmt::Assign { place, value, old });
             }
@@ -726,7 +745,11 @@ impl Pass<'_, '_> {
         let mut bound = 1usize;
         for index in 0..self.locals.len() {
             let ty = self.locals[index].ty;
-            let rises = height(self.c, &mut self.heights, ty).saturating_add(2);
+            let mut rises = height(self.c, &mut self.heights, ty).saturating_add(2);
+            if self.tracks(LocalId(u32::try_from(index).unwrap_or(u32::MAX))) {
+                // Its sources grow a local at a time, and it turns stale.
+                rises = rises.saturating_add(self.locals.len()).saturating_add(1);
+            }
             bound = bound.saturating_add(rises);
         }
         self.bound = Some(bound);
@@ -983,9 +1006,10 @@ impl Pass<'_, '_> {
                 if let HirCallee::Value(callee) = callee {
                     self.expr(callee, true);
                 }
-                for arg in args {
+                for arg in args.iter_mut() {
                     self.expr(arg, true);
                 }
+                self.call_stores(args);
                 // A `@panic` or `@trap` value (`if c then @panic(m) else
                 // x`) ends its path like the statement does.
                 if matches!(
@@ -1095,6 +1119,297 @@ impl Pass<'_, '_> {
                 .as_ref()
                 .is_some_and(|state| state.borrowed.contains_key(&path.local))
             && (self.c.needs_copy(ty) || self.c.needs_drop(ty))
+    }
+
+    // ---- scoped values -------------------------------------------------
+
+    /// Whether `local` holds a scoped value by value, so its sources are
+    /// tracked.
+    fn tracks(&self, local: LocalId) -> bool {
+        let ty = self.local_ty(local);
+        !ty.is_ref && self.c.is_scoped(ty.id)
+    }
+
+    /// The owned locals `expr`'s value may hold the address of: a `ref x`
+    /// of an owned local takes `x`, a scoped local gives its own sources,
+    /// and a call returning a scoped value or a `ref` gives those of its
+    /// `ref` and scoped arguments. A `ref` local or parameter gives none.
+    fn sources(&self, expr: &HirExpr) -> Sources {
+        let mut found = Sources::new();
+        self.collect_sources(expr, &mut found);
+        found
+    }
+
+    fn collect_sources(&self, expr: &HirExpr, found: &mut Sources) {
+        if let Some(path) = HirPath::of(expr) {
+            self.held_sources(path.local, found);
+            return;
+        }
+        match &expr.kind {
+            HirExprKind::RefOf(inner) => {
+                if let Some(path) = HirPath::of(inner) {
+                    if !self.local_ty(path.local).is_ref {
+                        found.entry(path.local).or_insert(expr.span);
+                    }
+                    self.held_sources(path.local, found);
+                }
+            }
+            HirExprKind::Move(inner) | HirExprKind::Retype(inner) => {
+                self.collect_sources(inner, found);
+            }
+            HirExprKind::Struct(values) => {
+                for value in values {
+                    self.collect_sources(value, found);
+                }
+            }
+            HirExprKind::Call { args, .. } if self.borrows(expr.ty) => {
+                for arg in args.iter().filter(|arg| self.borrows(arg.ty)) {
+                    self.collect_sources(arg, found);
+                }
+            }
+            HirExprKind::If { then, els, .. } => {
+                self.collect_sources(then, found);
+                self.collect_sources(els, found);
+            }
+            HirExprKind::Match { arms, els, .. } => {
+                for arm in arms {
+                    self.collect_sources(&arm.value, found);
+                }
+                self.collect_sources(els, found);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a value of `ty` may hold an address: a `ref`, or a scoped
+    /// value.
+    fn borrows(&self, ty: TypeRef) -> bool {
+        ty.is_ref || self.c.is_scoped(ty.id)
+    }
+
+    /// Adds the sources the scoped local `local` holds to `found`.
+    fn held_sources(&self, local: LocalId, found: &mut Sources) {
+        let held = self
+            .state
+            .as_ref()
+            .and_then(|state| state.sources.get(&local));
+        for (source, at) in held.into_iter().flatten() {
+            found.entry(*source).or_insert(*at);
+        }
+    }
+
+    /// A new local `local`, set from `value`: a scoped one holds its
+    /// sources.
+    fn bind_sources(&mut self, local: LocalId, value: &HirExpr) {
+        if !self.tracks(local) {
+            return;
+        }
+        let found = self.sources(value);
+        if let Some(state) = &mut self.state {
+            if found.is_empty() {
+                state.sources.remove(&local);
+            } else {
+                state.sources.insert(local, found);
+            }
+        }
+    }
+
+    /// `place = value`, for a value that may borrow (a scoped value, or a
+    /// `ref` into a scoped holder): `E080` when what it borrows dies
+    /// first, else the place's local takes its sources.
+    fn store_sources(&mut self, place: &HirExpr, value: &HirExpr) {
+        let borrows = if value.ty.is_ref {
+            self.scoped_holder(place)
+        } else {
+            self.c.is_scoped(value.ty.id)
+        };
+        if !borrows {
+            return;
+        }
+        let found = self.sources(value);
+        let Some(path) = HirPath::of(place) else {
+            if let Some((source, at)) = first_source(&found) {
+                let name = self.source_name(source);
+                self.report(
+                    Diagnostic::error(
+                        codes::E080,
+                        format!(
+                            "a value that borrows `{name}` cannot be stored through a reference"
+                        ),
+                    )
+                    .label(value.span, true, format!("borrows `{name}`"))
+                    .label(at, false, format!("`{name}` is borrowed here"))
+                    .label(place.span, false, "stored through a `ref` here")
+                    .note(format!(
+                        "what the `ref` points at may outlive `{name}`, which drops when its scope ends"
+                    )),
+                );
+            }
+            return;
+        };
+        if self.successes.contains(&path.local) || self.failures.contains(&path.local) {
+            if let Some((source, at)) = first_source(&found) {
+                let name = self.source_name(source);
+                let out = self.out_name(path.local);
+                self.report(
+                    Diagnostic::error(
+                        codes::E080,
+                        format!(
+                            "{out} cannot borrow `{name}`, which drops when the function returns"
+                        ),
+                    )
+                    .label(value.span, true, format!("borrows `{name}`"))
+                    .label(at, false, format!("`{name}` is borrowed here"))
+                    .help(
+                        "borrow from a `ref` parameter instead: what it points at outlives the call",
+                    ),
+                );
+            }
+            return;
+        }
+        if self.tracks(path.local) {
+            self.hold(path.local, found, value.span, path.fields.is_empty());
+        }
+    }
+
+    /// The scoped local `holder` takes `found` from a value at `span`
+    /// (all its sources when `whole`, else beside its own): `E080` when
+    /// one drops before it.
+    fn hold(&mut self, holder: LocalId, found: Sources, span: Span, whole: bool) {
+        let mut sorted: Vec<(LocalId, Span)> =
+            found.iter().map(|(source, at)| (*source, *at)).collect();
+        sorted.sort_by_key(|(source, at)| (at.lo, source.0));
+        if let Some((source, at)) = sorted
+            .iter()
+            .copied()
+            .find(|(source, _)| self.drops_before(*source, holder))
+        {
+            let name = self.source_name(source);
+            let shown = self.source_name(holder);
+            let declared = self.locals[holder.0 as usize].span;
+            self.report(
+                Diagnostic::error(
+                    codes::E080,
+                    format!("`{shown}` would outlive `{name}`, which it borrows"),
+                )
+                .label(span, true, format!("borrows `{name}`"))
+                .label(at, false, format!("`{name}` is borrowed here"))
+                .label(declared, false, format!("`{shown}` is declared here"))
+                .note(format!("`{name}` drops before `{shown}`"))
+                .help(format!(
+                    "declare `{shown}` after `{name}`, in the same block or an inner one"
+                )),
+            );
+        }
+        if let Some(state) = &mut self.state {
+            if whole {
+                state.stale.remove(&holder);
+                if found.is_empty() {
+                    state.sources.remove(&holder);
+                } else {
+                    state.sources.insert(holder, found);
+                }
+            } else if !found.is_empty() {
+                let mine = state.sources.entry(holder).or_default();
+                for (source, at) in found {
+                    mine.entry(source).or_insert(at);
+                }
+            }
+        }
+    }
+
+    /// A call may store what its arguments borrow into a scoped local it
+    /// gets a `ref` to (`pair.set(view)`), so that local takes the other
+    /// arguments' sources.
+    fn call_stores(&mut self, args: &[HirExpr]) {
+        for (index, arg) in args.iter().enumerate() {
+            let HirExprKind::RefOf(inner) = &arg.kind else {
+                continue;
+            };
+            let Some(path) = HirPath::of(inner) else {
+                continue;
+            };
+            if !self.tracks(path.local) {
+                continue;
+            }
+            let mut found = Sources::new();
+            for (other, value) in args.iter().enumerate() {
+                if other != index && self.borrows(value.ty) {
+                    self.collect_sources(value, &mut found);
+                }
+            }
+            found.remove(&path.local);
+            if !found.is_empty() {
+                self.hold(path.local, found, arg.span, false);
+            }
+        }
+    }
+
+    /// Whether `place` is a field of a scoped value.
+    fn scoped_holder(&self, place: &HirExpr) -> bool {
+        matches!(&place.kind, HirExprKind::Field { base, .. } if self.c.is_scoped(base.ty.id))
+    }
+
+    /// Whether the owned local `source` drops before `holder`: it is
+    /// declared in an inner scope, or later in the same one.
+    fn drops_before(&self, source: LocalId, holder: LocalId) -> bool {
+        let position = |local: LocalId| {
+            self.frames.iter().enumerate().find_map(|(depth, frame)| {
+                frame
+                    .iter()
+                    .position(|declared| *declared == local)
+                    .map(|index| (depth, index))
+            })
+        };
+        match (position(source), position(holder)) {
+            (Some(source), Some(holder)) => source > holder,
+            _ => false,
+        }
+    }
+
+    /// `local` moved out at `span`: each scoped local borrowing it turns
+    /// stale.
+    fn invalidate(&mut self, local: LocalId, span: Span) {
+        let Some(state) = &mut self.state else {
+            return;
+        };
+        let holders: Vec<LocalId> = state
+            .sources
+            .iter()
+            .filter(|(_, sources)| sources.contains_key(&local))
+            .map(|(holder, _)| *holder)
+            .collect();
+        for holder in holders {
+            state.stale.entry(holder).or_insert((local, span));
+        }
+    }
+
+    /// `E080` when the scoped local `local`, used at `span`, borrows a
+    /// local that moved out. Reported once.
+    fn check_stale(&mut self, local: LocalId, span: Span) {
+        let Some((source, moved)) = self
+            .state
+            .as_mut()
+            .and_then(|state| state.stale.remove(&local))
+        else {
+            return;
+        };
+        let name = self.source_name(source);
+        let holder = self.source_name(local);
+        self.report(
+            Diagnostic::error(
+                codes::E080,
+                format!("`{holder}` is used after `{name}`, which it borrows, was moved"),
+            )
+            .label(span, true, format!("`{holder}` is used here"))
+            .label(moved, false, format!("`{name}` is moved here"))
+            .help(format!("finish with `{holder}` before moving `{name}`")),
+        );
+    }
+
+    /// How a diagnostic names a whole local.
+    fn source_name(&self, local: LocalId) -> String {
+        self.path_name(&HirPath::local(local))
     }
 
     /// A value-match capture: full in its arm, owned by no scope.
@@ -1332,6 +1647,7 @@ impl Pass<'_, '_> {
             ty = self.c.field_types(ty)[*field as usize];
         }
         self.set(path, Own::Empty(Some(span)));
+        self.invalidate(path.local, span);
     }
 
     /// `E064` for moving out of `place`, which is not an owned path.
@@ -1400,6 +1716,7 @@ impl Pass<'_, '_> {
 
     /// Requires the owned place `path` to be full at a read (`E063`).
     fn require_full(&mut self, path: &HirPath, span: Span) {
+        self.check_stale(path.local, span);
         let Some(own) = self.own_at(path) else {
             return;
         };
@@ -1735,6 +2052,16 @@ fn merge_states(c: &impl FieldTypes, locals: &[HirLocal], a: State, b: State) ->
             for (id, at) in b.borrowed {
                 a.borrowed.entry(id).or_insert(at);
             }
+            // A source on either path is a source.
+            for (id, sources) in b.sources {
+                let mine = a.sources.entry(id).or_default();
+                for (source, at) in sources {
+                    mine.entry(source).or_insert(at);
+                }
+            }
+            for (id, moved) in b.stale {
+                a.stale.entry(id).or_insert(moved);
+            }
             Some(a)
         }
     }
@@ -1751,6 +2078,15 @@ fn same_states(a: &State, b: &State) -> bool {
                     .all(|(id, own)| b.owns.get(id).is_some_and(|other| own.same(other)))
                 && a.borrowed.len() == b.borrowed.len()
                 && a.borrowed.keys().all(|id| b.borrowed.contains_key(id))
+                && a.sources.len() == b.sources.len()
+                && a.sources.iter().all(|(id, sources)| {
+                    b.sources.get(id).is_some_and(|other| {
+                        sources.len() == other.len()
+                            && sources.keys().all(|source| other.contains_key(source))
+                    })
+                })
+                && a.stale.len() == b.stale.len()
+                && a.stale.keys().all(|id| b.stale.contains_key(id))
         }
         _ => false,
     }
@@ -1788,6 +2124,15 @@ fn origin(place: &HirExpr) -> Origin {
         HirExprKind::Field { base, .. } if !base.ty.is_ref => Origin::Temporary,
         _ => Origin::Ref,
     }
+}
+
+/// The source borrowed first (by where), so a report names the same one
+/// every time.
+fn first_source(sources: &Sources) -> Option<(LocalId, Span)> {
+    sources
+        .iter()
+        .map(|(source, at)| (*source, *at))
+        .min_by_key(|(source, at)| (at.lo, source.0))
 }
 
 /// Appends a `Drop` of `drops` at `span`, when there are any.

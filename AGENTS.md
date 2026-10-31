@@ -129,7 +129,17 @@
   and a scoped structure's fields hold one; an ordinary field, payload,
   array element, global or constant does not, and it is never stored
   through a `ref` or `@write` (a field assigned through `self` is fine).
-  A format may still not be an out. What an out may borrow is phase 2.
+  A format may still not be an out. The ownership pass tracks what each
+  by-value scoped local borrows (`Flow::sources`, `Pass::sources`: `ref x`
+  of an owned local, a scoped local's own sources, and a call returning
+  a scoped value or a `ref` takes its `ref` and scoped arguments'; a
+  `ref` local or parameter adds none), merged as a union. `E080`
+  (`store_sources`, `hold`, `check_stale`): one with a source set into
+  an out or stored through a `ref`, set into a scoped local its source
+  drops before (`drops_before`: an inner scope, or later in the same
+  one), or used after a source moved (`invalidate` in `move_path` marks
+  it `Flow::stale`). A call taking `ref v` of a scoped local gives `v`
+  its other arguments' sources (`call_stores`).
 - Atomics (`Intrinsic::Atomic(AtomicOp, Ordering, IntWidth)`,
   `Intrinsic::Fence`): the ordering is in the name and an invalid one is no
   intrinsic. They lower to the LIR instructions `AtomicLoad`/`AtomicStore`/

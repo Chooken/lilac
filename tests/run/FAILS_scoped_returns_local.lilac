@@ -1,0 +1,23 @@
+// expect-error: E080
+// A view of a local cannot be returned: the local drops first.
+
+Data: structure {
+    value: @bit32
+}
+
+View: scoped structure {
+    data: ref Data
+}
+
+look: function (data: ref Data) view: View {
+    view = View { data = data }
+}
+
+leak: function () view: View {
+    data: Data = Data { value = 0x1 }
+    view = look(ref data)
+}
+
+main: function () nothing {
+    view: View = leak()
+}
